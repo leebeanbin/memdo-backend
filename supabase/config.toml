@@ -20,9 +20,21 @@ enabled = true
 site_url = "http://127.0.0.1:3000"
 additional_redirect_urls = ["memdo://auth/callback"]
 
+[auth.external.google]
+enabled = true
+client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
+redirect_uri = "http://127.0.0.1:54321/auth/v1/callback"
+skip_nonce_check = false
+
+[auth.external.github]
+enabled = true
+client_id = "env(SUPABASE_AUTH_EXTERNAL_GITHUB_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_EXTERNAL_GITHUB_SECRET)"
+redirect_uri = "http://localhost:54321/auth/v1/callback"
+
 [functions.todos]
 verify_jwt = true
 
 [functions.calendars]
 verify_jwt = true
-
