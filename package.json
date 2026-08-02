@@ -1,0 +1,21 @@
+{
+  "name": "memdo-backend",
+  "private": true,
+  "scripts": {
+    "start": "supabase start",
+    "stop": "supabase stop",
+    "db:reset": "supabase db reset --local",
+    "functions:serve": "supabase functions serve",
+    "functions:deploy": "supabase functions deploy --use-api",
+    "check": "deno check supabase/functions/todos/index.ts supabase/functions/calendars/index.ts && deno fmt --check",
+    "test": "deno test supabase/functions/_shared/todo-contract.test.ts"
+  },
+  "devDependencies": {
+    "deno": "^2.9.4",
+    "supabase": "2.110.0"
+  },
+  "dependencies": {
+    "@supabase/server": "^1.4.1",
+    "zod": "^4.4.3"
+  }
+}
