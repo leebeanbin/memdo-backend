@@ -110,6 +110,19 @@
   실제 인증·CRUD 왕복은 대기한다. 성능 advisor의 미사용 index 정보는 데이터가 없는 신규 DB이므로
   유지한다.
 
+## 2026-08-03 — 원격 인증·일정 왕복 검증
+
+- 목표: 배포 상태를 넘어 iPhone 15에서 사용자 인증과 일정 영속화를 실제로 확인한다.
+- 변경 파일: Supabase Auth 설정, backend 상태 문서, iOS shared session/repository 연결.
+- 결정과 이유: 계정 없이 시작은 별도 임시 저장소를 만들지 않고 Supabase anonymous session과 같은
+  owner RLS 경로를 사용한다. 공개 파일럿 전에는 CAPTCHA를 추가한다.
+- 실행한 검증과 결과: anonymous signup 200, 사용자/profile/기본 캘린더 2개/preferences trigger 생성,
+  Todo POST 201·GET 200·PATCH 200, 앱 재실행 후 일정 복원, 수정 후 version 2를 확인했다. Edge
+  Function 로그와 Auth 로그에도 같은 성공 상태가 남았다.
+- 커밋 / 남은 blocker: Google·GitHub client ID/secret이 비어 있어 두 provider의 실제 로그인은
+  대기한다. Security Advisor의 anonymous-access 경고는 owner RLS를 유지한 의도된 개발 경로이며
+  CAPTCHA 없이 외부 파일럿을 열지 않는다. 비밀번호 로그인 출시 전 leaked-password protection을 켠다.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.

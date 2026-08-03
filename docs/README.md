@@ -40,11 +40,14 @@
 - 완료: 원격 DB migration 6개, RLS, 캘린더 조회, 일정 CRUD, 날짜별 조회, 목록·증분 cursor, 입력
   검증, Edge Function 6개 배포.
 - 구성 완료: Google·GitHub OAuth의 로컬 설정, iOS callback scheme, 앱 로그인·로그아웃 UI.
-- 외부 작업 필요: Supabase Dashboard의 익명 로그인·Google·GitHub provider·redirect allow-list
-  활성화.
+- 원격 검증 완료: 익명 로그인, `memdo://auth/callback`, iPhone 15 session 복원, 일정
+  create→relaunch→read와 update(version 2).
+- 외부 작업 필요: Google·GitHub OAuth client ID/secret 생성과 provider 활성화. 현재 `.env.local`의
+  네 값은 비어 있다.
 - 검증 제한: 이 Mac에는 Docker 호환 runtime이 없어 로컬 Supabase 전체 실행은 아직 못 했다.
-- 주의: 원격 함수는 활성 상태지만 인증 설정이 꺼져 있어 실제 사용자 CRUD 왕복은 대기한다. 반복,
-  브리핑, Agent, 외부 연결은 아직 서버에 연결되지 않았다.
+- 주의: 익명 사용자는 RLS가 적용된 `authenticated` role을 사용한다. 현재 owner policy로 사용자별
+  격리하며 공개 파일럿 전 CAPTCHA를 켠다. 반복, 브리핑, Agent, 외부 연결은 아직 서버에 연결되지
+  않았다.
 
 ## 문서 운영 규칙
 

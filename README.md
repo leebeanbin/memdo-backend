@@ -87,8 +87,8 @@ Idempotency-Key: <UUID> # POST command
 
 ## 다음 연결 순서
 
-1. Supabase Dashboard에서 익명 로그인과 Google·GitHub provider, `memdo://auth/callback`을 활성화
-2. iOS에서 로그인→일정 CRUD→재실행→조회 실제 왕복 검증
+1. Google·GitHub OAuth App을 만들고 `.env.local`의 client ID/secret을 채운 뒤 provider 활성화
+2. Google/GitHub 로그인과 세션 복원·로그아웃을 실제 계정으로 검증
 3. 재예약 명령과 증분 동기화의 iOS 호출 연결
 4. Sign in with Apple과 Supabase Auth 연결
 5. 배포 로그·EXPLAIN·복구 절차를 운영 문서에 저장
