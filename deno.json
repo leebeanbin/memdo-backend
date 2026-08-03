@@ -1,5 +1,5 @@
 {
-  "nodeModulesDir": "manual",
+  "nodeModulesDir": "auto",
   "imports": {
     "@supabase/server": "npm:@supabase/server@1.4.1",
     "zod": "npm:zod@4.4.3"
