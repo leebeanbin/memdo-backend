@@ -26,10 +26,11 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 첫 수직 슬라이스�
 - `POST /functions/v1/todos`와 UUID `Idempotency-Key`
 - `PATCH/DELETE /functions/v1/todos/{id}`와 optimistic `version`
 - `GET /functions/v1/todos/{id}`와 원자적 `POST /functions/v1/todos/{id}/reschedule`
+- `GET /functions/v1/sync`의 `(updatedAt,id)` 증분 cursor와 삭제 tombstone
 - 개발 익명 사용자 전용 `POST /functions/v1/demo-bootstrap`
 - Google·GitHub OAuth 로컬 구성과 `memdo://auth/callback` 허용
 
-sync cursor, 반복 일정과 Agent는 아직 연결하지 않는다.
+오프라인 push outbox, 반복 일정과 Agent는 아직 연결하지 않는다.
 
 ## 확정된 확장 경계
 

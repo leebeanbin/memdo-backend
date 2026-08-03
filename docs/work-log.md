@@ -77,6 +77,15 @@
 - 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 11개 통과.
 - 커밋 / 남은 blocker: 실제 PostgreSQL rollback·RLS 검증과 iOS 재예약 호출 연결은 남아 있다.
 
+## 2026-08-03 — B4 증분 pull
+
+- 목표: 초기 조회 뒤 변경된 일정과 삭제 tombstone만 내려받는다.
+- 변경 파일: `sync` Edge Function·계약 검사, Supabase config, backend 문서.
+- 결정과 이유: 조회 테이블을 추가하지 않고 기존 `(user_id, updated_at, id)` 인덱스와 opaque cursor를
+  사용한다. tombstone은 id·version·updatedAt만 보내 전송량을 줄인다.
+- 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 13개 통과.
+- 커밋 / 남은 blocker: iOS SwiftData outbox와 sync pull 적용은 남아 있다.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.
