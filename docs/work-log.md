@@ -68,6 +68,15 @@
 - 커밋 / 남은 blocker: 미커밋. local/preview/staging/production 값 주입 자동화는 배포 CI 구성 때
   연결한다.
 
+## 2026-08-03 — B3 원자적 재예약
+
+- 목표: 날짜 이동 중 원본만 사라지는 부분 성공을 막고 상세 조회 계약을 완성한다.
+- 변경 파일: Todo Edge Function·계약 검사, `reschedule_todo` migration, backend 문서.
+- 결정과 이유: 원본 상태 변경과 replacement 생성을 하나의 PostgreSQL 함수에서 처리하고 새 UUID를
+  idempotency key로 사용한다. stale version은 변경 없이 409를 반환한다.
+- 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 11개 통과.
+- 커밋 / 남은 blocker: 실제 PostgreSQL rollback·RLS 검증과 iOS 재예약 호출 연결은 남아 있다.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.

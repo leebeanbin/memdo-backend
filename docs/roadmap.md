@@ -8,7 +8,7 @@
 | B0 기반          | 완료           | 저장소, schema, index, RLS, 일정 조회·생성          | type check와 계약 test 통과            |
 | B1 인증 구성     | 외부 작업 필요 | OAuth project, iOS 로그인·callback·session·logout   | 실제 로그인·재실행·만료 token·RLS 확인 |
 | B2 일정 조회     | 진행 중        | UI DTO 수정, day read, 실제 iOS 조회·생성           | create→relaunch→read와 값 무손실 왕복  |
-| B3 일정 명령     | 진행 중        | 상세, 수정, 완료, 삭제, 원자적 재예약               | version·idempotency·rollback 검증      |
+| B3 일정 명령     | 진행 중        | 상세, 수정, 완료, 삭제, 원자적 재예약 구현          | 실제 DB rollback·iOS 연결 검증         |
 | B4 동기화/Widget | 진행 중        | delta cursor, tombstone, outbox, snapshot           | offline 재연결 수렴과 위젯 일치        |
 | B5 반복 일정     | 대기           | schedule rules, pgmq occurrence 작업                | DST·월말·단일 예외 검증                |
 | B6 알림·리뷰     | 대기           | preferences, review 응답, 기간 요약                 | 거부·시간대 변경·중복 응답 검증        |
@@ -27,7 +27,7 @@
 3. `npx supabase status -o env`의 publishable key를 Xcode 실행 환경에 넣는다.
 4. iPhone 15에서 anonymous sign-in→seed→create/update/delete→relaunch→read를 검증한다.
 5. 원격 Supabase에서 오늘 조회 EXPLAIN을 저장한다. route duration/response bytes event는 구현됐다.
-6. B3의 원자적 재예약과 B4의 delta sync/outbox를 이어서 구현한다.
+6. B3 재예약의 실제 DB rollback을 검증하고 B4의 delta sync/outbox를 이어서 구현한다.
 
 ## 의도적으로 미룬 것
 

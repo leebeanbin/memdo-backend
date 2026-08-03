@@ -16,6 +16,7 @@ import {
   todoInputSchema,
   todoInsert,
   todoListQuerySchema,
+  todoRescheduleSchema,
   todoSelect,
   todoUpdate,
   todoUpdateSchema,
@@ -41,10 +42,27 @@ export default {
     }
 
     try {
-      const itemId = new URL(request.url).pathname.split('/').filter(Boolean).at(-1)
-      const hasItemPath = itemId !== 'todos' && z.uuid().safeParse(itemId).success
+      const path = new URL(request.url).pathname.split('/').filter(Boolean)
+      const todosIndex = path.lastIndexOf('todos')
+      const itemId = path[todosIndex + 1]
+      const action = path[todosIndex + 2]
+      const hasItemPath = z.uuid().safeParse(itemId).success
 
-      if (request.method === 'GET') {
+      if (request.method === 'GET' && hasItemPath && !action) {
+        const { data, error } = await context.supabase
+          .from('todos')
+          .select(todoSelect)
+          .eq('id', itemId)
+          .is('deleted_at', null)
+          .maybeSingle()
+        if (error) throw error
+        if (!data) {
+          return apiError('RESOURCE_NOT_FOUND', '일정을 찾을 수 없습니다.', 404, currentRequestId)
+        }
+        return success(todoDto(data), 200, 'todos.get', 1)
+      }
+
+      if (request.method === 'GET' && !hasItemPath) {
         const url = new URL(request.url)
         const parsed = todoListQuerySchema.safeParse({
           from: url.searchParams.get('from') ?? undefined,
@@ -96,7 +114,80 @@ export default {
         return success(body, 200, 'todos.list', items.length)
       }
 
-      if (request.method === 'POST') {
+      if (request.method === 'POST' && hasItemPath && action === 'reschedule') {
+        const idempotencyKey = request.headers.get('Idempotency-Key')
+        if (!idempotencyKey || !z.uuid().safeParse(idempotencyKey).success) {
+          return apiError(
+            'INVALID_REQUEST',
+            'Idempotency-Key UUID가 필요합니다.',
+            400,
+            currentRequestId,
+          )
+        }
+
+        const parsed = todoRescheduleSchema.safeParse(await request.json().catch(() => undefined))
+        if (!parsed.success) {
+          return apiError(
+            'INVALID_REQUEST',
+            '재예약 시간을 확인해 주세요.',
+            400,
+            currentRequestId,
+            {
+              issues: parsed.error.issues,
+            },
+          )
+        }
+
+        const hash = await sha256(parsed.data)
+        const { data, error } = await context.supabase.rpc('reschedule_todo', {
+          p_original_id: itemId,
+          p_replacement_id: idempotencyKey,
+          p_base_version: parsed.data.baseVersion,
+          p_request_hash: hash,
+          p_entry_kind: parsed.data.entryKind,
+          p_scheduled_date: parsed.data.scheduledDate,
+          p_start_at: parsed.data.startAt,
+          p_end_at: parsed.data.endAt,
+          p_due_at: parsed.data.dueAt,
+        }).select(todoSelect).maybeSingle()
+        if (error) throw error
+        if (data) return success(todoDto(data), 201, 'todos.reschedule', 1)
+
+        const replacement = await context.supabase
+          .from('todos')
+          .select('id')
+          .eq('id', idempotencyKey)
+          .maybeSingle()
+        if (replacement.error) throw replacement.error
+        if (replacement.data) {
+          return apiError(
+            'IDEMPOTENCY_CONFLICT',
+            '같은 요청 키가 다른 재예약에 사용되었습니다.',
+            409,
+            currentRequestId,
+          )
+        }
+
+        const current = await context.supabase
+          .from('todos')
+          .select(todoSelect)
+          .eq('id', itemId)
+          .is('deleted_at', null)
+          .maybeSingle()
+        if (current.error) throw current.error
+        if (!current.data) {
+          return apiError('RESOURCE_NOT_FOUND', '일정을 찾을 수 없습니다.', 404, currentRequestId)
+        }
+        return apiError(
+          'VERSION_CONFLICT',
+          '일정이 다른 곳에서 변경되었거나 재예약할 수 없는 상태입니다.',
+          409,
+          currentRequestId,
+          { currentResource: todoDto(current.data) },
+        )
+      }
+
+      if (request.method === 'POST' && !hasItemPath) {
         const idempotencyKey = request.headers.get('Idempotency-Key')
         if (!idempotencyKey || !z.uuid().safeParse(idempotencyKey).success) {
           return apiError(
@@ -142,7 +233,7 @@ export default {
         return success(todoDto(existing.data), 201, 'todos.create', 1)
       }
 
-      if (request.method === 'PATCH' && hasItemPath) {
+      if (request.method === 'PATCH' && hasItemPath && !action) {
         const parsed = todoUpdateSchema.safeParse(await request.json().catch(() => undefined))
         if (!parsed.success) {
           return apiError(
@@ -175,7 +266,7 @@ export default {
         return success(todoDto(data), 200, 'todos.update', 1)
       }
 
-      if (request.method === 'DELETE' && hasItemPath) {
+      if (request.method === 'DELETE' && hasItemPath && !action) {
         const parsed = todoDeleteSchema.safeParse(await request.json().catch(() => undefined))
         if (!parsed.success) {
           return apiError(

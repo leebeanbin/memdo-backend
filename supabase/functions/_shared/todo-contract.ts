@@ -75,6 +75,32 @@ export const todoDeleteSchema = z.object({
   version: z.number().int().min(1),
 })
 
+export const todoRescheduleSchema = z.object({
+  baseVersion: z.number().int().min(1),
+  entryKind: z.enum(['event', 'task']),
+  scheduledDate: z.iso.date(),
+  startAt: z.iso.datetime({ offset: true }).nullable(),
+  endAt: z.iso.datetime({ offset: true }).nullable(),
+  dueAt: z.iso.datetime({ offset: true }).nullable(),
+}).superRefine((value, context) => {
+  if ((value.startAt === null) !== (value.endAt === null)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['endAt'],
+      message: 'startAt and endAt must be paired',
+    })
+  }
+  if (value.entryKind === 'event' && (!value.startAt || !value.endAt)) {
+    context.addIssue({ code: 'custom', message: 'Event requires startAt and endAt' })
+  }
+  if (value.entryKind === 'event' && value.dueAt) {
+    context.addIssue({ code: 'custom', path: ['dueAt'], message: 'Event cannot have dueAt' })
+  }
+  if (value.startAt && value.endAt && Date.parse(value.endAt) <= Date.parse(value.startAt)) {
+    context.addIssue({ code: 'custom', path: ['endAt'], message: 'endAt must follow startAt' })
+  }
+})
+
 const todoCursorSchema = z.object({
   scheduledDate: z.iso.date(),
   sortOrder: z.number().int().min(0),

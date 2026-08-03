@@ -2,6 +2,7 @@ import {
   decodeTodoCursor,
   encodeTodoCursor,
   todoInputSchema,
+  todoRescheduleSchema,
   todoUpdate,
   todoUpdateSchema,
 } from './todo-contract.ts'
@@ -82,4 +83,28 @@ Deno.test('completed update advances version and progress together', () => {
   assert(update.version === 3)
   assert(update.progress === 100)
   assert(typeof update.completed_at === 'string')
+})
+
+Deno.test('reschedule requires complete event timing', () => {
+  const result = todoRescheduleSchema.safeParse({
+    baseVersion: 2,
+    entryKind: 'event',
+    scheduledDate: '2026-08-04',
+    startAt: null,
+    endAt: null,
+    dueAt: null,
+  })
+  assert(!result.success)
+})
+
+Deno.test('reschedule accepts an untimed task', () => {
+  const result = todoRescheduleSchema.safeParse({
+    baseVersion: 2,
+    entryKind: 'task',
+    scheduledDate: '2026-08-04',
+    startAt: null,
+    endAt: null,
+    dueAt: '2026-08-04T12:00:00+09:00',
+  })
+  assert(result.success)
 })
