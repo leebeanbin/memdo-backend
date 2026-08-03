@@ -85,14 +85,14 @@ Deno.test('completed update advances version and progress together', () => {
   assert(typeof update.completed_at === 'string')
 })
 
-Deno.test('reschedule requires complete event timing', () => {
+Deno.test('reschedule requires paired timing', () => {
   const result = todoRescheduleSchema.safeParse({
     baseVersion: 2,
-    entryKind: 'event',
-    scheduledDate: '2026-08-04',
+    targetDate: '2026-08-04',
     startAt: null,
-    endAt: null,
+    endAt: '2026-08-04T12:00:00+09:00',
     dueAt: null,
+    timeBucket: 'morning',
   })
   assert(!result.success)
 })
@@ -100,11 +100,11 @@ Deno.test('reschedule requires complete event timing', () => {
 Deno.test('reschedule accepts an untimed task', () => {
   const result = todoRescheduleSchema.safeParse({
     baseVersion: 2,
-    entryKind: 'task',
-    scheduledDate: '2026-08-04',
+    targetDate: '2026-08-04',
     startAt: null,
     endAt: null,
     dueAt: '2026-08-04T12:00:00+09:00',
+    timeBucket: 'anytime',
   })
   assert(result.success)
 })

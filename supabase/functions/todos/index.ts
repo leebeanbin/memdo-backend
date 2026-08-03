@@ -138,20 +138,56 @@ export default {
           )
         }
 
+        const current = await context.supabase
+          .from('todos')
+          .select(todoSelect)
+          .eq('id', itemId)
+          .is('deleted_at', null)
+          .maybeSingle()
+        if (current.error) throw current.error
+        if (!current.data) {
+          return apiError('RESOURCE_NOT_FOUND', '일정을 찾을 수 없습니다.', 404, currentRequestId)
+        }
+        if (
+          current.data.entry_kind === 'event' &&
+          (!parsed.data.startAt || !parsed.data.endAt || parsed.data.dueAt)
+        ) {
+          return apiError(
+            'INVALID_REQUEST',
+            '시간 일정의 시작과 종료를 확인해 주세요.',
+            400,
+            currentRequestId,
+          )
+        }
+
         const hash = await sha256(parsed.data)
         const { data, error } = await context.supabase.rpc('reschedule_todo', {
           p_original_id: itemId,
           p_replacement_id: idempotencyKey,
           p_base_version: parsed.data.baseVersion,
           p_request_hash: hash,
-          p_entry_kind: parsed.data.entryKind,
-          p_scheduled_date: parsed.data.scheduledDate,
+          p_entry_kind: current.data.entry_kind,
+          p_scheduled_date: parsed.data.targetDate,
           p_start_at: parsed.data.startAt,
           p_end_at: parsed.data.endAt,
           p_due_at: parsed.data.dueAt,
+          p_time_bucket: parsed.data.timeBucket,
         }).select(todoSelect).maybeSingle()
         if (error) throw error
-        if (data) return success(todoDto(data), 201, 'todos.reschedule', 1)
+        if (data) {
+          const original = await context.supabase
+            .from('todos')
+            .select(todoSelect)
+            .eq('id', itemId)
+            .single()
+          if (original.error) throw original.error
+          return success(
+            { original: todoDto(original.data), replacement: todoDto(data) },
+            201,
+            'todos.reschedule',
+            2,
+          )
+        }
 
         const replacement = await context.supabase
           .from('todos')
@@ -168,16 +204,6 @@ export default {
           )
         }
 
-        const current = await context.supabase
-          .from('todos')
-          .select(todoSelect)
-          .eq('id', itemId)
-          .is('deleted_at', null)
-          .maybeSingle()
-        if (current.error) throw current.error
-        if (!current.data) {
-          return apiError('RESOURCE_NOT_FOUND', '일정을 찾을 수 없습니다.', 404, currentRequestId)
-        }
         return apiError(
           'VERSION_CONFLICT',
           '일정이 다른 곳에서 변경되었거나 재예약할 수 없는 상태입니다.',

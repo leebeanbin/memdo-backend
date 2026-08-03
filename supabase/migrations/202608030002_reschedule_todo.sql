@@ -7,7 +7,8 @@ create or replace function public.reschedule_todo(
   p_scheduled_date date,
   p_start_at timestamptz,
   p_end_at timestamptz,
-  p_due_at timestamptz
+  p_due_at timestamptz,
+  p_time_bucket text
 )
 returns setof public.todos
 language plpgsql
@@ -40,6 +41,9 @@ begin
   if not found
      or original.version <> p_base_version
      or original.entry_kind <> p_entry_kind
+     or (original.entry_kind = 'event' and (p_start_at is null or p_end_at is null or p_due_at is not null))
+     or ((p_start_at is null) <> (p_end_at is null))
+     or (p_start_at is not null and p_end_at <= p_start_at)
      or original.status not in ('planned', 'in_progress', 'partial') then
     return;
   end if;
@@ -64,7 +68,7 @@ begin
     original.emoji, original.color, p_start_at, p_end_at, p_due_at,
     original.location_name, original.location_address, original.latitude,
     original.longitude, original.location_provider, original.location_provider_id,
-    original.time_bucket, original.estimated_minutes,
+    p_time_bucket, original.estimated_minutes,
     original.reminder_offset_minutes, original.sort_order, 'planned', 0,
     original.source, original.is_recurrence_exception, original.id, 1,
     p_request_hash
@@ -76,5 +80,5 @@ end;
 $$;
 
 grant execute on function public.reschedule_todo(
-  uuid, uuid, integer, text, text, date, timestamptz, timestamptz, timestamptz
+  uuid, uuid, integer, text, text, date, timestamptz, timestamptz, timestamptz, text
 ) to authenticated;
