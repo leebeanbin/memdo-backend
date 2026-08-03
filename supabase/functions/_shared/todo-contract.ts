@@ -58,6 +58,23 @@ export const todoListQuerySchema = z.object({
   message: 'from must not follow to',
 })
 
+export const todoUpdateSchema = todoInputSchema.and(z.object({
+  version: z.number().int().min(1),
+  status: z.enum([
+    'planned',
+    'in_progress',
+    'partial',
+    'completed',
+    'skipped',
+    'rescheduled',
+    'cancelled',
+  ]),
+}))
+
+export const todoDeleteSchema = z.object({
+  version: z.number().int().min(1),
+})
+
 const todoCursorSchema = z.object({
   scheduledDate: z.iso.date(),
   sortOrder: z.number().int().min(0),
@@ -84,11 +101,32 @@ export function encodeTodoCursor(row: Record<string, unknown>): string {
 }
 
 export type TodoInput = z.infer<typeof todoInputSchema>
+export type TodoUpdateInput = z.infer<typeof todoUpdateSchema>
+
+export const todoSelect =
+  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at'
 
 export function todoInsert(input: TodoInput, userId: string, id: string, requestHash: string) {
   return {
     id,
     user_id: userId,
+    ...todoValues(input),
+    creation_request_hash: requestHash,
+  }
+}
+
+export function todoUpdate(input: TodoUpdateInput) {
+  return {
+    ...todoValues(input),
+    status: input.status,
+    progress: input.status === 'completed' ? 100 : 0,
+    completed_at: input.status === 'completed' ? new Date().toISOString() : null,
+    version: input.version + 1,
+  }
+}
+
+function todoValues(input: TodoInput) {
+  return {
     calendar_id: input.calendarId,
     scheduled_date: input.scheduledDate,
     title: input.title,
@@ -110,7 +148,6 @@ export function todoInsert(input: TodoInput, userId: string, id: string, request
     estimated_minutes: input.estimatedMinutes ?? null,
     reminder_offset_minutes: input.reminderOffsetMinutes ?? null,
     sort_order: input.sortOrder,
-    creation_request_hash: requestHash,
   }
 }
 

@@ -1,4 +1,10 @@
-import { decodeTodoCursor, encodeTodoCursor, todoInputSchema } from './todo-contract.ts'
+import {
+  decodeTodoCursor,
+  encodeTodoCursor,
+  todoInputSchema,
+  todoUpdate,
+  todoUpdateSchema,
+} from './todo-contract.ts'
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
@@ -44,4 +50,36 @@ Deno.test('todo cursor round trips', () => {
 
   assert(decodeTodoCursor(cursor)?.sortOrder === 3)
   assert(decodeTodoCursor('invalid') === null)
+})
+
+Deno.test('todo update requires an optimistic-lock version', () => {
+  const result = todoUpdateSchema.safeParse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    status: 'completed',
+  })
+
+  assert(!result.success)
+})
+
+Deno.test('completed update advances version and progress together', () => {
+  const input = todoUpdateSchema.parse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    version: 2,
+    status: 'completed',
+  })
+  const update = todoUpdate(input)
+
+  assert(update.version === 3)
+  assert(update.progress === 100)
+  assert(typeof update.completed_at === 'string')
 })

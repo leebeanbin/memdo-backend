@@ -17,6 +17,7 @@ port = 54323
 
 [auth]
 enabled = true
+enable_anonymous_sign_ins = true
 site_url = "http://127.0.0.1:3000"
 additional_redirect_urls = ["memdo://auth/callback"]
 
@@ -37,4 +38,10 @@ redirect_uri = "http://localhost:54321/auth/v1/callback"
 verify_jwt = true
 
 [functions.calendars]
+verify_jwt = true
+
+[functions.days]
+verify_jwt = true
+
+[functions.demo-bootstrap]
 verify_jwt = true

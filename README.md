@@ -13,6 +13,8 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 첫 수직 슬라이스�
 2. [`docs/auth-social-login.md`](docs/auth-social-login.md): Google·GitHub 로그인 구성
 3. [`docs/roadmap.md`](docs/roadmap.md): 앞으로 할 전체 작업과 완료 조건
 4. [`docs/work-log.md`](docs/work-log.md): 실제로 수행한 작업과 검증 기록
+5. [`../memdo/docs/31-ui-backend-contract-audit.md`](../memdo/docs/31-ui-backend-contract-audit.md):
+   실제 UI·DTO·OpenAPI·schema 차이
 
 ## 현재 범위
 
@@ -22,9 +24,20 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 첫 수직 슬라이스�
 - `GET /functions/v1/calendars`
 - `GET /functions/v1/todos?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=20`
 - `POST /functions/v1/todos`와 UUID `Idempotency-Key`
+- `PATCH/DELETE /functions/v1/todos/{id}`와 optimistic `version`
+- 개발 익명 사용자 전용 `POST /functions/v1/demo-bootstrap`
 - Google·GitHub OAuth 로컬 구성과 `memdo://auth/callback` 허용
 
-수정·완료·삭제·원자적 재예약, sync cursor, 반복 일정과 Agent는 아직 연결하지 않는다.
+원자적 재예약, sync cursor, 반복 일정과 Agent는 아직 연결하지 않는다.
+
+## 확정된 확장 경계
+
+- 비동기 전달: Supabase Queues(`pgmq`), Kafka/RabbitMQ 제외
+- 의미 검색: 같은 PostgreSQL의 pgvector, 외부 vector DB 제외
+- Redis: AI·MCP rate limit과 짧은 lock에만 Upstash REST 사용
+- ORM: SQL migration이 원본이며 Drizzle은 trusted worker의 실제 복잡 쿼리에만 제한
+- MCP: Memdo API를 호출하는 외부 adapter, DB 직접 접근 금지
+- LLM: OpenAI production adapter + llama.cpp local/self-host adapter
 
 ## 로컬 실행
 
@@ -36,6 +49,10 @@ npm run start
 npm run db:reset
 npm run functions:serve
 ```
+
+개발 seed를 사용할 때는 `.env.example`을 `.env.local`로 복사해 `MEMDO_DEMO_SEED_ENABLED=true`로
+바꾸고 `npx supabase functions serve --env-file .env.local`을 실행한다. 운영 환경에서는 이 값을 켜지
+않는다.
 
 Supabase Studio는 `http://127.0.0.1:54323`, Edge Functions는
 `http://127.0.0.1:54321/functions/v1`에서 열린다.
@@ -52,6 +69,10 @@ npm run functions:deploy
 클라이언트에는 project URL, publishable key와 로그인 후 발급된 사용자 access token만 전달한다.
 secret/service-role key는 앱에 넣지 않는다.
 
+iOS Debug 실행 Scheme에 `SUPABASE_PUBLISHABLE_KEY`를 환경 변수로 추가한다. 로컬 URL 기본값은
+`http://127.0.0.1:54321`이며 key는 `npx supabase status -o env`에서 확인한다. 개발 seed 허용 여부는
+백엔드의 `MEMDO_DEMO_SEED_ENABLED`만이 결정하며 iOS에는 같은 flag를 두지 않는다.
+
 ## 요청 헤더
 
 ```text
@@ -66,5 +87,5 @@ Idempotency-Key: <UUID> # POST command
 1. Supabase staging project 생성과 서울 리전 선택
 2. migration·Functions 배포
 3. Sign in with Apple과 Supabase Auth 연결
-4. iOS `URLSession` client에서 calendars와 todos 조회·생성
-5. 완료·수정·삭제·재예약과 오프라인 sync 확장
+4. iOS에서 일정 CRUD와 재실행 후 조회를 실제 환경으로 검증
+5. 재예약 명령과 증분 동기화로 확장
