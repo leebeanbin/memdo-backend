@@ -77,8 +77,9 @@ Authentication → Providers에서 Google과 GitHub client ID 및 secret을 입�
 - API 인증: access token을 `Authorization: Bearer <token>`으로 전달
 - 로그아웃: Supabase Auth sign-out 후 앱의 사용자별 cache 제거
 
-Swift 소스가 실제 앱 저장소에 들어오면 `AuthClient`, `SessionStore`, 로그인 화면, URL scheme을 한
-기능 커밋으로 연결한다. 현재 백엔드 저장소에는 iOS 코드를 임의로 복제하지 않는다.
+실제 앱 저장소는 하나의 Supabase client를 앱 루트 세션과 일정 repository가 공유한다. 로그인 화면은
+Google·GitHub OAuth와 Debug 전용 익명 체험을 제공하고, 설정 화면에서 로그아웃한다. OAuth callback은
+`memdo://auth/callback` 한 곳에서 처리하며 백엔드 저장소에는 iOS 코드를 복제하지 않는다.
 
 ## 동의와 scope 경계
 

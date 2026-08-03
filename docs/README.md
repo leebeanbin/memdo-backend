@@ -37,12 +37,14 @@
 
 ## 현재 상태
 
-- 완료: DB migration, RLS, 캘린더 조회, 일정 CRUD, 날짜별 조회, 목록·증분 cursor, 입력 검증.
-- 구성 완료: Google·GitHub OAuth의 로컬 설정과 iOS callback allow-list.
-- 외부 작업 필요: Supabase 프로젝트, Google OAuth client, GitHub OAuth App 생성 및 secret 입력.
+- 완료: 원격 DB migration 6개, RLS, 캘린더 조회, 일정 CRUD, 날짜별 조회, 목록·증분 cursor, 입력
+  검증, Edge Function 6개 배포.
+- 구성 완료: Google·GitHub OAuth의 로컬 설정, iOS callback scheme, 앱 로그인·로그아웃 UI.
+- 외부 작업 필요: Supabase Dashboard의 익명 로그인·Google·GitHub provider·redirect allow-list
+  활성화.
 - 검증 제한: 이 Mac에는 Docker 호환 runtime이 없어 로컬 Supabase 전체 실행은 아직 못 했다.
-- 주의: 설정 API는 구현됐지만 iOS 연결은 남아 있다. 반복, 브리핑, Agent, 외부 연결은 아직 서버에
-  연결되지 않았다. 일정 command도 실제 Supabase 통합 검증이 남아 있다.
+- 주의: 원격 함수는 활성 상태지만 인증 설정이 꺼져 있어 실제 사용자 CRUD 왕복은 대기한다. 반복,
+  브리핑, Agent, 외부 연결은 아직 서버에 연결되지 않았다.
 
 ## 문서 운영 규칙
 

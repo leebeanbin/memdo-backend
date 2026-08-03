@@ -22,12 +22,11 @@
 
 ## 바로 다음 작업
 
-1. 사용자가 Supabase 무료 프로젝트를 만들고 project ref를 확정한다.
-2. Google OAuth client와 GitHub OAuth App을 만들고 secret을 각 Dashboard에 입력한다.
-3. `npx supabase status -o env`의 publishable key를 Xcode 실행 환경에 넣는다.
-4. iPhone 15에서 anonymous sign-in→seed→create/update/delete→relaunch→read를 검증한다.
-5. 원격 Supabase에서 오늘 조회 EXPLAIN을 저장한다. route duration/response bytes event는 구현됐다.
-6. B3 재예약의 실제 DB rollback을 검증하고 B4의 delta sync/outbox를 이어서 구현한다.
+1. Supabase Dashboard에서 익명 로그인, Google·GitHub provider와 `memdo://auth/callback`을 켠다.
+2. iPhone 15에서 guest/Google/GitHub 로그인과 session 복원을 각각 검증한다.
+3. 원격 환경에서 create/update/delete/reschedule→relaunch→read와 RLS 격리를 검증한다.
+4. 원격 Supabase에서 오늘 조회 EXPLAIN과 route duration/response bytes 로그를 저장한다.
+5. B4의 iOS delta sync/outbox를 구현한 뒤 반복·검색 순서로 진행한다.
 
 ## 의도적으로 미룬 것
 

@@ -96,6 +96,20 @@
 - 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 15개 통과.
 - 커밋: `92cbefd`. iOS 설정 store 연결과 실제 DB constraint/RLS 검증은 남아 있다.
 
+## 2026-08-03 — 원격 Supabase 첫 배포
+
+- 목표: 준비된 일정 vertical slice를 `snfvykovzybfpwomnxhj` 프로젝트에 실제 배포하고 보안·성능
+  경고를 제거한다.
+- 변경 파일: Deno 배포 설정, 로컬 검사 script, 함수 권한·복합 FK index migration, 배포 상태 문서.
+- 결정과 이유: 원격 번들러는 npm 의존성을 설치하도록 `nodeModulesDir=auto`, 로컬 검사는 lockfile의
+  설치본을 쓰도록 `--node-modules-dir=manual`을 사용한다. 가입 trigger의 직접 실행 권한을 회수하고
+  `(calendar_id, user_id)` 복합 index가 기존 단일 index를 대체한다.
+- 실행한 검증과 결과: migration 6개 적용, public 테이블 4개 RLS 강제, 보안 advisor 0건, Edge
+  Function 6개 `ACTIVE`·JWT 검증 활성, Deno 검사와 계약 테스트 15개 통과, iPhone 15 build/run 성공.
+- 커밋 / 남은 blocker: Supabase Dashboard의 익명 로그인과 Google·GitHub provider가 아직 비활성화되어
+  실제 인증·CRUD 왕복은 대기한다. 성능 advisor의 미사용 index 정보는 데이터가 없는 신규 DB이므로
+  유지한다.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.

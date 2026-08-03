@@ -87,8 +87,8 @@ Idempotency-Key: <UUID> # POST command
 
 ## 다음 연결 순서
 
-1. Supabase staging project 생성과 서울 리전 선택
-2. migration·Functions 배포
-3. Sign in with Apple과 Supabase Auth 연결
-4. iOS에서 일정 CRUD와 재실행 후 조회를 실제 환경으로 검증
-5. 재예약 명령과 증분 동기화로 확장
+1. Supabase Dashboard에서 익명 로그인과 Google·GitHub provider, `memdo://auth/callback`을 활성화
+2. iOS에서 로그인→일정 CRUD→재실행→조회 실제 왕복 검증
+3. 재예약 명령과 증분 동기화의 iOS 호출 연결
+4. Sign in with Apple과 Supabase Auth 연결
+5. 배포 로그·EXPLAIN·복구 절차를 운영 문서에 저장
