@@ -40,8 +40,8 @@
   `user_id + scheduled_date + start_at + sort_order` query에 맞춘 partial index를 사용한다. 알림은
   분 단위 정수, 장소는 MapKit 좌표를 포함한 구조체, 상태와 enum raw value는 API 값으로 정규화했다.
 - 실행한 검증과 결과: `npm run check`, Deno 계약 테스트 6개, iOS generic Simulator build 통과.
-- 커밋 / 남은 blocker: 미커밋. Supabase project가 없어 migration·EXPLAIN 실적용과 인증된 iOS
-  create→relaunch→read는 대기한다. fixture 날짜 제거와 인증 session 주입도 B2에 남아 있다.
+- 커밋: `5558355`. Supabase project가 없어 migration·EXPLAIN 실적용과 인증된 iOS
+  create→relaunch→read는 대기한다.
 
 ## 2026-08-03 — UI fixture 제거와 백엔드 vertical slice
 
@@ -55,7 +55,7 @@
 - 실행한 검증과 결과: Deno 계약 테스트 9개와 format/typecheck 통과, OpenAPI·plist·pbxproj lint,
   Widget Swift typecheck 통과. Xcode에서 Memdo를 iPhone 15에 build/run하고 설정 누락 오류 상태까지
   확인했다. CLI SwiftPM build만 Codex 중첩 sandbox 제약을 받는다.
-- 커밋 / 남은 blocker: 미커밋. Docker daemon과 Supabase publishable key가 없어 실제 anonymous
+- 커밋: backend `5558355`. Docker daemon과 Supabase publishable key가 없어 실제 anonymous
   sign-in→seed→조회→재실행 왕복은 대기한다. 브리핑은 fake를 제거하고 B9 연결 대기 상태를 표시한다.
 
 ## 2026-08-03 — 환경 설정 소유권 정리
@@ -65,8 +65,8 @@
 - 결정과 이유: OAuth·LLM secret과 개발 seed flag는 backend 환경만 소유한다. iOS에는 접속에 필요한
   공개 URL과 publishable key만 둔다.
 - 실행한 검증과 결과: iOS source parse, plist·pbxproj lint와 backend format/typecheck를 실행한다.
-- 커밋 / 남은 blocker: 미커밋. local/preview/staging/production 값 주입 자동화는 배포 CI 구성 때
-  연결한다.
+- 커밋: backend `5558355`; iOS 변경은 제품 저장소 작업에 포함된다.
+- 남은 blocker: local/preview/staging/production 값 주입 자동화는 배포 CI 구성 때 연결한다.
 
 ## 2026-08-03 — B3 원자적 재예약
 
@@ -75,7 +75,8 @@
 - 결정과 이유: 원본 상태 변경과 replacement 생성을 하나의 PostgreSQL 함수에서 처리하고 새 UUID를
   idempotency key로 사용한다. stale version은 변경 없이 409를 반환한다.
 - 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 11개 통과.
-- 커밋 / 남은 blocker: 실제 PostgreSQL rollback·RLS 검증과 iOS 재예약 호출 연결은 남아 있다.
+- 커밋: `288ae96`, 계약 정렬 `1bcb9cb`.
+- 남은 blocker: 실제 PostgreSQL rollback·RLS 검증과 iOS 재예약 호출 연결은 남아 있다.
 
 ## 2026-08-03 — B4 증분 pull
 
@@ -84,7 +85,7 @@
 - 결정과 이유: 조회 테이블을 추가하지 않고 기존 `(user_id, updated_at, id)` 인덱스와 opaque cursor를
   사용한다. tombstone은 id·version·updatedAt만 보내 전송량을 줄인다.
 - 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 13개 통과.
-- 커밋 / 남은 blocker: iOS SwiftData outbox와 sync pull 적용은 남아 있다.
+- 커밋: `23a8c39`. iOS SwiftData outbox와 sync pull 적용은 남아 있다.
 
 ## 2026-08-03 — B6 사용자 설정 저장
 
@@ -93,7 +94,7 @@
 - 결정과 이유: 사용자당 한 행을 full replacement upsert하고 외부 연결 token과 브리핑 키워드는 별도
   경계로 유지한다. 기본값은 제품 정책대로 DB에서 한 번 정의한다.
 - 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 15개 통과.
-- 커밋 / 남은 blocker: iOS 설정 store 연결과 실제 DB constraint/RLS 검증은 남아 있다.
+- 커밋: `92cbefd`. iOS 설정 store 연결과 실제 DB constraint/RLS 검증은 남아 있다.
 
 ## 이후 기록 형식
 
