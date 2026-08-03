@@ -11,7 +11,7 @@
 | B3 일정 명령     | 진행 중        | 상세, 수정, 완료, 삭제, 원자적 재예약 구현          | 실제 DB rollback·iOS 연결 검증         |
 | B4 동기화/Widget | 진행 중        | delta cursor·tombstone 완료, outbox·snapshot 대기   | offline 재연결 수렴과 위젯 일치        |
 | B5 반복 일정     | 대기           | schedule rules, pgmq occurrence 작업                | DST·월말·단일 예외 검증                |
-| B6 알림·리뷰     | 대기           | preferences, review 응답, 기간 요약                 | 거부·시간대 변경·중복 응답 검증        |
+| B6 알림·리뷰     | 진행 중        | preferences 완료, review 응답·기간 요약 대기        | 거부·시간대 변경·중복 응답 검증        |
 | B7 검색          | 대기           | pg_trgm 제목·메모·장소, 공용 SearchTodos            | p95·최소 DTO·권한 격리 확인            |
 | B8 Google        | 대기           | 별도 동의, token vault, 증분 sync, external mirror  | 연결·철회·재인증·출처 표시 검증        |
 | B9 브리핑        | 대기           | 관심 키워드, 기사 dedupe, pgmq 생성                 | 하루 한 번·3~5개·출처·실패 보존        |

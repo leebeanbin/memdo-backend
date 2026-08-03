@@ -30,6 +30,7 @@
 | `supabase/functions/days/`           | 날짜별 일정과 리뷰 상태 조회                 |
 | `supabase/functions/demo-bootstrap/` | Debug 개발 데이터 생성                       |
 | `supabase/functions/sync/`           | 일정 증분 pull과 삭제 tombstone              |
+| `supabase/functions/preferences/`    | 사용자 설정 조회·전체 저장                   |
 | `supabase/functions/_shared/`        | HTTP 응답과 일정 입력 계약                   |
 | `.env.example`                       | 커밋 가능한 환경변수 이름 목록               |
 | `docs/`                              | 결정, 작업 순서, 작업 기록                   |
@@ -40,8 +41,8 @@
 - 구성 완료: Google·GitHub OAuth의 로컬 설정과 iOS callback allow-list.
 - 외부 작업 필요: Supabase 프로젝트, Google OAuth client, GitHub OAuth App 생성 및 secret 입력.
 - 검증 제한: 이 Mac에는 Docker 호환 runtime이 없어 로컬 Supabase 전체 실행은 아직 못 했다.
-- 주의: UI의 반복, 설정, 브리핑, Agent, 외부 연결은 아직 서버에 연결되지 않았다. 수정·삭제는 계약
-  검사를 통과했지만 실제 Supabase 통합 검증은 남아 있다.
+- 주의: 설정 API는 구현됐지만 iOS 연결은 남아 있다. 반복, 브리핑, Agent, 외부 연결은 아직 서버에
+  연결되지 않았다. 일정 command도 실제 Supabase 통합 검증이 남아 있다.
 
 ## 문서 운영 규칙
 

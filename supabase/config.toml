@@ -48,3 +48,6 @@ verify_jwt = true
 
 [functions.sync]
 verify_jwt = true
+
+[functions.preferences]
+verify_jwt = true

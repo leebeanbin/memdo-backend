@@ -27,6 +27,7 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 첫 수직 슬라이스�
 - `PATCH/DELETE /functions/v1/todos/{id}`와 optimistic `version`
 - `GET /functions/v1/todos/{id}`와 원자적 `POST /functions/v1/todos/{id}/reschedule`
 - `GET /functions/v1/sync`의 `(updatedAt,id)` 증분 cursor와 삭제 tombstone
+- `GET/PUT /functions/v1/preferences` 사용자 설정 영속화
 - 개발 익명 사용자 전용 `POST /functions/v1/demo-bootstrap`
 - Google·GitHub OAuth 로컬 구성과 `memdo://auth/callback` 허용
 

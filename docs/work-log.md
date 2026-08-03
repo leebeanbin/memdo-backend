@@ -86,6 +86,15 @@
 - 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 13개 통과.
 - 커밋 / 남은 blocker: iOS SwiftData outbox와 sync pull 적용은 남아 있다.
 
+## 2026-08-03 — B6 사용자 설정 저장
+
+- 목표: 설정 화면의 값을 계정에 저장하고 다른 기기와 재실행에서 복원할 기반을 만든다.
+- 변경 파일: `user_preferences` migration, `preferences` Edge Function·계약 검사, backend 문서.
+- 결정과 이유: 사용자당 한 행을 full replacement upsert하고 외부 연결 token과 브리핑 키워드는 별도
+  경계로 유지한다. 기본값은 제품 정책대로 DB에서 한 번 정의한다.
+- 실행한 검증과 결과: Deno format/typecheck와 계약 테스트 15개 통과.
+- 커밋 / 남은 blocker: iOS 설정 store 연결과 실제 DB constraint/RLS 검증은 남아 있다.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.
