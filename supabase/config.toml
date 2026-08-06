@@ -51,3 +51,15 @@ verify_jwt = true
 
 [functions.preferences]
 verify_jwt = true
+
+[functions.search]
+verify_jwt = true
+
+[functions.rules]
+verify_jwt = true
+
+[functions.summaries]
+verify_jwt = true
+
+[functions.reviews]
+verify_jwt = true
