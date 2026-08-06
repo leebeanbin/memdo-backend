@@ -24,7 +24,7 @@ export async function buildDemoRows(input: DemoRowInput) {
     user_id: input.userId,
     status: 'planned',
     progress: 0,
-    source: 'memdo',
+    source: 'manual',
     sort_order: 0,
     ...values,
   })
