@@ -8,6 +8,7 @@ on:
       - "supabase/functions/**"
       - "supabase/config.toml"
       - ".github/workflows/deploy-supabase.yml"
+  workflow_dispatch: {}
 
 concurrency:
   group: deploy-supabase
