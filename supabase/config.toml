@@ -36,30 +36,40 @@ redirect_uri = "http://localhost:54321/auth/v1/callback"
 
 [functions.todos]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.calendars]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.days]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.demo-bootstrap]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.sync]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.preferences]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.search]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.rules]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.summaries]
 verify_jwt = true
+import_map = "../deno.json"
 
 [functions.reviews]
 verify_jwt = true
+import_map = "../deno.json"
