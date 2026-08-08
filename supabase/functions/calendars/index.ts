@@ -1,9 +1,7 @@
-import { withSupabase } from '@supabase/server'
-import { apiError, json, requestId } from '../_shared/http.ts'
+import { apiError, json, withApi } from '../_shared/http.ts'
 
 export default {
-  fetch: withSupabase<any>({ auth: 'user' }, async (request, context) => {
-    const currentRequestId = requestId(request)
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     if (request.method !== 'GET') {
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
     }
@@ -20,7 +18,7 @@ export default {
     }
 
     return json(
-      data.map((calendar) => ({
+      data.map((calendar: Record<string, unknown>) => ({
         id: calendar.id,
         name: calendar.name,
         purpose: calendar.purpose,

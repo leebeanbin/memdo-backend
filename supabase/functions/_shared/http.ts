@@ -1,7 +1,10 @@
+import { createSupabaseContext } from '@supabase/server'
+
 export type ErrorCode =
   | 'INVALID_REQUEST'
   | 'METHOD_NOT_ALLOWED'
   | 'FORBIDDEN'
+  | 'UNAUTHENTICATED'
   | 'IDEMPOTENCY_CONFLICT'
   | 'VERSION_CONFLICT'
   | 'RESOURCE_NOT_FOUND'
@@ -30,6 +33,38 @@ export function apiError(
     status,
     requestId,
   )
+}
+
+/**
+ * Wraps a request handler with user auth and a uniform error envelope.
+ *
+ * `withSupabase` from `@supabase/server` returns auth failures as a bare
+ * `{ message, code }` body with no `error` wrapper, no `retryable`, and no
+ * X-Request-ID header — off-contract relative to `apiError`/`json` above — and
+ * it does not catch throws from the handler itself. This closes both gaps by
+ * calling `createSupabaseContext` directly and handling both cases here.
+ */
+export function withApi<T = unknown>(
+  handler: (request: Request, context: T, currentRequestId: string) => Promise<Response>,
+): (request: Request) => Promise<Response> {
+  return async (request: Request): Promise<Response> => {
+    const currentRequestId = requestId(request)
+    const { data: context, error } = await createSupabaseContext(request, { auth: 'user' })
+    if (error) {
+      return apiError(
+        error.status === 401 ? 'UNAUTHENTICATED' : 'INTERNAL_ERROR',
+        '인증이 필요합니다.',
+        error.status,
+        currentRequestId,
+      )
+    }
+    try {
+      return await handler(request, context as T, currentRequestId)
+    } catch (thrown) {
+      console.error(JSON.stringify({ requestId: currentRequestId, error: String(thrown) }))
+      return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
+    }
+  }
 }
 
 export async function sha256(value: unknown): Promise<string> {

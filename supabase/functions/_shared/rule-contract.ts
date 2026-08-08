@@ -23,10 +23,18 @@ export const scheduleRuleInputSchema = z.object({
     context.addIssue({ code: 'custom', message: 'Event requires startTime and endTime' })
   }
   if (value.startTime && value.endTime && value.endTime <= value.startTime) {
-    context.addIssue({ code: 'custom', path: ['endTime'], message: 'endTime must follow startTime' })
+    context.addIssue({
+      code: 'custom',
+      path: ['endTime'],
+      message: 'endTime must follow startTime',
+    })
   }
   if (value.untilDate && value.untilDate < value.anchorDate) {
-    context.addIssue({ code: 'custom', path: ['untilDate'], message: 'untilDate must not precede anchorDate' })
+    context.addIssue({
+      code: 'custom',
+      path: ['untilDate'],
+      message: 'untilDate must not precede anchorDate',
+    })
   }
 })
 
@@ -40,7 +48,9 @@ function ymd(date: string): [number, number, number] {
 }
 
 function iso(year: number, month: number, day: number): string {
-  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${
+    String(day).padStart(2, '0')
+  }`
 }
 
 function dayNumber(date: string): number {

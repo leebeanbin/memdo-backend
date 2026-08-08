@@ -1,5 +1,4 @@
-import { withSupabase } from '@supabase/server'
-import { apiError, json, logRequest, requestId, responseByteLength } from '../_shared/http.ts'
+import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
 import {
   decodeSyncCursor,
   encodeSyncCursor,
@@ -9,9 +8,8 @@ import {
 import { todoSelect } from '../_shared/todo-contract.ts'
 
 export default {
-  fetch: withSupabase<any>({ auth: 'user' }, async (request, context) => {
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
-    const currentRequestId = requestId(request)
 
     try {
       if (request.method !== 'GET') {

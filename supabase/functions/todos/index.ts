@@ -1,13 +1,5 @@
-import { withSupabase } from '@supabase/server'
 import { z } from 'zod'
-import {
-  apiError,
-  json,
-  logRequest,
-  requestId,
-  responseByteLength,
-  sha256,
-} from '../_shared/http.ts'
+import { apiError, json, logRequest, responseByteLength, sha256, withApi } from '../_shared/http.ts'
 import {
   decodeTodoCursor,
   encodeTodoCursor,
@@ -23,9 +15,8 @@ import {
 } from '../_shared/todo-contract.ts'
 
 export default {
-  fetch: withSupabase<any>({ auth: 'user' }, async (request, context) => {
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
-    const currentRequestId = requestId(request)
 
     const success = (body: unknown, status: number, eventName: string, returnedRows: number) => {
       logRequest({

@@ -1,12 +1,10 @@
-import { withSupabase } from '@supabase/server'
-import { apiError, json, logRequest, requestId, responseByteLength } from '../_shared/http.ts'
+import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
 import { summaryQuerySchema, summaryRange } from '../_shared/summary-contract.ts'
 import { todoDto, todoSelect } from '../_shared/todo-contract.ts'
 
 export default {
-  fetch: withSupabase<any>({ auth: 'user' }, async (request, context) => {
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
-    const currentRequestId = requestId(request)
 
     if (request.method !== 'GET') {
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
@@ -41,8 +39,8 @@ export default {
     }
 
     const tasks = data.map(todoDto)
-    const completed = tasks.filter((task) => task.status === 'completed')
-    const incomplete = tasks.filter((task) => task.status !== 'completed')
+    const completed = tasks.filter((task: { status: unknown }) => task.status === 'completed')
+    const incomplete = tasks.filter((task: { status: unknown }) => task.status !== 'completed')
     const body = {
       scope: parsed.data.scope,
       start: range.start,

@@ -7,7 +7,7 @@
     "db:reset": "supabase db reset --local",
     "functions:serve": "supabase functions serve",
     "functions:deploy": "supabase functions deploy --use-api",
-    "check": "deno check --node-modules-dir=manual supabase/functions/todos/index.ts supabase/functions/calendars/index.ts supabase/functions/days/index.ts supabase/functions/demo-bootstrap/index.ts supabase/functions/sync/index.ts supabase/functions/preferences/index.ts && deno fmt --check",
+    "check": "deno check --node-modules-dir=manual supabase/functions/todos/index.ts supabase/functions/calendars/index.ts supabase/functions/days/index.ts supabase/functions/demo-bootstrap/index.ts supabase/functions/sync/index.ts supabase/functions/preferences/index.ts supabase/functions/search/index.ts supabase/functions/rules/index.ts supabase/functions/summaries/index.ts supabase/functions/reviews/index.ts && deno fmt --check",
     "test": "deno test --node-modules-dir=manual supabase/functions/_shared"
   },
   "devDependencies": {

@@ -10,7 +10,10 @@ Deno.test('daily rule respects interval and window', () => {
     '2026-08-01',
     '2026-08-07',
   )
-  assert(JSON.stringify(dates) === JSON.stringify(['2026-08-01', '2026-08-03', '2026-08-05', '2026-08-07']))
+  assert(
+    JSON.stringify(dates) ===
+      JSON.stringify(['2026-08-01', '2026-08-03', '2026-08-05', '2026-08-07']),
+  )
 })
 
 Deno.test('weekdays rule skips weekends', () => {
@@ -20,7 +23,10 @@ Deno.test('weekdays rule skips weekends', () => {
     '2026-08-01',
     '2026-08-09',
   )
-  assert(JSON.stringify(dates) === JSON.stringify(['2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', '2026-08-07']))
+  assert(
+    JSON.stringify(dates) ===
+      JSON.stringify(['2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06', '2026-08-07']),
+  )
 })
 
 Deno.test('monthly rule clamps to the last day of shorter months', () => {
@@ -29,7 +35,10 @@ Deno.test('monthly rule clamps to the last day of shorter months', () => {
     '2026-01-01',
     '2026-12-31',
   )
-  assert(JSON.stringify(dates) === JSON.stringify(['2026-01-31', '2026-02-28', '2026-03-31', '2026-04-30']))
+  assert(
+    JSON.stringify(dates) ===
+      JSON.stringify(['2026-01-31', '2026-02-28', '2026-03-31', '2026-04-30']),
+  )
 })
 
 Deno.test('count bounds the whole series even before the window', () => {
@@ -67,5 +76,7 @@ Deno.test('rule input rejects an event without times', () => {
     timezoneOffsetMinutes: 540,
   }
   assert(!scheduleRuleInputSchema.safeParse(base).success)
-  assert(scheduleRuleInputSchema.safeParse({ ...base, startTime: '09:00', endTime: '09:15' }).success)
+  assert(
+    scheduleRuleInputSchema.safeParse({ ...base, startTime: '09:00', endTime: '09:15' }).success,
+  )
 })

@@ -1,15 +1,13 @@
-import { withSupabase } from '@supabase/server'
 import { z } from 'zod'
 import { dayViewDto } from '../_shared/day-contract.ts'
-import { apiError, json, logRequest, requestId, responseByteLength } from '../_shared/http.ts'
+import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
 import { todoDto, todoSelect } from '../_shared/todo-contract.ts'
 
 const dateSchema = z.iso.date()
 
 export default {
-  fetch: withSupabase<any>({ auth: 'user' }, async (request, context) => {
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
-    const currentRequestId = requestId(request)
 
     if (request.method !== 'GET') {
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
