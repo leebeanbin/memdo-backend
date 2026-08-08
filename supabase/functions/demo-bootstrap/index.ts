@@ -1,11 +1,9 @@
-import { withSupabase } from '@supabase/server'
 import { buildDemoRows, demoBootstrapSchema } from '../_shared/demo-contract.ts'
-import { apiError, json, logRequest, requestId, responseByteLength } from '../_shared/http.ts'
+import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
 
 export default {
-  fetch: withSupabase<any>({ auth: 'user' }, async (request, context) => {
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
-    const currentRequestId = requestId(request)
 
     if (request.method !== 'POST') {
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
@@ -18,8 +16,7 @@ export default {
         currentRequestId,
       )
     }
-    const claims = context.userClaims as unknown as Record<string, unknown> | null
-    if (claims?.is_anonymous !== true) {
+    if (context.jwtClaims?.is_anonymous !== true) {
       return apiError(
         'FORBIDDEN',
         '개발용 익명 사용자만 사용할 수 있습니다.',
@@ -56,8 +53,10 @@ export default {
           .in('purpose', ['personal', 'work'])
         if (calendars.error) throw calendars.error
 
-        const personal = calendars.data.find((item) => item.purpose === 'personal')
-        const work = calendars.data.find((item) => item.purpose === 'work')
+        const personal = calendars.data.find((item: Record<string, unknown>) =>
+          item.purpose === 'personal'
+        )
+        const work = calendars.data.find((item: Record<string, unknown>) => item.purpose === 'work')
         if (!personal || !work) {
           return apiError(
             'RESOURCE_NOT_FOUND',

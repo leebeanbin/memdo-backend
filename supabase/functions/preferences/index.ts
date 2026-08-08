@@ -1,6 +1,5 @@
-import { withSupabase } from '@supabase/server'
 import { z } from 'zod'
-import { apiError, json, logRequest, requestId, responseByteLength } from '../_shared/http.ts'
+import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
 import {
   preferencesDto,
   preferencesInputSchema,
@@ -8,9 +7,8 @@ import {
 } from '../_shared/preferences-contract.ts'
 
 export default {
-  fetch: withSupabase<any>({ auth: 'user' }, async (request, context) => {
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
-    const currentRequestId = requestId(request)
 
     const success = (body: unknown, eventName: string) => {
       logRequest({
@@ -31,8 +29,16 @@ export default {
         const { data, error } = await context.supabase
           .from('user_preferences')
           .select('*')
-          .single()
+          .maybeSingle()
         if (error) throw error
+        if (!data) {
+          return apiError(
+            'RESOURCE_NOT_FOUND',
+            '설정을 찾을 수 없습니다. PUT으로 먼저 설정을 저장해 주세요.',
+            404,
+            currentRequestId,
+          )
+        }
         return success(preferencesDto(data), 'preferences.get')
       }
 
