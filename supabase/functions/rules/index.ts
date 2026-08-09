@@ -1,15 +1,6 @@
 import { z } from 'zod'
 import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
-import {
-  expandOccurrences,
-  localInstant,
-  scheduleRuleInputSchema,
-} from '../_shared/rule-contract.ts'
-
-const MAX_MATERIALISED = 200
-
-const ruleSelect =
-  'id,calendar_id,title,entry_kind,is_all_day,note,start_time,end_time,time_bucket,reminder_offset_minutes,frequency,step_interval,anchor_date,until_date,occurrence_count,created_at,updated_at'
+import { materializeRow, ruleSelect, scheduleRuleInputSchema } from '../_shared/rule-contract.ts'
 
 function ruleDto(row: Record<string, unknown>) {
   return {
@@ -31,23 +22,6 @@ function ruleDto(row: Record<string, unknown>) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
-}
-
-async function occurrenceId(ruleId: string, date: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${ruleId}:${date}`)),
-  ).slice(0, 16)
-  digest[6] = (digest[6] & 0x0f) | 0x40
-  digest[8] = (digest[8] & 0x3f) | 0x80
-  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${
-    hex.slice(20)
-  }`
-}
-
-function horizonEnd(anchorDate: string): string {
-  const [year, month, day] = anchorDate.split('-').map(Number)
-  return new Date(Date.UTC(year, month - 1, day + 365, 12)).toISOString().slice(0, 10)
 }
 
 export default {
@@ -143,6 +117,7 @@ export default {
             anchor_date: input.anchorDate,
             until_date: input.untilDate ?? null,
             occurrence_count: input.count ?? null,
+            timezone_offset_minutes: input.timezoneOffsetMinutes,
           })
           .select(ruleSelect)
           .single()
@@ -175,46 +150,17 @@ export default {
         }
         if (inserted.error) throw inserted.error
         const rule = inserted.data
-        const id = rule.id as string
 
-        const expanded = expandOccurrences(
-          {
-            frequency: input.frequency,
-            interval: input.interval,
-            anchorDate: input.anchorDate,
-            untilDate: input.untilDate,
-            count: input.count,
-          },
-          input.anchorDate,
-          horizonEnd(input.anchorDate),
-        )
-        const occurrences = expanded.slice(0, MAX_MATERIALISED)
-
-        const rows = await Promise.all(occurrences.map(async (date) => ({
-          id: await occurrenceId(id, date),
-          user_id: userId,
-          calendar_id: input.calendarId,
-          scheduled_date: date,
-          title: input.title,
-          entry_kind: input.entryKind,
-          is_all_day: input.isAllDay,
-          note: input.note ?? null,
-          start_at: input.startTime
-            ? localInstant(date, input.startTime, input.timezoneOffsetMinutes)
-            : null,
-          end_at: input.endTime
-            ? localInstant(date, input.endTime, input.timezoneOffsetMinutes)
-            : null,
-          time_bucket: input.timeBucket,
-          reminder_offset_minutes: input.reminderOffsetMinutes ?? null,
-          status: 'planned',
-          progress: 0,
-          source: 'recurring',
-          is_recurrence_exception: false,
-          schedule_rule_id: id,
-          sort_order: 0,
-          version: 1,
-        })))
+        // task-mode rules keep exactly one materialized occurrence at a time --
+        // the current/next one -- and advance to the next on completion (see
+        // todos PATCH). event-mode rules materialize nothing at creation; they're
+        // computed on demand for whatever range is queried (see todos GET), like
+        // Google Calendar/Outlook treat recurring events, since users browse a
+        // calendar forward rather than working through one item at a time.
+        const rows: Record<string, unknown>[] = []
+        if (input.entryKind === 'task') {
+          rows.push(await materializeRow(rule, input.anchorDate, userId))
+        }
 
         if (rows.length > 0) {
           const materialised = await context.supabase.from('todos').upsert(rows, {
@@ -224,15 +170,7 @@ export default {
         }
 
         return success(
-          {
-            rule: ruleDto(rule),
-            occurrenceCount: rows.length,
-            // True when MAX_MATERIALISED cut the series short. An indefinite weekly/monthly
-            // rule can also stop at the 365-day horizon in horizonEnd() without ever hitting
-            // this cap -- that case isn't detectable here without a second, unbounded expand.
-            truncated: expanded.length > rows.length,
-            materialisedThrough: occurrences.at(-1) ?? null,
-          },
+          { rule: ruleDto(rule), occurrenceCount: rows.length },
           201,
           'rules.create',
           1,

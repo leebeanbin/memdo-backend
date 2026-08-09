@@ -1,6 +1,13 @@
 import { z } from 'zod'
 import { apiError, json, logRequest, responseByteLength, sha256, withApi } from '../_shared/http.ts'
 import {
+  expandOccurrences,
+  materializeRow,
+  nextOccurrenceAfter,
+  ruleSelect,
+  virtualOccurrenceDto,
+} from '../_shared/rule-contract.ts'
+import {
   decodeTodoCursor,
   encodeTodoCursor,
   todoDeleteSchema,
@@ -13,6 +20,53 @@ import {
   todoUpdate,
   todoUpdateSchema,
 } from '../_shared/todo-contract.ts'
+
+/** Computes event-mode occurrences for [from, to] that don't already have a real
+ * materialized row, without touching the DB beyond two cheap reads. */
+async function virtualOccurrencesInRange(
+  supabase: { from: (table: string) => any },
+  from: string,
+  to: string,
+): Promise<Record<string, unknown>[]> {
+  const [rules, existing] = await Promise.all([
+    supabase.from('schedule_rules').select(ruleSelect).eq('entry_kind', 'event'),
+    supabase
+      .from('todos')
+      .select('schedule_rule_id,scheduled_date')
+      .not('schedule_rule_id', 'is', null)
+      .is('deleted_at', null)
+      .gte('scheduled_date', from)
+      .lte('scheduled_date', to),
+  ])
+  if (rules.error) throw rules.error
+  if (existing.error) throw existing.error
+
+  const materialized = new Set(
+    (existing.data as { schedule_rule_id: string; scheduled_date: string }[]).map((row) =>
+      `${row.schedule_rule_id}:${row.scheduled_date}`
+    ),
+  )
+
+  const virtualItems: Record<string, unknown>[] = []
+  for (const rule of rules.data as Record<string, unknown>[]) {
+    const dates = expandOccurrences(
+      {
+        frequency: rule.frequency as string,
+        interval: rule.step_interval as number,
+        anchorDate: rule.anchor_date as string,
+        untilDate: rule.until_date as string | null,
+        count: rule.occurrence_count as number | null,
+      },
+      from,
+      to,
+    )
+    for (const date of dates) {
+      if (materialized.has(`${rule.id}:${date}`)) continue
+      virtualItems.push(await virtualOccurrenceDto(rule, date))
+    }
+  }
+  return virtualItems
+}
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -96,13 +150,31 @@ export default {
 
         const hasMore = data.length > parsed.data.limit
         const items = data.slice(0, parsed.data.limit)
+
+        // event-mode recurring rules materialize nothing up front (see rules POST) --
+        // occurrences are computed on demand for whatever range is queried, like
+        // Google Calendar/Outlook treat recurring events. Only done on the first
+        // page of a from/to query: virtual occurrences don't participate in the
+        // real-row cursor, so they'd either be skipped or duplicated on later pages.
+        let virtualItems: Record<string, unknown>[] = []
+        if (!cursor && parsed.data.from && parsed.data.to) {
+          virtualItems = await virtualOccurrencesInRange(
+            context.supabase,
+            parsed.data.from,
+            parsed.data.to,
+          )
+        }
+
         const body = {
-          items: items.map(todoDto),
+          items: [...items.map(todoDto), ...virtualItems].sort((a, b) =>
+            String(a.scheduledDate).localeCompare(String(b.scheduledDate)) ||
+            Number(a.sortOrder) - Number(b.sortOrder) || String(a.id).localeCompare(String(b.id))
+          ),
           nextCursor: hasMore ? encodeTodoCursor(items.at(-1)!) : null,
           hasMore,
           appliedFilters: parsed.data,
         }
-        return success(body, 200, 'todos.list', items.length)
+        return success(body, 200, 'todos.list', items.length + virtualItems.length)
       }
 
       if (request.method === 'POST' && hasItemPath && action === 'reschedule') {
@@ -280,6 +352,47 @@ export default {
             currentRequestId,
           )
         }
+
+        // task-mode recurring rules keep exactly one materialized occurrence at a
+        // time; completing it advances the series by materializing the next one.
+        // Best-effort: the completion itself already succeeded, so a failure here
+        // shouldn't turn into an error response for an action the user already got.
+        if (data.schedule_rule_id && data.status === 'completed') {
+          try {
+            const rule = await context.supabase
+              .from('schedule_rules')
+              .select(ruleSelect)
+              .eq('id', data.schedule_rule_id as string)
+              .maybeSingle()
+            if (rule.error) throw rule.error
+            if (rule.data && rule.data.entry_kind === 'task') {
+              const next = nextOccurrenceAfter(
+                {
+                  frequency: rule.data.frequency as string,
+                  interval: rule.data.step_interval as number,
+                  anchorDate: rule.data.anchor_date as string,
+                  untilDate: rule.data.until_date as string | null,
+                  count: rule.data.occurrence_count as number | null,
+                },
+                data.scheduled_date as string,
+              )
+              if (next) {
+                const row = await materializeRow(rule.data, next, context.userClaims!.id)
+                const upserted = await context.supabase
+                  .from('todos')
+                  .upsert(row, { onConflict: 'id' })
+                if (upserted.error) throw upserted.error
+              }
+            }
+          } catch (materialiseError) {
+            console.error(JSON.stringify({
+              requestId: currentRequestId,
+              operation: 'todos.materialiseNext',
+              error: materialiseError,
+            }))
+          }
+        }
+
         return success(todoDto(data), 200, 'todos.update', 1)
       }
 
