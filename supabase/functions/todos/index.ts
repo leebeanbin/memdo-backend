@@ -36,7 +36,7 @@ async function virtualOccurrencesInRange(
   supabase: { from: (table: string) => any },
   from: string,
   to: string,
-): Promise<Record<string, unknown>[]> {
+): Promise<{ items: Record<string, unknown>[]; windowEnd: string }> {
   const clampedTo = addDays(from, MAX_VIRTUAL_WINDOW_DAYS) < to
     ? addDays(from, MAX_VIRTUAL_WINDOW_DAYS)
     : to
@@ -45,10 +45,17 @@ async function virtualOccurrencesInRange(
     // Deliberately not filtering out soft-deleted rows: a deleted occurrence is
     // still "spoken for" and must not regenerate as virtual on the next list --
     // otherwise deleting one occurrence of a recurring event can never stick.
+    //
+    // Deliberately EXCLUDING exception rows (is_recurrence_exception = true,
+    // set by reschedule_todo on the replacement row): a rescheduled occurrence
+    // has moved away from the rule's regular pattern and must not suppress the
+    // target date's own genuine occurrence -- they're two independent items
+    // that happen to land on the same day.
     supabase
       .from('todos')
       .select('schedule_rule_id,scheduled_date')
       .not('schedule_rule_id', 'is', null)
+      .eq('is_recurrence_exception', false)
       .gte('scheduled_date', from)
       .lte('scheduled_date', clampedTo),
   ])
@@ -79,7 +86,7 @@ async function virtualOccurrencesInRange(
       pending.push(virtualOccurrenceDto(rule, date))
     }
   }
-  return await Promise.all(pending)
+  return { items: await Promise.all(pending), windowEnd: clampedTo }
 }
 
 export default {
@@ -171,6 +178,11 @@ export default {
         // page of a from/to query: virtual occurrences don't participate in the
         // real-row cursor, so they'd either be skipped or duplicated on later pages.
         let virtualItems: Record<string, unknown>[] = []
+        // Virtual occurrences are only ever computed up to this date, even if the
+        // caller asked for a wider range (see MAX_VIRTUAL_WINDOW_DAYS) -- surfaced
+        // in appliedFilters below so a truncated response is distinguishable from
+        // "the rule genuinely has no more occurrences."
+        let virtualWindowEnd: string | null = null
         // Virtual occurrences are always synthesized as status 'planned' -- if the
         // caller filtered to statuses that exclude it, none of them can match, so
         // don't bother generating (and don't leak unfiltered ones into a filtered
@@ -178,11 +190,13 @@ export default {
         const statusAllowsVirtual = !parsed.data.status?.length ||
           parsed.data.status.includes('planned')
         if (!cursor && parsed.data.from && parsed.data.to && statusAllowsVirtual) {
-          virtualItems = await virtualOccurrencesInRange(
+          const virtual = await virtualOccurrencesInRange(
             context.supabase,
             parsed.data.from,
             parsed.data.to,
           )
+          virtualItems = virtual.items
+          virtualWindowEnd = virtual.windowEnd
         }
 
         const body = {
@@ -192,7 +206,9 @@ export default {
           ),
           nextCursor: hasMore ? encodeTodoCursor(items.at(-1)!) : null,
           hasMore,
-          appliedFilters: parsed.data,
+          appliedFilters: virtualWindowEnd && virtualWindowEnd < parsed.data.to!
+            ? { ...parsed.data, recurringOccurrencesThrough: virtualWindowEnd }
+            : parsed.data,
         }
         return success(body, 200, 'todos.list', items.length + virtualItems.length)
       }
@@ -323,6 +339,18 @@ export default {
           .single()
 
         if (!error) return success(todoDto(data), 201, 'todos.create', 1)
+        // scheduleRuleId is client-supplied; a nonexistent (or, since the FK
+        // check runs before RLS would ever filter it, another user's) rule id
+        // fails the foreign key rather than something we validated ourselves.
+        // Surface it as a normal validation error, not a 500.
+        if (error.code === '23503') {
+          return apiError(
+            'INVALID_REQUEST',
+            '연결할 반복 규칙을 찾을 수 없습니다.',
+            400,
+            currentRequestId,
+          )
+        }
         if (error.code !== '23505') throw error
 
         const existing = await context.supabase

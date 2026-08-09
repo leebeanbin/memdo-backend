@@ -136,6 +136,11 @@ export function todoInsert(input: TodoInput, userId: string, id: string, request
     // todoValues() is shared and PATCH callers don't (and shouldn't have to)
     // resend the rule link on every unrelated field edit.
     schedule_rule_id: input.scheduleRuleId ?? null,
+    // A client materializing a virtual occurrence (touching it for the first
+    // time) goes through this same create path -- keep its provenance
+    // consistent with materializeRow() rather than falling through to the
+    // 'manual' column default.
+    source: input.scheduleRuleId ? 'recurring' : 'manual',
     creation_request_hash: requestHash,
   }
 }
