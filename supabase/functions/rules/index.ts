@@ -1,6 +1,11 @@
 import { z } from 'zod'
 import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
-import { materializeRow, ruleSelect, scheduleRuleInputSchema } from '../_shared/rule-contract.ts'
+import {
+  firstOccurrence,
+  materializeRow,
+  ruleSelect,
+  scheduleRuleInputSchema,
+} from '../_shared/rule-contract.ts'
 
 function ruleDto(row: Record<string, unknown>) {
   return {
@@ -159,12 +164,22 @@ export default {
         // calendar forward rather than working through one item at a time.
         const rows: Record<string, unknown>[] = []
         if (input.entryKind === 'task') {
-          rows.push(await materializeRow(rule, input.anchorDate, userId))
+          // Not necessarily the anchor date itself -- e.g. a 'weekdays' rule
+          // anchored on a Saturday materializes the following Monday.
+          const firstDate = firstOccurrence({
+            frequency: input.frequency,
+            interval: input.interval,
+            anchorDate: input.anchorDate,
+            untilDate: input.untilDate,
+            count: input.count,
+          })
+          if (firstDate) rows.push(await materializeRow(rule, firstDate, userId))
         }
 
         if (rows.length > 0) {
           const materialised = await context.supabase.from('todos').upsert(rows, {
             onConflict: 'id',
+            ignoreDuplicates: true,
           })
           if (materialised.error) throw materialised.error
         }

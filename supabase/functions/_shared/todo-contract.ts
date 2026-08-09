@@ -132,6 +132,10 @@ export function todoInsert(input: TodoInput, userId: string, id: string, request
     id,
     user_id: userId,
     ...todoValues(input),
+    // Only set at creation -- todoUpdate must never touch this column, since
+    // todoValues() is shared and PATCH callers don't (and shouldn't have to)
+    // resend the rule link on every unrelated field edit.
+    schedule_rule_id: input.scheduleRuleId ?? null,
     creation_request_hash: requestHash,
   }
 }
@@ -169,7 +173,6 @@ function todoValues(input: TodoInput) {
     estimated_minutes: input.estimatedMinutes ?? null,
     reminder_offset_minutes: input.reminderOffsetMinutes ?? null,
     sort_order: input.sortOrder,
-    schedule_rule_id: input.scheduleRuleId ?? null,
   }
 }
 

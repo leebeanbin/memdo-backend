@@ -169,10 +169,27 @@ export function expandOccurrences(rule: RecurrenceFields, from: string, to: stri
  * series has ended (count/untilDate exhausted). Used for task-mode rules,
  * which materialize one occurrence at a time instead of a bulk window.
  */
+/** A fixed 2-year search window misses the next occurrence of any rule whose
+ * interval is large enough to jump past it (e.g. every 3 years, every 25
+ * months) -- the series would silently end on the first completion. Size the
+ * window to the rule's own cadence instead. */
+function searchWindowDays(frequency: string, interval: number): number {
+  const unitDays = frequency === 'yearly' ? 366 : frequency === 'monthly' ? 31 : 7
+  return Math.max(732, interval * unitDays * 2 + 366)
+}
+
 export function nextOccurrenceAfter(rule: RecurrenceFields, afterDate: string): string | null {
   const searchStart = addDays(afterDate, 1)
-  const searchEnd = addDays(afterDate, 366 * 2)
+  const searchEnd = addDays(afterDate, searchWindowDays(rule.frequency, rule.interval))
   return expandOccurrences(rule, searchStart, searchEnd)[0] ?? null
+}
+
+/** The rule's own first valid occurrence on/after its anchor date -- not
+ * necessarily the anchor date itself (e.g. a 'weekdays' rule anchored on a
+ * Saturday should materialize the following Monday, not the Saturday). */
+export function firstOccurrence(rule: RecurrenceFields): string | null {
+  const searchEnd = addDays(rule.anchorDate, searchWindowDays(rule.frequency, rule.interval))
+  return expandOccurrences(rule, rule.anchorDate, searchEnd)[0] ?? null
 }
 
 /** Deterministic id for a rule+date pair, so re-materializing the same
@@ -216,6 +233,7 @@ export async function materializeRow(
     reminder_offset_minutes: rule.reminder_offset_minutes ?? null,
     status: 'planned',
     progress: 0,
+    completed_at: null,
     source: 'recurring',
     is_recurrence_exception: false,
     schedule_rule_id: rule.id,

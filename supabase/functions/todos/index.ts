@@ -30,11 +30,13 @@ async function virtualOccurrencesInRange(
 ): Promise<Record<string, unknown>[]> {
   const [rules, existing] = await Promise.all([
     supabase.from('schedule_rules').select(ruleSelect).eq('entry_kind', 'event'),
+    // Deliberately not filtering out soft-deleted rows: a deleted occurrence is
+    // still "spoken for" and must not regenerate as virtual on the next list --
+    // otherwise deleting one occurrence of a recurring event can never stick.
     supabase
       .from('todos')
       .select('schedule_rule_id,scheduled_date')
       .not('schedule_rule_id', 'is', null)
-      .is('deleted_at', null)
       .gte('scheduled_date', from)
       .lte('scheduled_date', to),
   ])
@@ -157,7 +159,13 @@ export default {
         // page of a from/to query: virtual occurrences don't participate in the
         // real-row cursor, so they'd either be skipped or duplicated on later pages.
         let virtualItems: Record<string, unknown>[] = []
-        if (!cursor && parsed.data.from && parsed.data.to) {
+        // Virtual occurrences are always synthesized as status 'planned' -- if the
+        // caller filtered to statuses that exclude it, none of them can match, so
+        // don't bother generating (and don't leak unfiltered ones into a filtered
+        // response either).
+        const statusAllowsVirtual = !parsed.data.status?.length ||
+          parsed.data.status.includes('planned')
+        if (!cursor && parsed.data.from && parsed.data.to && statusAllowsVirtual) {
           virtualItems = await virtualOccurrencesInRange(
             context.supabase,
             parsed.data.from,
@@ -378,9 +386,14 @@ export default {
               )
               if (next) {
                 const row = await materializeRow(rule.data, next, context.userClaims!.id)
+                // ignoreDuplicates: a plain upsert would overwrite an
+                // already-materialized later occurrence's status/completed_at/
+                // version with this fresh row's defaults on ON CONFLICT, which
+                // can violate todos_completion_check and regress its version.
+                // This call should only ever insert a genuinely new row.
                 const upserted = await context.supabase
                   .from('todos')
-                  .upsert(row, { onConflict: 'id' })
+                  .upsert(row, { onConflict: 'id', ignoreDuplicates: true })
                 if (upserted.error) throw upserted.error
               }
             }
@@ -388,7 +401,7 @@ export default {
             console.error(JSON.stringify({
               requestId: currentRequestId,
               operation: 'todos.materialiseNext',
-              error: materialiseError,
+              error: String(materialiseError),
             }))
           }
         }
