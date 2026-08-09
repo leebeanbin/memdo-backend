@@ -73,3 +73,23 @@ import_map = "../deno.json"
 [functions.reviews]
 verify_jwt = true
 import_map = "../deno.json"
+
+[functions.google-calendar-start]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.google-calendar-callback]
+verify_jwt = false
+import_map = "../deno.json"
+
+[functions.google-calendar-status]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.google-calendar-disconnect]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.google-calendar-sync]
+verify_jwt = false
+import_map = "../deno.json"

@@ -1,6 +1,14 @@
 import { z } from 'zod'
 import { apiError, json, logRequest, responseByteLength, sha256, withApi } from '../_shared/http.ts'
 import {
+  addDays,
+  expandOccurrences,
+  materializeRow,
+  nextOccurrenceAfter,
+  ruleSelect,
+  virtualOccurrenceDto,
+} from '../_shared/rule-contract.ts'
+import {
   decodeTodoCursor,
   encodeTodoCursor,
   todoDeleteSchema,
@@ -13,6 +21,123 @@ import {
   todoUpdate,
   todoUpdateSchema,
 } from '../_shared/todo-contract.ts'
+
+// Clamp the virtual-expansion window regardless of what [from, to] the caller
+// asked for -- an unbounded range (or one client-supplied by mistake) times
+// several event-mode rules would otherwise mean thousands of sequential
+// crypto.subtle.digest calls on a single Edge Function request. The client
+// never asks for more than ~90 days at a time; 366 comfortably covers a full
+// year of browsing in one call.
+const MAX_VIRTUAL_WINDOW_DAYS = 366
+
+/** Computes event-mode occurrences for [from, to] that don't already have a real
+ * materialized row, without touching the DB beyond two cheap reads. */
+async function virtualOccurrencesInRange(
+  supabase: { from: (table: string) => any },
+  from: string,
+  to: string,
+): Promise<{ items: Record<string, unknown>[]; windowEnd: string }> {
+  const clampedTo = addDays(from, MAX_VIRTUAL_WINDOW_DAYS) < to
+    ? addDays(from, MAX_VIRTUAL_WINDOW_DAYS)
+    : to
+  const [rules, existing] = await Promise.all([
+    supabase.from('schedule_rules').select(ruleSelect).eq('entry_kind', 'event'),
+    // Deliberately not filtering out soft-deleted rows: a deleted occurrence is
+    // still "spoken for" and must not regenerate as virtual on the next list --
+    // otherwise deleting one occurrence of a recurring event can never stick.
+    //
+    // Deliberately EXCLUDING exception rows (is_recurrence_exception = true,
+    // set by reschedule_todo on the replacement row): a rescheduled occurrence
+    // has moved away from the rule's regular pattern and must not suppress the
+    // target date's own genuine occurrence -- they're two independent items
+    // that happen to land on the same day.
+    supabase
+      .from('todos')
+      .select('schedule_rule_id,scheduled_date')
+      .not('schedule_rule_id', 'is', null)
+      .eq('is_recurrence_exception', false)
+      .gte('scheduled_date', from)
+      .lte('scheduled_date', clampedTo),
+  ])
+  if (rules.error) throw rules.error
+  if (existing.error) throw existing.error
+
+  const materialized = new Set(
+    (existing.data as { schedule_rule_id: string; scheduled_date: string }[]).map((row) =>
+      `${row.schedule_rule_id}:${row.scheduled_date}`
+    ),
+  )
+
+  const pending: Promise<Record<string, unknown>>[] = []
+  for (const rule of rules.data as Record<string, unknown>[]) {
+    const dates = expandOccurrences(
+      {
+        frequency: rule.frequency as string,
+        interval: rule.step_interval as number,
+        anchorDate: rule.anchor_date as string,
+        untilDate: rule.until_date as string | null,
+        count: rule.occurrence_count as number | null,
+      },
+      from,
+      clampedTo,
+    )
+    for (const date of dates) {
+      if (materialized.has(`${rule.id}:${date}`)) continue
+      pending.push(virtualOccurrenceDto(rule, date))
+    }
+  }
+  return { items: await Promise.all(pending), windowEnd: clampedTo }
+}
+
+/** Read-only Google Calendar events mirrored into the same list as todos, the
+ * same way virtual recurring occurrences are: merged in, never DB-backed
+ * from the client's perspective, calendarId points at the synthetic "Google
+ * Calendar" entry GET /calendars appends when a connection is active. */
+async function googleMirrorEventsInRange(
+  supabase: { from: (table: string) => any },
+  from: string,
+  to: string,
+): Promise<Record<string, unknown>[]> {
+  const { data, error } = await supabase
+    .from('google_calendar_mirror_events')
+    .select('id,connection_id,title,is_all_day,start_at,end_at,location_name')
+    .lt('start_at', `${to}T23:59:59.999Z`)
+    .gt('end_at', `${from}T00:00:00.000Z`)
+  if (error) throw error
+
+  return (data as Record<string, unknown>[]).map((row) => ({
+    id: row.id,
+    scheduledDate: String(row.start_at).slice(0, 10),
+    calendarId: row.connection_id,
+    title: row.title,
+    entryKind: 'event',
+    isAllDay: row.is_all_day,
+    note: null,
+    emoji: null,
+    color: null,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    dueAt: null,
+    location: row.location_name ? { name: row.location_name } : null,
+    timeBucket: 'anytime',
+    estimatedMinutes: null,
+    reminderOffsetMinutes: null,
+    sortOrder: 0,
+    status: 'planned',
+    progress: 0,
+    source: 'google_calendar',
+    isRecurrenceException: false,
+    dailyPlanId: null,
+    scheduleRuleId: null,
+    isVirtual: false,
+    rescheduledFromId: null,
+    version: 0,
+    completedAt: null,
+    deletedAt: null,
+    createdAt: null,
+    updatedAt: null,
+  }))
+}
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -96,13 +221,57 @@ export default {
 
         const hasMore = data.length > parsed.data.limit
         const items = data.slice(0, parsed.data.limit)
+
+        // event-mode recurring rules materialize nothing up front (see rules POST) --
+        // occurrences are computed on demand for whatever range is queried, like
+        // Google Calendar/Outlook treat recurring events. Only done on the first
+        // page of a from/to query: virtual occurrences don't participate in the
+        // real-row cursor, so they'd either be skipped or duplicated on later pages.
+        let virtualItems: Record<string, unknown>[] = []
+        // Virtual occurrences are only ever computed up to this date, even if the
+        // caller asked for a wider range (see MAX_VIRTUAL_WINDOW_DAYS) -- surfaced
+        // in appliedFilters below so a truncated response is distinguishable from
+        // "the rule genuinely has no more occurrences."
+        let virtualWindowEnd: string | null = null
+        // Virtual occurrences are always synthesized as status 'planned' -- if the
+        // caller filtered to statuses that exclude it, none of them can match, so
+        // don't bother generating (and don't leak unfiltered ones into a filtered
+        // response either).
+        const statusAllowsVirtual = !parsed.data.status?.length ||
+          parsed.data.status.includes('planned')
+        let googleItems: Record<string, unknown>[] = []
+        if (!cursor && parsed.data.from && parsed.data.to && statusAllowsVirtual) {
+          const virtual = await virtualOccurrencesInRange(
+            context.supabase,
+            parsed.data.from,
+            parsed.data.to,
+          )
+          virtualItems = virtual.items
+          virtualWindowEnd = virtual.windowEnd
+          googleItems = await googleMirrorEventsInRange(
+            context.supabase,
+            parsed.data.from,
+            parsed.data.to,
+          )
+        }
+
         const body = {
-          items: items.map(todoDto),
+          items: [...items.map(todoDto), ...virtualItems, ...googleItems].sort((a, b) =>
+            String(a.scheduledDate).localeCompare(String(b.scheduledDate)) ||
+            Number(a.sortOrder) - Number(b.sortOrder) || String(a.id).localeCompare(String(b.id))
+          ),
           nextCursor: hasMore ? encodeTodoCursor(items.at(-1)!) : null,
           hasMore,
-          appliedFilters: parsed.data,
+          appliedFilters: virtualWindowEnd && virtualWindowEnd < parsed.data.to!
+            ? { ...parsed.data, recurringOccurrencesThrough: virtualWindowEnd }
+            : parsed.data,
         }
-        return success(body, 200, 'todos.list', items.length)
+        return success(
+          body,
+          200,
+          'todos.list',
+          items.length + virtualItems.length + googleItems.length,
+        )
       }
 
       if (request.method === 'POST' && hasItemPath && action === 'reschedule') {
@@ -231,6 +400,18 @@ export default {
           .single()
 
         if (!error) return success(todoDto(data), 201, 'todos.create', 1)
+        // scheduleRuleId is client-supplied; a nonexistent (or, since the FK
+        // check runs before RLS would ever filter it, another user's) rule id
+        // fails the foreign key rather than something we validated ourselves.
+        // Surface it as a normal validation error, not a 500.
+        if (error.code === '23503') {
+          return apiError(
+            'INVALID_REQUEST',
+            '연결할 반복 규칙을 찾을 수 없습니다.',
+            400,
+            currentRequestId,
+          )
+        }
         if (error.code !== '23505') throw error
 
         const existing = await context.supabase
@@ -280,6 +461,52 @@ export default {
             currentRequestId,
           )
         }
+
+        // task-mode recurring rules keep exactly one materialized occurrence at a
+        // time; completing it advances the series by materializing the next one.
+        // Best-effort: the completion itself already succeeded, so a failure here
+        // shouldn't turn into an error response for an action the user already got.
+        if (data.schedule_rule_id && data.status === 'completed') {
+          try {
+            const rule = await context.supabase
+              .from('schedule_rules')
+              .select(ruleSelect)
+              .eq('id', data.schedule_rule_id as string)
+              .maybeSingle()
+            if (rule.error) throw rule.error
+            if (rule.data && rule.data.entry_kind === 'task') {
+              const next = nextOccurrenceAfter(
+                {
+                  frequency: rule.data.frequency as string,
+                  interval: rule.data.step_interval as number,
+                  anchorDate: rule.data.anchor_date as string,
+                  untilDate: rule.data.until_date as string | null,
+                  count: rule.data.occurrence_count as number | null,
+                },
+                data.scheduled_date as string,
+              )
+              if (next) {
+                const row = await materializeRow(rule.data, next, context.userClaims!.id)
+                // ignoreDuplicates: a plain upsert would overwrite an
+                // already-materialized later occurrence's status/completed_at/
+                // version with this fresh row's defaults on ON CONFLICT, which
+                // can violate todos_completion_check and regress its version.
+                // This call should only ever insert a genuinely new row.
+                const upserted = await context.supabase
+                  .from('todos')
+                  .upsert(row, { onConflict: 'id', ignoreDuplicates: true })
+                if (upserted.error) throw upserted.error
+              }
+            }
+          } catch (materialiseError) {
+            console.error(JSON.stringify({
+              requestId: currentRequestId,
+              operation: 'todos.materialiseNext',
+              error: String(materialiseError),
+            }))
+          }
+        }
+
         return success(todoDto(data), 200, 'todos.update', 1)
       }
 

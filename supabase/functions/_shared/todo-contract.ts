@@ -14,6 +14,7 @@ const locationSchema = z.object({
 export const todoInputSchema = z.object({
   scheduledDate: z.iso.date(),
   calendarId: z.uuid(),
+  scheduleRuleId: z.uuid().nullable().optional(),
   title: z.string().trim().min(1).max(120),
   entryKind: z.enum(['event', 'task']),
   isAllDay: z.boolean().default(false),
@@ -124,13 +125,22 @@ export type TodoInput = z.infer<typeof todoInputSchema>
 export type TodoUpdateInput = z.infer<typeof todoUpdateSchema>
 
 export const todoSelect =
-  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at'
+  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at'
 
 export function todoInsert(input: TodoInput, userId: string, id: string, requestHash: string) {
   return {
     id,
     user_id: userId,
     ...todoValues(input),
+    // Only set at creation -- todoUpdate must never touch this column, since
+    // todoValues() is shared and PATCH callers don't (and shouldn't have to)
+    // resend the rule link on every unrelated field edit.
+    schedule_rule_id: input.scheduleRuleId ?? null,
+    // A client materializing a virtual occurrence (touching it for the first
+    // time) goes through this same create path -- keep its provenance
+    // consistent with materializeRow() rather than falling through to the
+    // 'manual' column default.
+    source: input.scheduleRuleId ? 'recurring' : 'manual',
     creation_request_hash: requestHash,
   }
 }
@@ -207,7 +217,8 @@ export function todoDto(row: TodoRow) {
     source: row.source,
     isRecurrenceException: row.is_recurrence_exception,
     dailyPlanId: null,
-    scheduleRuleId: null,
+    scheduleRuleId: row.schedule_rule_id,
+    isVirtual: false,
     rescheduledFromId: row.rescheduled_from_id,
     version: row.version,
     completedAt: row.completed_at,
