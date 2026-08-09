@@ -89,6 +89,56 @@ async function virtualOccurrencesInRange(
   return { items: await Promise.all(pending), windowEnd: clampedTo }
 }
 
+/** Read-only Google Calendar events mirrored into the same list as todos, the
+ * same way virtual recurring occurrences are: merged in, never DB-backed
+ * from the client's perspective, calendarId points at the synthetic "Google
+ * Calendar" entry GET /calendars appends when a connection is active. */
+async function googleMirrorEventsInRange(
+  supabase: { from: (table: string) => any },
+  from: string,
+  to: string,
+): Promise<Record<string, unknown>[]> {
+  const { data, error } = await supabase
+    .from('google_calendar_mirror_events')
+    .select('id,connection_id,title,is_all_day,start_at,end_at,location_name')
+    .lt('start_at', `${to}T23:59:59.999Z`)
+    .gt('end_at', `${from}T00:00:00.000Z`)
+  if (error) throw error
+
+  return (data as Record<string, unknown>[]).map((row) => ({
+    id: row.id,
+    scheduledDate: String(row.start_at).slice(0, 10),
+    calendarId: row.connection_id,
+    title: row.title,
+    entryKind: 'event',
+    isAllDay: row.is_all_day,
+    note: null,
+    emoji: null,
+    color: null,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    dueAt: null,
+    location: row.location_name ? { name: row.location_name } : null,
+    timeBucket: 'anytime',
+    estimatedMinutes: null,
+    reminderOffsetMinutes: null,
+    sortOrder: 0,
+    status: 'planned',
+    progress: 0,
+    source: 'google_calendar',
+    isRecurrenceException: false,
+    dailyPlanId: null,
+    scheduleRuleId: null,
+    isVirtual: false,
+    rescheduledFromId: null,
+    version: 0,
+    completedAt: null,
+    deletedAt: null,
+    createdAt: null,
+    updatedAt: null,
+  }))
+}
+
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
@@ -189,6 +239,7 @@ export default {
         // response either).
         const statusAllowsVirtual = !parsed.data.status?.length ||
           parsed.data.status.includes('planned')
+        let googleItems: Record<string, unknown>[] = []
         if (!cursor && parsed.data.from && parsed.data.to && statusAllowsVirtual) {
           const virtual = await virtualOccurrencesInRange(
             context.supabase,
@@ -197,10 +248,15 @@ export default {
           )
           virtualItems = virtual.items
           virtualWindowEnd = virtual.windowEnd
+          googleItems = await googleMirrorEventsInRange(
+            context.supabase,
+            parsed.data.from,
+            parsed.data.to,
+          )
         }
 
         const body = {
-          items: [...items.map(todoDto), ...virtualItems].sort((a, b) =>
+          items: [...items.map(todoDto), ...virtualItems, ...googleItems].sort((a, b) =>
             String(a.scheduledDate).localeCompare(String(b.scheduledDate)) ||
             Number(a.sortOrder) - Number(b.sortOrder) || String(a.id).localeCompare(String(b.id))
           ),
@@ -210,7 +266,12 @@ export default {
             ? { ...parsed.data, recurringOccurrencesThrough: virtualWindowEnd }
             : parsed.data,
         }
-        return success(body, 200, 'todos.list', items.length + virtualItems.length)
+        return success(
+          body,
+          200,
+          'todos.list',
+          items.length + virtualItems.length + googleItems.length,
+        )
       }
 
       if (request.method === 'POST' && hasItemPath && action === 'reschedule') {
