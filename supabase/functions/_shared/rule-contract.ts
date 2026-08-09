@@ -66,7 +66,7 @@ function fromDayNumber(value: number): string {
   return iso(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate())
 }
 
-function addDays(date: string, days: number): string {
+export function addDays(date: string, days: number): string {
   return fromDayNumber(dayNumber(date) + days)
 }
 

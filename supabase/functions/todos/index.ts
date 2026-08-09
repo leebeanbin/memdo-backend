@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { apiError, json, logRequest, responseByteLength, sha256, withApi } from '../_shared/http.ts'
 import {
+  addDays,
   expandOccurrences,
   materializeRow,
   nextOccurrenceAfter,
@@ -21,6 +22,14 @@ import {
   todoUpdateSchema,
 } from '../_shared/todo-contract.ts'
 
+// Clamp the virtual-expansion window regardless of what [from, to] the caller
+// asked for -- an unbounded range (or one client-supplied by mistake) times
+// several event-mode rules would otherwise mean thousands of sequential
+// crypto.subtle.digest calls on a single Edge Function request. The client
+// never asks for more than ~90 days at a time; 366 comfortably covers a full
+// year of browsing in one call.
+const MAX_VIRTUAL_WINDOW_DAYS = 366
+
 /** Computes event-mode occurrences for [from, to] that don't already have a real
  * materialized row, without touching the DB beyond two cheap reads. */
 async function virtualOccurrencesInRange(
@@ -28,6 +37,9 @@ async function virtualOccurrencesInRange(
   from: string,
   to: string,
 ): Promise<Record<string, unknown>[]> {
+  const clampedTo = addDays(from, MAX_VIRTUAL_WINDOW_DAYS) < to
+    ? addDays(from, MAX_VIRTUAL_WINDOW_DAYS)
+    : to
   const [rules, existing] = await Promise.all([
     supabase.from('schedule_rules').select(ruleSelect).eq('entry_kind', 'event'),
     // Deliberately not filtering out soft-deleted rows: a deleted occurrence is
@@ -38,7 +50,7 @@ async function virtualOccurrencesInRange(
       .select('schedule_rule_id,scheduled_date')
       .not('schedule_rule_id', 'is', null)
       .gte('scheduled_date', from)
-      .lte('scheduled_date', to),
+      .lte('scheduled_date', clampedTo),
   ])
   if (rules.error) throw rules.error
   if (existing.error) throw existing.error
@@ -49,7 +61,7 @@ async function virtualOccurrencesInRange(
     ),
   )
 
-  const virtualItems: Record<string, unknown>[] = []
+  const pending: Promise<Record<string, unknown>>[] = []
   for (const rule of rules.data as Record<string, unknown>[]) {
     const dates = expandOccurrences(
       {
@@ -60,14 +72,14 @@ async function virtualOccurrencesInRange(
         count: rule.occurrence_count as number | null,
       },
       from,
-      to,
+      clampedTo,
     )
     for (const date of dates) {
       if (materialized.has(`${rule.id}:${date}`)) continue
-      virtualItems.push(await virtualOccurrenceDto(rule, date))
+      pending.push(virtualOccurrenceDto(rule, date))
     }
   }
-  return virtualItems
+  return await Promise.all(pending)
 }
 
 export default {
