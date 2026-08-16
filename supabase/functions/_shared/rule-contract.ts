@@ -262,6 +262,7 @@ export async function virtualOccurrenceDto(
     entryKind: rule.entry_kind,
     isAllDay: rule.is_all_day,
     note: rule.note,
+    meetingUrl: null,
     emoji: null,
     color: null,
     startAt: startTime ? localInstant(date, startTime, timezoneOffsetMinutes) : null,
