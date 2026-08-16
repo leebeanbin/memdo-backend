@@ -1,11 +1,25 @@
-import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
+import { apiError, requestId as extractRequestId, withApi } from '../_shared/http.ts'
 import {
+  accumulatedToolCallsArray,
+  applyStreamChunk,
   chatRequestSchema,
   cloudAgentTools,
   DEFAULT_OPENROUTER_MODEL,
+  type ExistingScheduleRow,
+  expandScope,
+  findConflict,
+  formatSlot,
   MAX_TOOL_ITERATIONS,
+  newStreamAccumulator,
   OPENROUTER_CHAT_URL,
+  parseStreamLine,
+  type ProposedScheduleArgs,
+  RATE_LIMIT_PER_HOUR,
+  resolveDate,
+  type StreamAccumulator,
   systemPrompt,
+  timeOn,
+  toISODate,
 } from '../_shared/agent-cloud-contract.ts'
 import { OPENROUTER_PROVIDER } from '../_shared/agent-key-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
@@ -18,8 +32,20 @@ type ChatMessage = {
   name?: string
 }
 
-function todayString(): string {
-  return new Date().toISOString().slice(0, 10)
+async function fetchSchedules(
+  supabase: { from: (table: string) => any },
+  from: string,
+  to: string,
+): Promise<ExistingScheduleRow[]> {
+  const { data, error } = await supabase
+    .from('todos')
+    .select('title,scheduled_date,start_at,end_at')
+    .is('deleted_at', null)
+    .gte('scheduled_date', from)
+    .lte('scheduled_date', to)
+    .limit(200)
+  if (error) throw error
+  return data as ExistingScheduleRow[]
 }
 
 async function searchSchedules(
@@ -27,16 +53,19 @@ async function searchSchedules(
   args: { from?: string; to?: string },
 ): Promise<unknown> {
   if (!args.from || !args.to) return { error: 'from and to are required' }
-  const { data, error } = await supabase
-    .from('todos')
-    .select('title,entry_kind,scheduled_date,start_at,end_at,status')
-    .is('deleted_at', null)
-    .gte('scheduled_date', args.from)
-    .lte('scheduled_date', args.to)
-    .order('scheduled_date')
-    .limit(100)
-  if (error) return { error: error.message }
-  return { items: data }
+  try {
+    const rows = await fetchSchedules(supabase, args.from, args.to)
+    return {
+      items: rows.map((r) => ({
+        title: r.title,
+        scheduledDate: r.scheduled_date,
+        startAt: r.start_at,
+        endAt: r.end_at,
+      })),
+    }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 async function findFreeSlots(
@@ -48,18 +77,13 @@ async function findFreeSlots(
   const from = dates[0]
   const to = dates.at(-1) ?? dates[0]
 
-  const { data, error } = await supabase
-    .from('todos')
-    .select('scheduled_date,start_at,end_at')
-    .is('deleted_at', null)
-    .eq('entry_kind', 'event')
-    .gte('scheduled_date', from)
-    .lte('scheduled_date', to)
-  if (error) return { error: error.message }
-
-  const busy =
-    (data as { scheduled_date: string; start_at: string | null; end_at: string | null }[])
-      .filter((row) => row.start_at && row.end_at)
+  let rows: ExistingScheduleRow[]
+  try {
+    rows = await fetchSchedules(supabase, from, to)
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+  const busy = rows.filter((row) => row.start_at && row.end_at)
 
   const lines: string[] = []
   for (const date of dates) {
@@ -90,43 +114,58 @@ async function findFreeSlots(
   return { slots: lines }
 }
 
-function expandScope(scope: string): string[] {
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const toISODate = (d: Date) => d.toISOString().slice(0, 10)
-  if (scope === 'today') return [toISODate(today)]
-  if (scope === 'tomorrow') {
-    const d = new Date(today)
-    d.setDate(d.getDate() + 1)
-    return [toISODate(d)]
+/** Streams one OpenRouter chat-completions call and accumulates the result.
+ * `onContent`, if given, fires live as content deltas arrive -- content and
+ * tool_calls never appear in the same turn for OpenAI-compatible providers,
+ * so it's safe to wire this unconditionally on every iteration: it simply
+ * never fires during a tool-calling turn, and fires in real time during
+ * whichever turn ends up being the final text answer, without needing to
+ * know in advance which turn that'll be. */
+async function callOpenRouterStreamed(
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  onContent?: (chunk: string) => void,
+): Promise<StreamAccumulator> {
+  const response = await fetch(OPENROUTER_CHAT_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model, messages, tools: cloudAgentTools, stream: true }),
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`openrouter ${response.status}: ${await response.text().catch(() => '')}`)
   }
-  if (scope === 'this_week') {
-    return Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(today)
-      d.setDate(d.getDate() + i)
-      return toISODate(d)
-    })
+
+  const acc = newStreamAccumulator()
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const chunk = parseStreamLine(line)
+        if (!chunk) continue
+        applyStreamChunk(acc, chunk)
+        if (chunk.content && onContent) onContent(chunk.content)
+      }
+    }
+  } finally {
+    reader.releaseLock()
   }
-  return [scope]
-}
-
-function timeOn(dateStr: string, hhmm: string | undefined): Date | null {
-  if (!hhmm) return null
-  const [h, m] = hhmm.split(':').map(Number)
-  if (Number.isNaN(h) || Number.isNaN(m)) return null
-  const date = new Date(`${dateStr}T00:00:00`)
-  date.setHours(h, m, 0, 0)
-  return date
-}
-
-function formatSlot(start: Date, end: Date): string {
-  const fmt = (d: Date) => `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
-  return `${fmt(start)}-${fmt(end)}`
+  return acc
 }
 
 export default {
-  fetch: withApi<any>(async (request, context, currentRequestId) => {
-    const startedAt = performance.now()
+  fetch: withApi<any>(async (request, context) => {
+    const currentRequestId = extractRequestId(request)
     const userId = context.userClaims!.id
 
     if (request.method !== 'POST') {
@@ -141,6 +180,32 @@ export default {
     }
 
     const service = serviceClient()
+
+    const hourAgo = new Date(Date.now() - 60 * 60_000).toISOString()
+    const { count: recentCount, error: rateError } = await service
+      .from('agent_chat_requests')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .gte('created_at', hourAgo)
+    if (rateError) {
+      console.error(
+        JSON.stringify({
+          requestId: currentRequestId,
+          operation: 'agent_cloud_chat.rate_check',
+          error: rateError,
+        }),
+      )
+      return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
+    }
+    if ((recentCount ?? 0) >= RATE_LIMIT_PER_HOUR) {
+      return apiError(
+        'RATE_LIMITED',
+        '시간당 요청 한도를 넘었어요. 잠시 후 다시 시도해 주세요.',
+        429,
+        currentRequestId,
+      )
+    }
+
     const { data: keyRow, error: keyError } = await service
       .from('user_api_keys')
       .select('secret_id')
@@ -178,93 +243,127 @@ export default {
       return apiError('INTERNAL_ERROR', 'API 키를 불러오지 못했습니다.', 500, currentRequestId)
     }
 
-    const messages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt(todayString()) },
-      ...parsed.data.history.map((turn) => ({ role: turn.role, content: turn.content })),
-      { role: 'user', content: parsed.data.message },
-    ]
-
-    let proposedSchedule: Record<string, unknown> | null = null
-    let finalText: string | null = null
-
-    try {
-      for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
-        const response = await fetch(OPENROUTER_CHAT_URL, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: Deno.env.get('OPENROUTER_MODEL') || DEFAULT_OPENROUTER_MODEL,
-            messages,
-            tools: cloudAgentTools,
-          }),
-        })
-        if (!response.ok) {
-          throw new Error(`openrouter ${response.status}: ${await response.text()}`)
-        }
-        const body = await response.json()
-        const choice = body.choices?.[0]?.message
-        if (!choice) throw new Error('openrouter returned no message')
-        messages.push(choice)
-
-        const toolCalls = choice.tool_calls ?? []
-        if (toolCalls.length === 0) {
-          finalText = choice.content ?? ''
-          break
-        }
-
-        for (const call of toolCalls) {
-          const args = JSON.parse(call.function.arguments || '{}')
-          let result: unknown
-          switch (call.function.name) {
-            case 'search_schedules':
-              result = await searchSchedules(context.supabase, args)
-              break
-            case 'find_free_slots':
-              result = await findFreeSlots(context.supabase, args)
-              break
-            case 'propose_schedule':
-              proposedSchedule = args
-              result = { ok: true }
-              break
-            default:
-              result = { error: 'unknown tool' }
-          }
-          messages.push({
-            role: 'tool',
-            tool_call_id: call.id,
-            name: call.function.name,
-            content: JSON.stringify(result),
-          })
-        }
-      }
-    } catch (error) {
+    // Logged now (not after) so a request that errors out or times out mid-
+    // flight still counts against the window -- otherwise a slow/failing
+    // loop would be invisible to the rate limit that exists to catch it.
+    const logged = await service.from('agent_chat_requests').insert({ user_id: userId })
+    if (logged.error) {
       console.error(
         JSON.stringify({
           requestId: currentRequestId,
-          operation: 'agent_cloud_chat',
-          error: String(error),
+          operation: 'agent_cloud_chat.rate_log',
+          error: logged.error,
         }),
       )
-      return apiError('INTERNAL_ERROR', 'Agent 응답을 받지 못했습니다.', 502, currentRequestId)
     }
 
-    const body = {
-      message: finalText ?? '요청을 처리하지 못했어요. 다시 시도해 주세요.',
-      proposedSchedule,
-    }
-    logRequest({
-      eventName: 'agent_cloud_chat.reply',
-      requestId: currentRequestId,
-      routeTemplate: '/agent-cloud-chat',
-      method: request.method,
-      status: 200,
-      durationMs: performance.now() - startedAt,
-      responseBytes: responseByteLength(body),
-      returnedRows: 0,
+    const today = new Date()
+    const messages: ChatMessage[] = [
+      { role: 'system', content: systemPrompt(toISODate(today)) },
+      ...parsed.data.history.map((turn) => ({ role: turn.role, content: turn.content })),
+      { role: 'user', content: parsed.data.message },
+    ]
+    const model = parsed.data.model || Deno.env.get('OPENROUTER_MODEL') || DEFAULT_OPENROUTER_MODEL
+
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (obj: unknown) =>
+          controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
+
+        let proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null = null
+        let conflictTitle: string | null = null
+
+        try {
+          for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+            const acc = await callOpenRouterStreamed(
+              apiKey,
+              model,
+              messages,
+              (delta) => send({ delta }),
+            )
+            const toolCalls = accumulatedToolCallsArray(acc)
+
+            if (toolCalls.length === 0) {
+              send({
+                done: true,
+                proposedSchedule: proposedSchedule ? { ...proposedSchedule, conflictTitle } : null,
+              })
+              controller.close()
+              return
+            }
+
+            messages.push({
+              role: 'assistant',
+              content: acc.content || null,
+              tool_calls: toolCalls,
+            })
+
+            for (const call of toolCalls) {
+              const args = JSON.parse(call.function.arguments || '{}')
+              let result: unknown
+              switch (call.function.name) {
+                case 'search_schedules':
+                  result = await searchSchedules(context.supabase, args)
+                  break
+                case 'find_free_slots':
+                  result = await findFreeSlots(context.supabase, args)
+                  break
+                case 'propose_schedule': {
+                  proposedSchedule = args
+                  // Reflection: guaranteed, not dependent on the model
+                  // having called search_schedules first (the system
+                  // prompt asks it to, but nothing enforces that).
+                  const proposedDate = resolveDate(args.date ?? 'today', today)
+                  const existing = await fetchSchedules(
+                    context.supabase,
+                    proposedDate,
+                    proposedDate,
+                  )
+                    .catch(() => [] as ExistingScheduleRow[])
+                  conflictTitle = findConflict(existing, args, today)
+                  result = conflictTitle
+                    ? { ok: true, warning: `Conflicts with existing '${conflictTitle}'` }
+                    : { ok: true }
+                  break
+                }
+                default:
+                  result = { error: 'unknown tool' }
+              }
+              messages.push({
+                role: 'tool',
+                tool_call_id: call.id,
+                name: call.function.name,
+                content: JSON.stringify(result),
+              })
+            }
+          }
+          // Ran out of iterations without a final text turn.
+          send({
+            done: true,
+            proposedSchedule: proposedSchedule ? { ...proposedSchedule, conflictTitle } : null,
+          })
+          controller.close()
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              requestId: currentRequestId,
+              operation: 'agent_cloud_chat',
+              error: String(error),
+            }),
+          )
+          send({ error: 'Agent 응답을 받지 못했습니다.' })
+          controller.close()
+        }
+      },
     })
-    return json(body, 200, currentRequestId)
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/x-ndjson',
+        'X-Request-ID': currentRequestId,
+      },
+    })
   }),
 }

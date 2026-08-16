@@ -8,6 +8,7 @@ export type ErrorCode =
   | 'IDEMPOTENCY_CONFLICT'
   | 'VERSION_CONFLICT'
   | 'RESOURCE_NOT_FOUND'
+  | 'RATE_LIMITED'
   | 'INTERNAL_ERROR'
 
 export function requestId(request: Request): string {
