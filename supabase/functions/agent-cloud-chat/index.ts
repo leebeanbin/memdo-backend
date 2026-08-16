@@ -158,9 +158,11 @@ export default {
       return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
     }
     if (!keyRow) {
-      return apiError('INVALID_REQUEST', 'OpenRouter 연결이 필요해요.', 400, currentRequestId, {
-        code: 'NOT_CONNECTED',
-      })
+      // RESOURCE_NOT_FOUND (the connection resource) rather than
+      // INVALID_REQUEST -- the client's ScheduleAPIError.server already
+      // parses the top-level `code`, so this needs to be a distinct,
+      // existing ErrorCode it can match on rather than a nested detail.
+      return apiError('RESOURCE_NOT_FOUND', 'OpenRouter 연결이 필요해요.', 404, currentRequestId)
     }
     const { data: apiKey, error: readError } = await service.rpc('vault_read_secret', {
       p_id: keyRow.secret_id,
