@@ -97,3 +97,7 @@ import_map = "../deno.json"
 [functions.categories]
 verify_jwt = true
 import_map = "../deno.json"
+
+[functions.workout-logs]
+verify_jwt = true
+import_map = "../deno.json"
