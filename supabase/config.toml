@@ -101,3 +101,11 @@ import_map = "../deno.json"
 [functions.workout-logs]
 verify_jwt = true
 import_map = "../deno.json"
+
+[functions.agent-key]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.agent-cloud-chat]
+verify_jwt = true
+import_map = "../deno.json"
