@@ -93,3 +93,7 @@ import_map = "../deno.json"
 [functions.google-calendar-sync]
 verify_jwt = false
 import_map = "../deno.json"
+
+[functions.categories]
+verify_jwt = true
+import_map = "../deno.json"
