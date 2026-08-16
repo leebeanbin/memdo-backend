@@ -7,14 +7,24 @@ import {
   parseStreamLine,
   resolveDate,
   resolveProposedInterval,
+  timeOn,
 } from './agent-cloud-contract.ts'
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
 }
 
+// Existing-row timestamps go through timeOn() too (same as production
+// values, which are real TIMESTAMPTZ instants) rather than bare
+// "YYYY-MM-DDTHH:mm:ss" strings -- those have no offset, so `new Date(...)`
+// parses them against the *host process's* timezone, which is exactly the
+// ambiguity this whole file's source functions were rewritten to avoid.
+function localAt(hhmm: string): string {
+  return timeOn('2026-08-16', hhmm)!.toISOString()
+}
+
 // Fixed reference point so date-relative tests don't depend on when they run.
-const today = new Date('2026-08-16T00:00:00')
+const today = new Date('2026-08-16T00:00:00Z')
 
 Deno.test('resolveDate handles today/tomorrow/explicit', () => {
   assert(resolveDate('today', today) === '2026-08-16')
@@ -56,8 +66,8 @@ Deno.test('findConflict detects an overlapping existing event', () => {
       {
         title: '팀 회의',
         scheduled_date: '2026-08-16',
-        start_at: '2026-08-16T14:00:00',
-        end_at: '2026-08-16T15:00:00',
+        start_at: localAt('14:00'),
+        end_at: localAt('15:00'),
       },
     ],
     { title: '점심 약속', date: 'today', startTime: '14:30', endTime: '15:30', isTask: false },
@@ -72,8 +82,8 @@ Deno.test('findConflict returns null when nothing overlaps', () => {
       {
         title: '팀 회의',
         scheduled_date: '2026-08-16',
-        start_at: '2026-08-16T09:00:00',
-        end_at: '2026-08-16T10:00:00',
+        start_at: localAt('09:00'),
+        end_at: localAt('10:00'),
       },
     ],
     { title: '점심 약속', date: 'today', startTime: '14:00', endTime: '15:00', isTask: false },
@@ -88,8 +98,8 @@ Deno.test('findConflict is always null for a task -- nothing to overlap', () => 
       {
         title: '팀 회의',
         scheduled_date: '2026-08-16',
-        start_at: '2026-08-16T14:00:00',
-        end_at: '2026-08-16T15:00:00',
+        start_at: localAt('14:00'),
+        end_at: localAt('15:00'),
       },
     ],
     { title: '장보기', date: 'today', isTask: true },
