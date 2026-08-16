@@ -1,7 +1,11 @@
 import { z } from 'zod'
 
 export const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions'
-export const DEFAULT_OPENROUTER_MODEL = 'openai/gpt-4o-mini'
+// Verified live against https://openrouter.ai/api/v1/models on 2026-08-16 --
+// gpt-4o-mini/claude-3.5-sonnet/gemini-2.0-flash (this list's previous
+// values) no longer appear in that response at all. Re-check periodically;
+// OpenRouter's catalog turns over fast and a stale id here just 400s.
+export const DEFAULT_OPENROUTER_MODEL = 'openai/gpt-5.4-mini'
 export const MAX_TOOL_ITERATIONS = 5
 
 // Curated rather than free-text: OpenRouter proxies hundreds of models, most
@@ -9,10 +13,10 @@ export const MAX_TOOL_ITERATIONS = 5
 // this list here (not just in the iOS picker) means the server also rejects
 // a tampered/unexpected model id instead of forwarding it to OpenRouter.
 export const ALLOWED_OPENROUTER_MODELS = [
-  'openai/gpt-4o-mini',
-  'openai/gpt-4o',
-  'anthropic/claude-3.5-sonnet',
-  'google/gemini-2.0-flash-001',
+  'openai/gpt-5.4-mini',
+  'openai/gpt-5.6-sol',
+  'anthropic/claude-sonnet-5',
+  'google/gemini-3.5-flash',
 ] as const
 
 // A rolling-hour cap per user -- BYOK means a runaway loop or bug burns the
