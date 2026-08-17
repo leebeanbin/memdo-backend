@@ -87,17 +87,20 @@ Google·GitHub OAuth와 Debug 전용 익명 체험을 제공하고, 설정 화�
 사용자가 캘린더 연동을 직접 선택한 시점에 별도 목적·scope·철회 방법을 보여준다. GitHub도 로그인에
 repository 권한을 요청하지 않는다. provider token이나 refresh token을 일정 테이블에 저장하지 않는다.
 
-## 출시 전 필수 확인
+## Sign in with Apple
 
-iOS 앱에서 Google·GitHub 같은 제3자 로그인을 기본 계정 인증에 제공하면 Apple App Review 4.8을
-충족하는 동등한 개인정보 보호 로그인도 필요할 수 있다. 현재 제품 성격은 예외에 해당하지 않을
-가능성이 높으므로 Sign in with Apple을 출시 전 인증 범위에 포함한다.
+Apple App Review 4.8 요구사항에 따라 Google·GitHub와 동등한 위치에 Sign in with Apple을 추가했다
+(`MemdoApp.swift`, Supabase Auth의 Apple provider 연결). 로그인 화면은 Apple·Google·GitHub 세
+provider로 제한하고 새 익명 세션 진입은 제공하지 않는다([ADR-071](../../memdo/docs/10-decisions-and-open-questions.md)).
 
-## 완료 조건
+## 완료 조건과 확인 상태
 
-- Google과 GitHub에서 각각 신규 가입·재로그인·로그아웃 성공.
-- callback 취소와 provider 오류가 앱에서 안전하게 복구됨.
-- 첫 가입 시 기본 캘린더가 정확히 한 번 생성됨.
-- 다른 사용자의 calendar와 todo 조회가 RLS로 거부됨.
-- 앱 재실행 후 session 복원 및 만료 token refresh 성공.
-- 계정 삭제 시 Auth 사용자와 소유 데이터 삭제 경로가 검증됨.
+- Apple·Google·GitHub에서 각각 신규 가입·재로그인·로그아웃 성공. — 익명 세션 경로는 실제 계정으로
+  검증됨(work-log 2026-08-03). 세 provider 모두 client ID/secret은 `.env.local`에 채워져 있고
+  로그인 화면·callback 코드는 구현돼 있으나, 이 값으로 세 provider 각각의 실제 로그인 왕복을
+  마지막으로 재확인한 기록은 없다 — 재개 시 가장 먼저 확인할 항목이다.
+- callback 취소와 provider 오류가 앱에서 안전하게 복구됨. — 코드 경로 존재, 실기기 재확인 필요.
+- 첫 가입 시 기본 캘린더가 정확히 한 번 생성됨. — 검증됨(work-log 2026-08-03, trigger 기반).
+- 다른 사용자의 calendar와 todo 조회가 RLS로 거부됨. — 검증됨(보안 advisor, RLS 정책).
+- 앱 재실행 후 session 복원 및 만료 token refresh 성공. — 익명 세션으로 검증됨(work-log 2026-08-03).
+- 계정 삭제 시 Auth 사용자와 소유 데이터 삭제 경로가 검증됨. — 미검증. 출시 전 반드시 확인한다.

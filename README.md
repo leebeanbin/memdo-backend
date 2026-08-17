@@ -1,7 +1,7 @@
 # Memdo Backend
 
-Supabase 기반 Memdo 백엔드의 독립 저장소다. 첫 수직 슬라이스는 인증된 사용자의 기본 캘린더와 일정
-조회·생성이다.
+Supabase 기반 Memdo 백엔드의 독립 저장소다. 일정 CRUD부터 반복 일정, Google Calendar 읽기 전용
+미러, 사용자 BYOK 기반 클라우드 Agent까지 개발을 완료했다.
 
 ## 정확한 위치와 문서 순서
 
@@ -29,9 +29,25 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 첫 수직 슬라이스�
 - `GET /functions/v1/sync`의 `(updatedAt,id)` 증분 cursor와 삭제 tombstone
 - `GET/PUT /functions/v1/preferences` 사용자 설정 영속화
 - 개발 익명 사용자 전용 `POST /functions/v1/demo-bootstrap`
-- Google·GitHub OAuth 로컬 구성과 `memdo://auth/callback` 허용
+- Apple·Google·GitHub OAuth 자격 증명 구성과 `memdo://auth/callback` 허용. 익명 세션 경로는 실제
+  계정으로 왕복 검증됨; 세 provider 각각의 실기기 로그인은 출시 전 재확인이 필요하다
+  ([`docs/auth-social-login.md`](docs/auth-social-login.md) 참고)
+- `schedule_rules` 반복 일정과 on-demand virtual occurrence 생성 (B5)
+- `GET/PUT/DELETE /functions/v1/reviews`, `GET /functions/v1/summaries` 하루 리뷰·기간 요약 (B6)
+- `GET /functions/v1/search`의 pg_trgm 일정 검색 (B7)
+- Google Calendar 읽기 전용 미러: OAuth 연결·해제·상태 조회, incremental sync token, `410 Gone` 전체
+  재동기화 (B8) — `google-calendar-{start,callback,status,disconnect,sync}`
+- `GET/PUT /functions/v1/categories` 사용자 정의 카테고리 (iOS와 동기화)
+- `workout-logs` 운동 기록 (원래 migration 없이 배포됐던 것을 버전 관리로 rescue)
+- `agent-key`(OpenRouter BYOK 키 vault 저장)와 `agent-cloud-chat`(SSE streaming, tool calling,
+  서버 측 conflict reflection, hourly rate limit)로 클라우드 Agent 경로 완료 (B10)
+- iOS 온디바이스 Agent(Apple FoundationModels)는 이 백엔드를 거치지 않고 기기에서 직접 실행
 
-오프라인 push outbox, 반복 일정과 Agent는 아직 연결하지 않는다.
+B9(뉴스 브리핑)는 서버 pgmq 파이프라인 대신 iOS가 RSS를 직접 수집해 온디바이스로 요약하는 방식으로
+구현했다. B11(Slack)은 OAuth 앱 설치 대신 사용자가 발급한 Incoming Webhook URL을 iOS Keychain에
+저장하는 방식으로 구현했다 — 둘 다 이 저장소에 대응하는 Edge Function이 없다. B12(MCP)와 B13(운영
+dashboard·백업 자동화)은 구현하지 않았다. 자세한 배경은
+[`docs/roadmap.md`](docs/roadmap.md)를 참고한다.
 
 ## 확정된 확장 경계
 
@@ -39,8 +55,12 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 첫 수직 슬라이스�
 - 의미 검색: 같은 PostgreSQL의 pgvector, 외부 vector DB 제외
 - Redis: AI·MCP rate limit과 짧은 lock에만 Upstash REST 사용
 - ORM: SQL migration이 원본이며 Drizzle은 trusted worker의 실제 복잡 쿼리에만 제한
-- MCP: Memdo API를 호출하는 외부 adapter, DB 직접 접근 금지
-- LLM: OpenAI production adapter + llama.cpp local/self-host adapter
+- MCP: Memdo API를 호출하는 외부 adapter, DB 직접 접근 금지 (아직 구현 안 함)
+- LLM: OpenAI Responses/Agents SDK 상시 서버 오케스트레이션 대신, 기기 내 Apple FoundationModels +
+  사용자 BYOK OpenRouter(OpenAI 호환 Chat Completions) 조합으로 확정했다. ChatGPT Plus/Claude
+  Pro·Max/Google AI Pro 같은 기존 구독 재사용은 채택하지 않는다 — ChatGPT/Gemini 구독은 애초에 API
+  접근이 없고, Claude Pro/Max의 구독 OAuth를 서드파티 도구에 쓰는 경로는 Anthropic이 2026-04-04부터
+  Consumer ToS 위반으로 집행 중이다.
 
 ## 로컬 실행
 
@@ -85,10 +105,9 @@ Content-Type: application/json
 Idempotency-Key: <UUID> # POST command
 ```
 
-## 다음 연결 순서
+## 개발 종료 상태 (2026-08-17)
 
-1. Google·GitHub OAuth App을 만들고 `.env.local`의 client ID/secret을 채운 뒤 provider 활성화
-2. Google/GitHub 로그인과 세션 복원·로그아웃을 실제 계정으로 검증
-3. 재예약 명령과 증분 동기화의 iOS 호출 연결
-4. Sign in with Apple과 Supabase Auth 연결
-5. 배포 로그·EXPLAIN·복구 절차를 운영 문서에 저장
+Apple·Google·GitHub 로그인, 일정 CRUD·재예약·증분 동기화·오프라인 outbox, 반복 일정, 검색, 하루
+리뷰·기간 요약, Google Calendar 읽기 전용 미러, 사용자 정의 카테고리, 운동 기록, BYOK 클라우드
+Agent까지 계획한 범위를 모두 구현·배포·검증하고 이 시점에서 개발을 마쳤다. 남은 항목과 원래 설계
+대비 실제 구현 차이는 [`docs/roadmap.md`](docs/roadmap.md)를 따른다.

@@ -21,33 +21,49 @@
 
 ## 코드 지도
 
-| 위치                                 | 책임                                         |
-| ------------------------------------ | -------------------------------------------- |
-| `supabase/config.toml`               | 로컬 Supabase, OAuth provider, redirect 설정 |
-| `supabase/migrations/`               | 사용자·캘린더·일정 schema, index, RLS        |
-| `supabase/functions/calendars/`      | 인증 사용자의 캘린더 조회                    |
-| `supabase/functions/todos/`          | 인증 사용자의 일정 CRUD                      |
-| `supabase/functions/days/`           | 날짜별 일정과 리뷰 상태 조회                 |
-| `supabase/functions/demo-bootstrap/` | Debug 개발 데이터 생성                       |
-| `supabase/functions/sync/`           | 일정 증분 pull과 삭제 tombstone              |
-| `supabase/functions/preferences/`    | 사용자 설정 조회·전체 저장                   |
-| `supabase/functions/_shared/`        | HTTP 응답과 일정 입력 계약                   |
-| `.env.example`                       | 커밋 가능한 환경변수 이름 목록               |
-| `docs/`                              | 결정, 작업 순서, 작업 기록                   |
+| 위치                                              | 책임                                                   |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| `supabase/config.toml`                            | 로컬 Supabase, OAuth provider, redirect 설정            |
+| `supabase/migrations/`                            | schema, index, RLS, cron job 전체 이력                  |
+| `supabase/functions/calendars/`                   | 인증 사용자의 캘린더 조회                                |
+| `supabase/functions/todos/`                       | 인증 사용자의 일정 CRUD, 원자적 재예약                    |
+| `supabase/functions/days/`                        | 날짜별 일정과 리뷰 상태 조회                              |
+| `supabase/functions/demo-bootstrap/`               | Debug 개발 데이터 생성                                  |
+| `supabase/functions/sync/`                        | 일정 증분 pull과 삭제 tombstone                          |
+| `supabase/functions/preferences/`                 | 사용자 설정 조회·전체 저장                                |
+| `supabase/functions/rules/`                       | 반복 일정 규칙, on-demand virtual occurrence (B5)         |
+| `supabase/functions/reviews/`                     | 하루 리뷰 기록 (B6)                                      |
+| `supabase/functions/summaries/`                   | 기간 요약 (B6)                                          |
+| `supabase/functions/search/`                      | pg_trgm 일정 검색 (B7)                                   |
+| `supabase/functions/google-calendar-start/`       | Google OAuth 인가 시작 (B8)                              |
+| `supabase/functions/google-calendar-callback/`    | Google OAuth callback, refresh token vault 저장 (B8)     |
+| `supabase/functions/google-calendar-status/`      | 연결 상태 조회 (B8)                                      |
+| `supabase/functions/google-calendar-disconnect/`  | 연결 해제, vault secret 삭제 (B8)                        |
+| `supabase/functions/google-calendar-sync/`        | incremental sync token, `410 Gone` 전체 재동기화 (B8)     |
+| `supabase/functions/categories/`                  | 사용자 정의 카테고리 조회·저장                            |
+| `supabase/functions/workout-logs/`                | 운동 기록 CRUD                                          |
+| `supabase/functions/agent-key/`                   | OpenRouter BYOK 키 저장·삭제 (vault) (B10)                |
+| `supabase/functions/agent-cloud-chat/`            | OpenRouter streaming chat, tool calling, server reflection, rate limit (B10) |
+| `supabase/functions/_shared/`                     | HTTP 응답, 일정·Agent 입력 계약, vault 헬퍼               |
+| `.env.example`                                    | 커밋 가능한 환경변수 이름 목록                            |
+| `docs/`                                           | 결정, 작업 순서, 작업 기록                                |
 
 ## 현재 상태
 
-- 완료: 원격 DB migration 6개, RLS, 캘린더 조회, 일정 CRUD, 날짜별 조회, 목록·증분 cursor, 입력
-  검증, Edge Function 6개 배포.
-- 구성 완료: Google·GitHub OAuth의 로컬 설정, iOS callback scheme, 앱 로그인·로그아웃 UI.
-- 원격 검증 완료: 익명 로그인, `memdo://auth/callback`, iPhone 15 session 복원, 일정
-  create→relaunch→read와 update(version 2).
-- 외부 작업 필요: Google·GitHub OAuth client ID/secret 생성과 provider 활성화. 현재 `.env.local`의
-  네 값은 비어 있다.
-- 검증 제한: 이 Mac에는 Docker 호환 runtime이 없어 로컬 Supabase 전체 실행은 아직 못 했다.
+- 완료: 원격 DB migration 전체, RLS, 캘린더 조회, 일정 CRUD·원자적 재예약, 날짜별 조회, 증분 sync
+  cursor, 반복 일정(B5), 하루 리뷰·기간 요약(B6), pg_trgm 검색(B7), Google Calendar 읽기 전용
+  미러(B8), 사용자 정의 카테고리, 운동 기록, BYOK 클라우드 Agent(B10) — Edge Function 20개 배포.
+- 구성 완료: Apple·Google·GitHub OAuth 자격 증명, `memdo://auth/callback`. 검증 완료: 익명 세션의
+  iPhone 15 session 복원과 일정 create→relaunch→read→update round-trip. 세 provider 각각의 실기기
+  로그인 왕복은 미재확인 — [`auth-social-login.md`](auth-social-login.md) 참고.
+- iOS 온디바이스 Agent(Apple FoundationModels)는 이 백엔드에 새 엔드포인트가 필요 없다 — 기기에서
+  직접 실행하고 기존 일정 API만 호출한다.
+- 서버로 옮기지 않기로 한 것: B9 뉴스 브리핑(iOS가 RSS 직접 수집), B11 Slack 알림(사용자 발급
+  Incoming Webhook을 iOS Keychain에 저장) — 둘 다 별도 서버 함수가 없다.
+- 구현하지 않은 것: B12 Memdo Remote MCP, B13 운영 dashboard·자동 백업·글로벌화. 온디바이스 fallback
+  모델(비 Apple-Intelligence 기기)은 스코프만 잡고 보류했다.
 - 주의: 익명 사용자는 RLS가 적용된 `authenticated` role을 사용한다. 현재 owner policy로 사용자별
-  격리하며 공개 파일럿 전 CAPTCHA를 켠다. 반복, 브리핑, Agent, 외부 연결은 아직 서버에 연결되지
-  않았다.
+  격리하며 공개 파일럿 전 CAPTCHA를 켠다.
 
 ## 문서 운영 규칙
 

@@ -123,6 +123,65 @@
   대기한다. Security Advisor의 anonymous-access 경고는 owner RLS를 유지한 의도된 개발 경로이며
   CAPTCHA 없이 외부 파일럿을 열지 않는다. 비밀번호 로그인 출시 전 leaked-password protection을 켠다.
 
+## 2026-08-16 — B8 Google Calendar 읽기 전용 미러
+
+- 목표: 로그인 scope와 분리된 별도 동의로 Google Calendar를 연결하고, Memdo Todo와 섞지 않는 읽기
+  전용 미러를 구축한다.
+- 변경 파일: `google_calendar_connections`·`google_calendar_oauth_states`·`google_calendar_mirror_events`
+  migration, `google-calendar-{start,callback,status,disconnect,sync}` Edge Function, vault
+  RPC 재사용.
+- 결정과 이유: refresh token은 Supabase Vault에 저장하고 service-role만 읽는다. 증분 동기화는
+  Google의 `nextSyncToken`을 그대로 저장하고, `410 Gone` 응답을 받으면 해당 캘린더만 전체
+  재동기화한다. Todo 테이블에 직접 쓰지 않고 별도 mirror 테이블·owner RLS로 격리한다.
+- 실행한 검증과 결과: 실제 Google 계정으로 연결→동기화→해제→재인증 왕복, 보안 advisor 0건, Deno
+  계약 test, CI green.
+- 커밋: `4c0f40c`. 남은 blocker 없음(Phase A 범위 완료, write scope와 MCP는 B12 이후).
+
+## 2026-08-16 — B10 클라우드 Agent(OpenRouter BYOK)
+
+- 목표: 온디바이스 Apple FoundationModels만으로 부족한 사용자를 위해, 사용자가 직접 발급한
+  OpenRouter API 키로 더 강한 클라우드 모델을 쓸 수 있게 한다.
+- 변경 파일: `user_api_keys`·`agent_chat_requests` migration, `agent-key`·`agent-cloud-chat` Edge
+  Function, `_shared/agent-key-contract.ts`·`_shared/agent-cloud-contract.ts`(+ 단위 테스트 14개).
+- 결정과 이유: 키는 Vault에 저장하고 서버는 절대 평문으로 보관하지 않는다. 응답은 SSE로 스트리밍하고,
+  `propose_schedule` 도구 호출마다 서버가 기존 일정과의 시간 충돌을 직접 재검사(Reflection)해 모델
+  주장을 신뢰하지 않는다. 시간당 요청 수를 제한한다. 모델 allowlist는 2026-08 기준 OpenRouter가 실제
+  서빙하는 모델만 `curl`로 직접 확인해 채웠다(WebFetch 요약은 신뢰하지 않음). ChatGPT
+  Plus/Claude Pro·Max/Google AI Pro 등 기존 구독 재사용은 API 미제공 또는 서드파티 도구에 대한
+  Anthropic의 2026-04-04 Consumer ToS 집행 때문에 채택하지 않았다.
+- 실행한 검증과 결과: 타임존 안전 날짜 계산(Deno test, `TZ=UTC`/`TZ=America/New_York` 교차 검증),
+  streaming/tool-call 누적 로직 단위 테스트, CI green, 실제 OpenRouter 키로 왕복 확인.
+- 커밋: `87885e9`, `61d9ad0`, `2a20108`, `b9df806`, `20fb92d`. 남은 blocker: 비
+  Apple-Intelligence 기기용 온디바이스 fallback 모델은 스코프만 잡고 미구현(#67).
+
+## 2026-08-16 — 카테고리 동기화, 운동 기록 rescue, meeting_url 이력화
+
+- 목표: iOS에서만 로컬로 존재하던 사용자 정의 카테고리를 서버에 영속화하고, migration 이력 없이
+  운영에 배포돼 있던 `workout_logs`와 `todos.meeting_url`을 버전 관리로 되돌린다.
+- 변경 파일: `user_categories` migration + `categories` Edge Function, `workout_logs`/
+  `workout_log_details`/`workout_log_full` rescue migration, `todos.meeting_url` rescue migration,
+  `supabase/functions/package.json`의 `check` script를 하드코딩 파일 목록에서 glob으로 변경.
+- 결정과 이유: 두 rescue 모두 "실제 운영 동작을 바꾸지 않고 이력만 되돌린다"는 원칙을 지켰다.
+  `check` script를 glob으로 바꾼 이유는 하드코딩된 파일 목록이 신규 함수 6개를 CI type check에서
+  누락시킨 근본 원인이었기 때문이다.
+- 실행한 검증과 결과: `npm run check`(glob 적용 후 20개 함수 모두 검사됨 확인), `npm test`, 보안
+  advisor 0건, CI green.
+- 커밋: `026cedc`, `fdfb0e4`, `a3b09ba`.
+
+## 2026-08-17 — 개발 종료, 문서 최신화
+
+- 목표: 계획된 범위(B0~B11)를 모두 구현·배포·검증한 시점에 문서를 실제 코드와 다시 맞추고 개발을
+  마무리한다.
+- 변경 파일: 이 저장소의 `README.md`·`docs/README.md`·`docs/roadmap.md`·`docs/work-log.md`, iOS
+  저장소의 `README.md`·`docs/09-roadmap-and-backlog.md`·`docs/10-decisions-and-open-questions.md`
+  (ADR-073~075 추가)·`docs/20-ai-agent-architecture.md`·`docs/21-integration-hub-google-calendar-mcp.md`.
+- 결정과 이유: 설계 문서(`20`, `21`)는 원래 구상한 상위 아키텍처(Agents SDK, MCP, Slack OAuth)를
+  참고 자료로 남기되, 각 문서 상단에 실제 배포된 범위와의 차이를 명시해 향후 재개 시 문서와 코드를
+  다시 맞추는 작업을 반복하지 않게 했다.
+- 실행한 검증과 결과: 코드 지도·roadmap·ADR을 실제 migration/함수 목록·git log와 대조 확인.
+- 남은 blocker: B12(MCP), B13(운영 자동화), #67(온디바이스 fallback 모델) 미착수. 재개 조건은 각
+  문서의 "다음에 재개할 때" 절을 따른다.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.
