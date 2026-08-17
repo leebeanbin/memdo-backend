@@ -273,6 +273,7 @@ export default {
 
         let proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null = null
         let conflictTitle: string | null = null
+        let conflictCheckFailed = false
 
         try {
           for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
@@ -287,7 +288,9 @@ export default {
             if (toolCalls.length === 0) {
               send({
                 done: true,
-                proposedSchedule: proposedSchedule ? { ...proposedSchedule, conflictTitle } : null,
+                proposedSchedule: proposedSchedule
+                  ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
+                  : null,
               })
               controller.close()
               return
@@ -314,15 +317,31 @@ export default {
                   // Reflection: guaranteed, not dependent on the model
                   // having called search_schedules first (the system
                   // prompt asks it to, but nothing enforces that).
+                  //
+                  // Fail closed: if the existing-schedule fetch itself
+                  // fails, we cannot claim "no conflict" -- that would
+                  // silently defeat the whole point of this check. Surface
+                  // it as its own flag instead of folding it into
+                  // conflictTitle (a real conflict has a real event title;
+                  // "we couldn't check" doesn't, and the client renders
+                  // conflictTitle inside a "there's a '<title>' at the same
+                  // time" sentence).
                   const proposedDate = resolveDate(args.date ?? 'today', today)
-                  const existing = await fetchSchedules(
-                    context.supabase,
-                    proposedDate,
-                    proposedDate,
-                  )
-                    .catch(() => [] as ExistingScheduleRow[])
-                  conflictTitle = findConflict(existing, args, today)
-                  result = conflictTitle
+                  let existing: ExistingScheduleRow[]
+                  try {
+                    existing = await fetchSchedules(context.supabase, proposedDate, proposedDate)
+                  } catch {
+                    existing = []
+                    conflictCheckFailed = true
+                  }
+                  conflictTitle = conflictCheckFailed ? null : findConflict(existing, args, today)
+                  result = conflictCheckFailed
+                    ? {
+                      ok: false,
+                      warning:
+                        'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
+                    }
+                    : conflictTitle
                     ? { ok: true, warning: `Conflicts with existing '${conflictTitle}'` }
                     : { ok: true }
                   break
@@ -341,7 +360,9 @@ export default {
           // Ran out of iterations without a final text turn.
           send({
             done: true,
-            proposedSchedule: proposedSchedule ? { ...proposedSchedule, conflictTitle } : null,
+            proposedSchedule: proposedSchedule
+              ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
+              : null,
           })
           controller.close()
         } catch (error) {
