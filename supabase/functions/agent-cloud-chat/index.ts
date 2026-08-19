@@ -1,6 +1,8 @@
 import { apiError, requestId as extractRequestId, withApi } from '../_shared/http.ts'
 import {
   accumulatedToolCallsArray,
+  addAgentUsage,
+  type AgentUsage,
   applyStreamChunk,
   chatRequestSchema,
   cloudAgentTools,
@@ -157,6 +159,12 @@ async function callOpenRouterStreamed(
         if (chunk.content && onContent) onContent(chunk.content)
       }
     }
+    buffer += decoder.decode()
+    const finalChunk = parseStreamLine(buffer)
+    if (finalChunk) {
+      applyStreamChunk(acc, finalChunk)
+      if (finalChunk.content && onContent) onContent(finalChunk.content)
+    }
   } finally {
     reader.releaseLock()
   }
@@ -274,6 +282,32 @@ export default {
         let proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null = null
         let conflictTitle: string | null = null
         let conflictCheckFailed = false
+        const totalUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, costUsd: 0 }
+        let completedCalls = 0
+
+        const close = async () => {
+          if (completedCalls > 0) {
+            try {
+              const logged = await service.from('agent_usage_log').insert({
+                user_id: userId,
+                model,
+                prompt_tokens: totalUsage.promptTokens,
+                completion_tokens: totalUsage.completionTokens,
+                cost_usd: totalUsage.costUsd,
+              })
+              if (logged.error) throw logged.error
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'agent_cloud_chat.usage_log',
+                  error: String(error),
+                }),
+              )
+            }
+          }
+          controller.close()
+        }
 
         try {
           for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
@@ -283,6 +317,8 @@ export default {
               messages,
               (delta) => send({ delta }),
             )
+            addAgentUsage(totalUsage, acc.usage)
+            completedCalls++
             const toolCalls = accumulatedToolCallsArray(acc)
 
             if (toolCalls.length === 0) {
@@ -292,7 +328,7 @@ export default {
                   ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
                   : null,
               })
-              controller.close()
+              await close()
               return
             }
 
@@ -364,7 +400,7 @@ export default {
               ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
               : null,
           })
-          controller.close()
+          await close()
         } catch (error) {
           console.error(
             JSON.stringify({
@@ -374,7 +410,7 @@ export default {
             }),
           )
           send({ error: 'Agent 응답을 받지 못했습니다.' })
-          controller.close()
+          await close()
         }
       },
     })

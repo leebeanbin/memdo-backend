@@ -268,11 +268,18 @@ export type StreamChunk = {
   content?: string
   toolCalls?: StreamToolCallDelta[]
   finishReason?: string | null
+  usage?: AgentUsage
+}
+
+export type AgentUsage = {
+  promptTokens: number
+  completionTokens: number
+  costUsd: number
 }
 
 /** Parses one raw SSE line ("data: {...}") into a normalized chunk. Returns
- * null for the "[DONE]" terminator, blank lines, or anything with no
- * delta worth acting on. */
+ * null for the "[DONE]" terminator, blank lines, or anything with no content,
+ * tool call, finish reason, or final usage worth acting on. */
 export function parseStreamLine(rawLine: string): StreamChunk | null {
   const trimmed = rawLine.trim()
   if (!trimmed.startsWith('data:')) return null
@@ -285,14 +292,12 @@ export function parseStreamLine(rawLine: string): StreamChunk | null {
   } catch {
     return null
   }
-  const delta = parsed?.choices?.[0]?.delta
-  if (!delta) return null
-
   const chunk: StreamChunk = {}
-  if (typeof delta.content === 'string' && delta.content.length > 0) {
+  const delta = parsed?.choices?.[0]?.delta
+  if (typeof delta?.content === 'string' && delta.content.length > 0) {
     chunk.content = delta.content
   }
-  if (Array.isArray(delta.tool_calls)) {
+  if (Array.isArray(delta?.tool_calls)) {
     chunk.toolCalls = delta.tool_calls.map((tc: any) => ({
       index: tc.index ?? 0,
       id: tc.id,
@@ -302,7 +307,18 @@ export function parseStreamLine(rawLine: string): StreamChunk | null {
   }
   const finishReason = parsed.choices?.[0]?.finish_reason
   if (finishReason) chunk.finishReason = finishReason
-  return chunk
+  const usage = parsed?.usage
+  if (
+    usage && Number.isFinite(usage.prompt_tokens) &&
+    Number.isFinite(usage.completion_tokens) && Number.isFinite(usage.cost)
+  ) {
+    chunk.usage = {
+      promptTokens: Math.max(0, usage.prompt_tokens),
+      completionTokens: Math.max(0, usage.completion_tokens),
+      costUsd: Math.max(0, usage.cost),
+    }
+  }
+  return chunk.content || chunk.toolCalls || chunk.finishReason || chunk.usage ? chunk : null
 }
 
 export type AccumulatedToolCall = { id: string; name: string; arguments: string }
@@ -310,10 +326,15 @@ export type AccumulatedToolCall = { id: string; name: string; arguments: string 
 export type StreamAccumulator = {
   content: string
   toolCalls: Map<number, AccumulatedToolCall>
+  usage: AgentUsage
 }
 
 export function newStreamAccumulator(): StreamAccumulator {
-  return { content: '', toolCalls: new Map() }
+  return {
+    content: '',
+    toolCalls: new Map(),
+    usage: { promptTokens: 0, completionTokens: 0, costUsd: 0 },
+  }
 }
 
 export function applyStreamChunk(acc: StreamAccumulator, chunk: StreamChunk): void {
@@ -325,6 +346,13 @@ export function applyStreamChunk(acc: StreamAccumulator, chunk: StreamChunk): vo
     if (delta.argumentsChunk) existing.arguments += delta.argumentsChunk
     acc.toolCalls.set(delta.index, existing)
   }
+  if (chunk.usage) acc.usage = chunk.usage
+}
+
+export function addAgentUsage(total: AgentUsage, usage: AgentUsage): void {
+  total.promptTokens += usage.promptTokens
+  total.completionTokens += usage.completionTokens
+  total.costUsd += usage.costUsd
 }
 
 /** Reconstructs the tool_calls array shape the OpenAI/OpenRouter messages

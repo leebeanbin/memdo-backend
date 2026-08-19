@@ -1,5 +1,6 @@
 import {
   accumulatedToolCallsArray,
+  addAgentUsage,
   applyStreamChunk,
   expandScope,
   findConflict,
@@ -132,11 +133,29 @@ Deno.test('parseStreamLine extracts a tool_call delta', () => {
   assert(chunk?.toolCalls?.[0].argumentsChunk === '{"tit')
 })
 
+Deno.test('parseStreamLine extracts usage from the final chunk without a delta', () => {
+  const chunk = parseStreamLine(
+    'data: {"choices":[],"usage":{"prompt_tokens":194,"completion_tokens":2,"total_tokens":196,"cost":0.00095}}',
+  )
+  assert(chunk?.usage?.promptTokens === 194)
+  assert(chunk?.usage?.completionTokens === 2)
+  assert(chunk?.usage?.costUsd === 0.00095)
+})
+
 Deno.test('applyStreamChunk concatenates content across chunks', () => {
   const acc = newStreamAccumulator()
   applyStreamChunk(acc, { content: '안' })
   applyStreamChunk(acc, { content: '녕' })
   assert(acc.content === '안녕')
+})
+
+Deno.test('addAgentUsage totals every tool-loop request', () => {
+  const total = newStreamAccumulator().usage
+  addAgentUsage(total, { promptTokens: 10, completionTokens: 2, costUsd: 0.001 })
+  addAgentUsage(total, { promptTokens: 20, completionTokens: 3, costUsd: 0.002 })
+  assert(total.promptTokens === 30)
+  assert(total.completionTokens === 5)
+  assert(total.costUsd === 0.003)
 })
 
 Deno.test('applyStreamChunk accumulates a tool call split across many deltas', () => {
