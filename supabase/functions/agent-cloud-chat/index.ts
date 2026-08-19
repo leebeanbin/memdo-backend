@@ -16,6 +16,7 @@ import {
   OPENROUTER_CHAT_URL,
   parseStreamLine,
   type ProposedScheduleArgs,
+  type ProposedScheduleUpdateArgs,
   RATE_LIMIT_PER_HOUR,
   resolveDate,
   type StreamAccumulator,
@@ -41,13 +42,33 @@ async function fetchSchedules(
 ): Promise<ExistingScheduleRow[]> {
   const { data, error } = await supabase
     .from('todos')
-    .select('title,scheduled_date,start_at,end_at')
+    .select('id,title,scheduled_date,start_at,end_at,version')
     .is('deleted_at', null)
     .gte('scheduled_date', from)
     .lte('scheduled_date', to)
     .limit(200)
   if (error) throw error
   return data as ExistingScheduleRow[]
+}
+
+/** Single-row lookup for propose_schedule_update -- the model only ever
+ * has an id from a prior search_schedules result, never a full row, so this
+ * is how it (and Reflection's conflict check) learns the item's current
+ * title/version. Returns null rather than throwing on a missing/deleted/
+ * foreign row so the caller can fail closed with a clear tool result instead
+ * of a generic 500. */
+async function fetchScheduleById(
+  supabase: { from: (table: string) => any },
+  id: string,
+): Promise<ExistingScheduleRow | null> {
+  const { data, error } = await supabase
+    .from('todos')
+    .select('id,title,scheduled_date,start_at,end_at,version')
+    .eq('id', id)
+    .is('deleted_at', null)
+    .maybeSingle()
+  if (error) throw error
+  return (data as ExistingScheduleRow | null) ?? null
 }
 
 async function searchSchedules(
@@ -59,6 +80,7 @@ async function searchSchedules(
     const rows = await fetchSchedules(supabase, args.from, args.to)
     return {
       items: rows.map((r) => ({
+        id: r.id,
         title: r.title,
         scheduledDate: r.scheduled_date,
         startAt: r.start_at,
@@ -282,6 +304,14 @@ export default {
         let proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null = null
         let conflictTitle: string | null = null
         let conflictCheckFailed = false
+        let proposedScheduleUpdate:
+          | (ProposedScheduleUpdateArgs & {
+            title: string
+            version: number
+            conflictTitle: string | null
+            conflictCheckFailed: boolean
+          })
+          | null = null
         const totalUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, costUsd: 0 }
         let completedCalls = 0
 
@@ -327,6 +357,7 @@ export default {
                 proposedSchedule: proposedSchedule
                   ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
                   : null,
+                proposedScheduleUpdate,
               })
               await close()
               return
@@ -382,6 +413,75 @@ export default {
                     : { ok: true }
                   break
                 }
+                case 'propose_schedule_update': {
+                  const updateArgs = args as ProposedScheduleUpdateArgs
+                  try {
+                    const target = await fetchScheduleById(context.supabase, updateArgs.id)
+                    if (!target) {
+                      proposedScheduleUpdate = null
+                      result = {
+                        ok: false,
+                        error:
+                          'That item was not found -- it may have been deleted, or the id is wrong. Call search_schedules again.',
+                      }
+                      break
+                    }
+
+                    // Reflection, same fail-closed shape as propose_schedule:
+                    // only reschedule has a new time to conflict-check, and
+                    // the target's own current row must be excluded from
+                    // that check or it would always "conflict" with itself.
+                    let updateConflictTitle: string | null = null
+                    let updateConflictCheckFailed = false
+                    if (updateArgs.action === 'reschedule') {
+                      const targetDate = resolveDate(updateArgs.date ?? 'today', today)
+                      try {
+                        const existing = await fetchSchedules(
+                          context.supabase,
+                          targetDate,
+                          targetDate,
+                        )
+                        updateConflictTitle = findConflict(
+                          existing.filter((row) => row.id !== updateArgs.id),
+                          {
+                            title: target.title,
+                            date: updateArgs.date ?? 'today',
+                            startTime: updateArgs.startTime,
+                            endTime: updateArgs.endTime,
+                            isTask: false,
+                          },
+                          today,
+                        )
+                      } catch {
+                        updateConflictCheckFailed = true
+                      }
+                    }
+
+                    proposedScheduleUpdate = {
+                      ...updateArgs,
+                      title: target.title,
+                      version: target.version,
+                      conflictTitle: updateConflictCheckFailed ? null : updateConflictTitle,
+                      conflictCheckFailed: updateConflictCheckFailed,
+                    }
+                    result = updateConflictCheckFailed
+                      ? {
+                        ok: false,
+                        warning:
+                          'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
+                      }
+                      : updateConflictTitle
+                      ? { ok: true, warning: `Conflicts with existing '${updateConflictTitle}'` }
+                      : { ok: true }
+                  } catch {
+                    proposedScheduleUpdate = null
+                    result = {
+                      ok: false,
+                      error: 'Could not look up that item. Tell the user something went wrong.',
+                    }
+                  }
+                  break
+                }
                 default:
                   result = { error: 'unknown tool' }
               }
@@ -399,6 +499,7 @@ export default {
             proposedSchedule: proposedSchedule
               ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
               : null,
+            proposedScheduleUpdate,
           })
           await close()
         } catch (error) {

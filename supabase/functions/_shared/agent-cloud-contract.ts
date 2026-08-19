@@ -39,12 +39,14 @@ export const chatRequestSchema = z.object({
 export type CloudAgentTurn = z.infer<typeof chatRequestSchema>['history'][number]
 
 // OpenAI-compatible function-calling schema (OpenRouter proxies this format
-// regardless of the underlying model). Mirrors the on-device tool set
-// (ProposeScheduleTool/FindFreeSlotTool in AssistantView.swift) plus
-// search_schedules, which only makes sense server-side where a DB query is
-// cheap -- this is the "open-ended, needs external data" half of the split
+// regardless of the underlying model). search_schedules/find_free_slots/
+// propose_schedule mirror the on-device tool set (ProposeScheduleTool/
+// FindFreeSlotTool in AssistantView.swift) where a DB query is cheap server-
+// side -- this is the "open-ended, needs external data" half of the split
 // described in the on-device/cloud research (search vs. fixed-shape
-// proposals), not a fallback for old devices only.
+// proposals), not a fallback for old devices only. propose_schedule_update
+// (complete/reschedule/delete an existing item) is currently cloud-only --
+// the on-device path has no equivalent yet.
 export const cloudAgentTools = [
   {
     type: 'function',
@@ -105,6 +107,35 @@ export const cloudAgentTools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'propose_schedule_update',
+      description:
+        'Propose completing, moving, or deleting an EXISTING schedule or task. This does NOT change anything -- it only stages a proposal the user must explicitly approve. You must have a real `id` from a prior search_schedules call; never invent one or guess. Never claim an item was completed, moved, or deleted without the user approving a proposal.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: "The item's id, from a prior search_schedules result",
+          },
+          action: {
+            type: 'string',
+            enum: ['complete', 'reschedule', 'delete'],
+            description: "'complete' marks it done, 'reschedule' moves it, 'delete' removes it",
+          },
+          date: {
+            type: 'string',
+            description: "For 'reschedule' only: 'today', 'tomorrow', or yyyy-MM-dd",
+          },
+          startTime: { type: 'string', description: "For 'reschedule' only: HH:mm" },
+          endTime: { type: 'string', description: "For 'reschedule' only: HH:mm" },
+        },
+        required: ['id', 'action'],
+      },
+    },
+  },
 ]
 
 export function systemPrompt(today: string): string {
@@ -115,7 +146,8 @@ export function systemPrompt(today: string): string {
     'When the user wants to create, add, or make a new schedule or task, call propose_schedule -- do not just describe it in text, and do not claim you created it.',
     'When the user asks to find free time or where to fit something, call find_free_slots.',
     'When the user asks about existing plans, or before proposing something new, call search_schedules to check first rather than guessing.',
-    'You cannot edit, delete, or directly modify existing schedules -- only propose new ones.',
+    'When the user wants to complete, move, or delete an EXISTING schedule or task, first call search_schedules to find its real id, then call propose_schedule_update -- do not guess an id, and do not claim the change happened.',
+    "You cannot directly modify, complete, move, or delete anything -- every change goes through a propose_* tool and needs the user's explicit approval.",
   ].join('\n')
 }
 
@@ -199,10 +231,12 @@ export function formatSlot(
 }
 
 export type ExistingScheduleRow = {
+  id: string
   title: string
   scheduled_date: string
   start_at: string | null
   end_at: string | null
+  version: number
 }
 
 export type ProposedScheduleArgs = {
@@ -211,6 +245,14 @@ export type ProposedScheduleArgs = {
   startTime?: string | null
   endTime?: string | null
   isTask: boolean
+}
+
+export type ProposedScheduleUpdateArgs = {
+  id: string
+  action: 'complete' | 'reschedule' | 'delete'
+  date?: string | null
+  startTime?: string | null
+  endTime?: string | null
 }
 
 /** Resolves a proposal's (start, end), or null for a task/all-day item with

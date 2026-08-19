@@ -65,10 +65,12 @@ Deno.test('findConflict detects an overlapping existing event', () => {
   const conflict = findConflict(
     [
       {
+        id: 'a1',
         title: '팀 회의',
         scheduled_date: '2026-08-16',
         start_at: localAt('14:00'),
         end_at: localAt('15:00'),
+        version: 1,
       },
     ],
     { title: '점심 약속', date: 'today', startTime: '14:30', endTime: '15:30', isTask: false },
@@ -81,10 +83,12 @@ Deno.test('findConflict returns null when nothing overlaps', () => {
   const conflict = findConflict(
     [
       {
+        id: 'a1',
         title: '팀 회의',
         scheduled_date: '2026-08-16',
         start_at: localAt('09:00'),
         end_at: localAt('10:00'),
+        version: 1,
       },
     ],
     { title: '점심 약속', date: 'today', startTime: '14:00', endTime: '15:00', isTask: false },
@@ -97,13 +101,33 @@ Deno.test('findConflict is always null for a task -- nothing to overlap', () => 
   const conflict = findConflict(
     [
       {
+        id: 'a1',
         title: '팀 회의',
         scheduled_date: '2026-08-16',
         start_at: localAt('14:00'),
         end_at: localAt('15:00'),
+        version: 1,
       },
     ],
     { title: '장보기', date: 'today', isTask: true },
+    today,
+  )
+  assert(conflict === null)
+})
+
+Deno.test('findConflict excludes the item being updated from its own conflict check', () => {
+  const conflict = findConflict(
+    [
+      {
+        id: 'self',
+        title: '팀 회의',
+        scheduled_date: '2026-08-16',
+        start_at: localAt('14:00'),
+        end_at: localAt('15:00'),
+        version: 1,
+      },
+    ].filter((row) => row.id !== 'self'),
+    { title: '팀 회의', date: 'today', startTime: '14:00', endTime: '15:00', isTask: false },
     today,
   )
   assert(conflict === null)

@@ -182,6 +182,27 @@
 - 남은 blocker: B12(MCP), B13(운영 자동화), #67(온디바이스 fallback 모델) 미착수. 재개 조건은 각
   문서의 "다음에 재개할 때" 절을 따른다.
 
+## 2026-08-19 — Agent가 기존 일정을 완료·이동·삭제 제안할 수 있게 확장
+
+- 목표: 클라우드 Agent가 새 일정 생성(`propose_schedule`)만 제안할 수 있고 기존 일정의 완료 처리·
+  이동·삭제는 전혀 손대지 못하던 격차를 메운다. Agent-루틴-알림 통합 검토에서 확인된 첫 번째 gap.
+- 변경 파일: `supabase/functions/_shared/agent-cloud-contract.ts`,
+  `supabase/functions/_shared/agent-cloud-contract.test.ts`, `supabase/functions/agent-cloud-chat/index.ts`.
+- 결정과 이유: 영속 `change_proposals` 테이블은 실제로 존재하지 않는다(설계 문서에만 있었음, migration
+  전무 확인). 기존 `propose_schedule`과 동일하게 "DB에 쓰지 않고 구조화된 제안만 스트림으로 반환 →
+  클라이언트가 승인 후 기존 todos PATCH/reschedule/DELETE API를 직접 호출" 패턴을 그대로 확장하는 쪽을
+  택했다. 새 도구 `propose_schedule_update(id, action, date?, startTime?, endTime?)`를 추가하고, 모델이
+  대상을 정확히 지목할 수 있도록 `search_schedules` 응답에 `id`를 포함시켰다. reschedule 액션에는
+  `propose_schedule`과 동일한 fail-closed Reflection(충돌 조회 실패 시 "충돌 없음"으로 묵인하지 않고
+  `conflictCheckFailed`로 명시)을 대상 자신을 제외하고 적용했다. 대상이 없거나(삭제됨/잘못된 id) 조회
+  자체가 실패하면 제안을 만들지 않고 에러를 모델에 돌려준다.
+- 실행한 검증과 결과: `deno fmt`(변경 파일), `deno check`(21개 함수 전체), `deno test`(48개 통과, 신규
+  self-exclusion 테스트 포함). 실제 OpenRouter 호출을 통한 수동 e2e는 아직 미실행.
+- 커밋 / 남은 blocker: 미커밋. iOS 쪽 `ScheduleAPI.swift` DTO에 `proposedScheduleUpdate` 필드를 아직
+  추가하지 않아 클라이언트는 이 필드를 무시한다 — 다음 이어서 할 일. 온디바이스 Agent에는 대응 도구가
+  없다(클라우드 전용). 루틴/알림 도구(`propose_routine_update`)와 실제 동의 집행, 알림
+  `reconcile()`은 이 변경에 포함되지 않았다.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.
