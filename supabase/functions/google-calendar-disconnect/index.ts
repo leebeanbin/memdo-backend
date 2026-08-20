@@ -6,6 +6,13 @@ import {
   serviceClient,
 } from '../_shared/google-calendar-contract.ts'
 
+function disconnectFailed(currentRequestId: string, error: unknown): Response {
+  console.error(
+    JSON.stringify({ requestId: currentRequestId, operation: 'google_calendar.disconnect', error }),
+  )
+  return apiError('INTERNAL_ERROR', '연결 해지에 실패했습니다.', 500, currentRequestId)
+}
+
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
@@ -23,16 +30,7 @@ export default {
       .eq('user_id', userId)
       .maybeSingle()
 
-    if (findError) {
-      console.error(
-        JSON.stringify({
-          requestId: currentRequestId,
-          operation: 'google_calendar.disconnect',
-          error: findError,
-        }),
-      )
-      return apiError('INTERNAL_ERROR', '연결 해지에 실패했습니다.', 500, currentRequestId)
-    }
+    if (findError) return disconnectFailed(currentRequestId, findError)
 
     if (connection) {
       const refreshToken = await readRefreshTokenSecret(
@@ -46,16 +44,7 @@ export default {
         .from('google_calendar_connections')
         .delete()
         .eq('id', connection.id)
-      if (deleted.error) {
-        console.error(
-          JSON.stringify({
-            requestId: currentRequestId,
-            operation: 'google_calendar.disconnect',
-            error: deleted.error,
-          }),
-        )
-        return apiError('INTERNAL_ERROR', '연결 해지에 실패했습니다.', 500, currentRequestId)
-      }
+      if (deleted.error) return disconnectFailed(currentRequestId, deleted.error)
 
       await deleteRefreshTokenSecret(supabase, connection.refresh_token_secret_id as string).catch(
         (cleanupError) => {
