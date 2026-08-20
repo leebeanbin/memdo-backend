@@ -2,9 +2,12 @@ import {
   accumulatedToolCallsArray,
   addAgentUsage,
   applyStreamChunk,
+  dispatchToolCall,
+  type ExistingScheduleRow,
   expandScope,
   findConflict,
   newStreamAccumulator,
+  newToolDispatchState,
   parseStreamLine,
   resolveDate,
   resolveProposedInterval,
@@ -208,4 +211,241 @@ Deno.test('applyStreamChunk keeps multiple concurrent tool calls separate by ind
   assert(calls.length === 2)
   assert(calls[0].function.name === 'search_schedules')
   assert(calls[1].function.name === 'find_free_slots')
+})
+
+// ── dispatchToolCall: fake Supabase port covering the exact chain shapes
+// fetchSchedules()/fetchScheduleById() call (…select().is().gte().lte()
+// .limit() awaited directly; …eq().is().maybeSingle() awaited separately).
+// Doesn't filter by date range itself -- these tests only ever seed rows on
+// the target day, matching how the real DB query would've already narrowed
+// them. ──
+
+function fakeSupabase(rows: ExistingScheduleRow[]): { from: (table: string) => any } {
+  return {
+    from: (_table: string) => {
+      let idFilter: string | undefined
+      const chain: any = {
+        select: () => chain,
+        is: () => chain,
+        gte: () => chain,
+        lte: () => chain,
+        limit: () => chain,
+        eq: (_col: string, value: string) => {
+          idFilter = value
+          return chain
+        },
+        maybeSingle: () =>
+          Promise.resolve({ data: rows.find((r) => r.id === idFilter) ?? null, error: null }),
+        then: (resolve: (v: { data: ExistingScheduleRow[]; error: null }) => void) =>
+          resolve({ data: rows, error: null }),
+      }
+      return chain
+    },
+  }
+}
+
+function fakeSupabaseError(): { from: (table: string) => any } {
+  return {
+    from: (_table: string) => {
+      const chain: any = {
+        select: () => chain,
+        is: () => chain,
+        gte: () => chain,
+        lte: () => chain,
+        limit: () => chain,
+        eq: () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: new Error('boom') }),
+        then: (resolve: (v: { data: null; error: Error }) => void) =>
+          resolve({ data: null, error: new Error('boom') }),
+      }
+      return chain
+    },
+  }
+}
+
+const dispatchToday = new Date('2026-08-16T00:00:00Z')
+
+Deno.test('dispatchToolCall propose_schedule with no conflict', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule',
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(result.warning === undefined)
+  assert(state.proposedSchedule?.title === '점심')
+  assert(state.conflictTitle === null)
+  assert(state.conflictCheckFailed === false)
+})
+
+Deno.test('dispatchToolCall propose_schedule surfaces a real conflict', async () => {
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: timeOn('2026-08-16', '12:30')!.toISOString(),
+    end_at: timeOn('2026-08-16', '13:30')!.toISOString(),
+    version: 1,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'propose_schedule',
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(result.warning.includes('팀 회의'))
+  assert(state.conflictTitle === '팀 회의')
+})
+
+Deno.test('dispatchToolCall propose_schedule fails closed when the conflict check itself errors', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabaseError(),
+    'propose_schedule',
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === false)
+  assert(state.conflictCheckFailed === true)
+  // Never silently reported as "no conflict" just because the check failed.
+  assert(state.conflictTitle === null)
+})
+
+Deno.test('dispatchToolCall propose_schedule_update completes against a real target', async () => {
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: null,
+    end_at: null,
+    version: 3,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'propose_schedule_update',
+    { id: 'a1', action: 'complete' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.proposedScheduleUpdate?.title === '팀 회의')
+  assert(state.proposedScheduleUpdate?.version === 3)
+  assert(state.proposedScheduleUpdate?.action === 'complete')
+})
+
+Deno.test('dispatchToolCall propose_schedule_update reports a missing item instead of proposing', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule_update',
+    { id: 'does-not-exist', action: 'delete' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === false)
+  assert(state.proposedScheduleUpdate === null)
+})
+
+Deno.test('dispatchToolCall propose_schedule_update reschedule excludes its own row from the conflict check', async () => {
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: timeOn('2026-08-16', '14:00')!.toISOString(),
+    end_at: timeOn('2026-08-16', '15:00')!.toISOString(),
+    version: 1,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'propose_schedule_update',
+    { id: 'a1', action: 'reschedule', date: 'today', startTime: '14:00', endTime: '15:00' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.proposedScheduleUpdate?.conflictTitle === null)
+})
+
+Deno.test('dispatchToolCall propose_schedule_update reschedule detects a conflict with a different item', async () => {
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [
+    {
+      id: 'a1',
+      title: '팀 회의',
+      scheduled_date: '2026-08-16',
+      start_at: null,
+      end_at: null,
+      version: 1,
+    },
+    {
+      id: 'b2',
+      title: '점심 약속',
+      scheduled_date: '2026-08-16',
+      start_at: timeOn('2026-08-16', '12:00')!.toISOString(),
+      end_at: timeOn('2026-08-16', '13:00')!.toISOString(),
+      version: 1,
+    },
+  ]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'propose_schedule_update',
+    { id: 'a1', action: 'reschedule', date: 'today', startTime: '12:30', endTime: '13:30' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(result.warning.includes('점심 약속'))
+  assert(state.proposedScheduleUpdate?.conflictTitle === '점심 약속')
+})
+
+Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correctly', async () => {
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: timeOn('2026-08-16', '09:00')!.toISOString(),
+    end_at: timeOn('2026-08-16', '10:00')!.toISOString(),
+    version: 1,
+  }]
+
+  const searchResult: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'search_schedules',
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(searchResult.items.length === 1)
+  assert(searchResult.items[0].title === '팀 회의')
+
+  const freeSlotsResult: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'find_free_slots',
+    { scope: '2026-08-16', durationMinutes: 30 },
+    state,
+    dispatchToday,
+  )
+  assert(typeof freeSlotsResult.slots[0] === 'string')
+})
+
+Deno.test('dispatchToolCall reports an unknown tool name instead of throwing', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'not_a_real_tool',
+    {},
+    state,
+    dispatchToday,
+  )
+  assert(result.error === 'unknown tool')
 })

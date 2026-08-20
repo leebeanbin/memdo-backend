@@ -1,4 +1,4 @@
-import { apiError, requestId as extractRequestId, withApi } from '../_shared/http.ts'
+import { apiError, withApi } from '../_shared/http.ts'
 import {
   accumulatedToolCallsArray,
   addAgentUsage,
@@ -7,21 +7,15 @@ import {
   chatRequestSchema,
   cloudAgentTools,
   DEFAULT_OPENROUTER_MODEL,
-  type ExistingScheduleRow,
-  expandScope,
-  findConflict,
-  formatSlot,
+  dispatchToolCall,
   MAX_TOOL_ITERATIONS,
   newStreamAccumulator,
+  newToolDispatchState,
   OPENROUTER_CHAT_URL,
   parseStreamLine,
-  type ProposedScheduleArgs,
-  type ProposedScheduleUpdateArgs,
   RATE_LIMIT_PER_HOUR,
-  resolveDate,
   type StreamAccumulator,
   systemPrompt,
-  timeOn,
   toISODate,
 } from '../_shared/agent-cloud-contract.ts'
 import { OPENROUTER_PROVIDER } from '../_shared/agent-key-contract.ts'
@@ -33,109 +27,6 @@ type ChatMessage = {
   tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
   tool_call_id?: string
   name?: string
-}
-
-async function fetchSchedules(
-  supabase: { from: (table: string) => any },
-  from: string,
-  to: string,
-): Promise<ExistingScheduleRow[]> {
-  const { data, error } = await supabase
-    .from('todos')
-    .select('id,title,scheduled_date,start_at,end_at,version')
-    .is('deleted_at', null)
-    .gte('scheduled_date', from)
-    .lte('scheduled_date', to)
-    .limit(200)
-  if (error) throw error
-  return data as ExistingScheduleRow[]
-}
-
-/** Single-row lookup for propose_schedule_update -- the model only ever
- * has an id from a prior search_schedules result, never a full row, so this
- * is how it (and Reflection's conflict check) learns the item's current
- * title/version. Returns null rather than throwing on a missing/deleted/
- * foreign row so the caller can fail closed with a clear tool result instead
- * of a generic 500. */
-async function fetchScheduleById(
-  supabase: { from: (table: string) => any },
-  id: string,
-): Promise<ExistingScheduleRow | null> {
-  const { data, error } = await supabase
-    .from('todos')
-    .select('id,title,scheduled_date,start_at,end_at,version')
-    .eq('id', id)
-    .is('deleted_at', null)
-    .maybeSingle()
-  if (error) throw error
-  return (data as ExistingScheduleRow | null) ?? null
-}
-
-async function searchSchedules(
-  supabase: { from: (table: string) => any },
-  args: { from?: string; to?: string },
-): Promise<unknown> {
-  if (!args.from || !args.to) return { error: 'from and to are required' }
-  try {
-    const rows = await fetchSchedules(supabase, args.from, args.to)
-    return {
-      items: rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        scheduledDate: r.scheduled_date,
-        startAt: r.start_at,
-        endAt: r.end_at,
-      })),
-    }
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
-  }
-}
-
-async function findFreeSlots(
-  supabase: { from: (table: string) => any },
-  args: { scope?: string; durationMinutes?: number; windowStart?: string; windowEnd?: string },
-): Promise<unknown> {
-  const dates = expandScope(args.scope ?? 'today')
-  const duration = Math.max(15, args.durationMinutes ?? 30) * 60_000
-  const from = dates[0]
-  const to = dates.at(-1) ?? dates[0]
-
-  let rows: ExistingScheduleRow[]
-  try {
-    rows = await fetchSchedules(supabase, from, to)
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
-  }
-  const busy = rows.filter((row) => row.start_at && row.end_at)
-
-  const lines: string[] = []
-  for (const date of dates) {
-    const dayBusy = busy
-      .filter((row) => row.scheduled_date === date)
-      .map((row) => ({ start: new Date(row.start_at!), end: new Date(row.end_at!) }))
-      .sort((a, b) => a.start.getTime() - b.start.getTime())
-
-    const windowStart = timeOn(date, args.windowStart) ?? timeOn(date, '08:00')!
-    const windowEnd = timeOn(date, args.windowEnd) ?? timeOn(date, '22:00')!
-
-    const slots: string[] = []
-    let cursor = windowStart
-    for (const range of dayBusy) {
-      if (range.start.getTime() > cursor.getTime()) {
-        if (range.start.getTime() - cursor.getTime() >= duration) {
-          slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
-        }
-      }
-      if (range.end.getTime() > cursor.getTime()) cursor = range.end
-    }
-    if (windowEnd.getTime() - cursor.getTime() >= duration) {
-      slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
-    }
-    if (slots.length > 0) lines.push(`${date}: ${slots.slice(0, 3).join(', ')}`)
-  }
-
-  return { slots: lines }
 }
 
 /** Streams one OpenRouter chat-completions call and accumulates the result.
@@ -194,8 +85,7 @@ async function callOpenRouterStreamed(
 }
 
 export default {
-  fetch: withApi<any>(async (request, context) => {
-    const currentRequestId = extractRequestId(request)
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const userId = context.userClaims!.id
 
     if (request.method !== 'POST') {
@@ -301,17 +191,7 @@ export default {
         const send = (obj: unknown) =>
           controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
 
-        let proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null = null
-        let conflictTitle: string | null = null
-        let conflictCheckFailed = false
-        let proposedScheduleUpdate:
-          | (ProposedScheduleUpdateArgs & {
-            title: string
-            version: number
-            conflictTitle: string | null
-            conflictCheckFailed: boolean
-          })
-          | null = null
+        const dispatchState = newToolDispatchState()
         const totalUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, costUsd: 0 }
         let completedCalls = 0
 
@@ -354,10 +234,14 @@ export default {
             if (toolCalls.length === 0) {
               send({
                 done: true,
-                proposedSchedule: proposedSchedule
-                  ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
+                proposedSchedule: dispatchState.proposedSchedule
+                  ? {
+                    ...dispatchState.proposedSchedule,
+                    conflictTitle: dispatchState.conflictTitle,
+                    conflictCheckFailed: dispatchState.conflictCheckFailed,
+                  }
                   : null,
-                proposedScheduleUpdate,
+                proposedScheduleUpdate: dispatchState.proposedScheduleUpdate,
               })
               await close()
               return
@@ -371,120 +255,13 @@ export default {
 
             for (const call of toolCalls) {
               const args = JSON.parse(call.function.arguments || '{}')
-              let result: unknown
-              switch (call.function.name) {
-                case 'search_schedules':
-                  result = await searchSchedules(context.supabase, args)
-                  break
-                case 'find_free_slots':
-                  result = await findFreeSlots(context.supabase, args)
-                  break
-                case 'propose_schedule': {
-                  proposedSchedule = args
-                  // Reflection: guaranteed, not dependent on the model
-                  // having called search_schedules first (the system
-                  // prompt asks it to, but nothing enforces that).
-                  //
-                  // Fail closed: if the existing-schedule fetch itself
-                  // fails, we cannot claim "no conflict" -- that would
-                  // silently defeat the whole point of this check. Surface
-                  // it as its own flag instead of folding it into
-                  // conflictTitle (a real conflict has a real event title;
-                  // "we couldn't check" doesn't, and the client renders
-                  // conflictTitle inside a "there's a '<title>' at the same
-                  // time" sentence).
-                  const proposedDate = resolveDate(args.date ?? 'today', today)
-                  let existing: ExistingScheduleRow[]
-                  try {
-                    existing = await fetchSchedules(context.supabase, proposedDate, proposedDate)
-                  } catch {
-                    existing = []
-                    conflictCheckFailed = true
-                  }
-                  conflictTitle = conflictCheckFailed ? null : findConflict(existing, args, today)
-                  result = conflictCheckFailed
-                    ? {
-                      ok: false,
-                      warning:
-                        'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
-                    }
-                    : conflictTitle
-                    ? { ok: true, warning: `Conflicts with existing '${conflictTitle}'` }
-                    : { ok: true }
-                  break
-                }
-                case 'propose_schedule_update': {
-                  const updateArgs = args as ProposedScheduleUpdateArgs
-                  try {
-                    const target = await fetchScheduleById(context.supabase, updateArgs.id)
-                    if (!target) {
-                      proposedScheduleUpdate = null
-                      result = {
-                        ok: false,
-                        error:
-                          'That item was not found -- it may have been deleted, or the id is wrong. Call search_schedules again.',
-                      }
-                      break
-                    }
-
-                    // Reflection, same fail-closed shape as propose_schedule:
-                    // only reschedule has a new time to conflict-check, and
-                    // the target's own current row must be excluded from
-                    // that check or it would always "conflict" with itself.
-                    let updateConflictTitle: string | null = null
-                    let updateConflictCheckFailed = false
-                    if (updateArgs.action === 'reschedule') {
-                      const targetDate = resolveDate(updateArgs.date ?? 'today', today)
-                      try {
-                        const existing = await fetchSchedules(
-                          context.supabase,
-                          targetDate,
-                          targetDate,
-                        )
-                        updateConflictTitle = findConflict(
-                          existing.filter((row) => row.id !== updateArgs.id),
-                          {
-                            title: target.title,
-                            date: updateArgs.date ?? 'today',
-                            startTime: updateArgs.startTime,
-                            endTime: updateArgs.endTime,
-                            isTask: false,
-                          },
-                          today,
-                        )
-                      } catch {
-                        updateConflictCheckFailed = true
-                      }
-                    }
-
-                    proposedScheduleUpdate = {
-                      ...updateArgs,
-                      title: target.title,
-                      version: target.version,
-                      conflictTitle: updateConflictCheckFailed ? null : updateConflictTitle,
-                      conflictCheckFailed: updateConflictCheckFailed,
-                    }
-                    result = updateConflictCheckFailed
-                      ? {
-                        ok: false,
-                        warning:
-                          'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
-                      }
-                      : updateConflictTitle
-                      ? { ok: true, warning: `Conflicts with existing '${updateConflictTitle}'` }
-                      : { ok: true }
-                  } catch {
-                    proposedScheduleUpdate = null
-                    result = {
-                      ok: false,
-                      error: 'Could not look up that item. Tell the user something went wrong.',
-                    }
-                  }
-                  break
-                }
-                default:
-                  result = { error: 'unknown tool' }
-              }
+              const result = await dispatchToolCall(
+                context.supabase,
+                call.function.name,
+                args,
+                dispatchState,
+                today,
+              )
               messages.push({
                 role: 'tool',
                 tool_call_id: call.id,
@@ -496,10 +273,14 @@ export default {
           // Ran out of iterations without a final text turn.
           send({
             done: true,
-            proposedSchedule: proposedSchedule
-              ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
+            proposedSchedule: dispatchState.proposedSchedule
+              ? {
+                ...dispatchState.proposedSchedule,
+                conflictTitle: dispatchState.conflictTitle,
+                conflictCheckFailed: dispatchState.conflictCheckFailed,
+              }
               : null,
-            proposedScheduleUpdate,
+            proposedScheduleUpdate: dispatchState.proposedScheduleUpdate,
           })
           await close()
         } catch (error) {

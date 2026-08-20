@@ -296,6 +296,258 @@ export function findConflict(
   return null
 }
 
+// ── DB-backed tool implementations + dispatch (moved out of index.ts so the
+// dispatch logic -- including both propose_* Reflection blocks -- is
+// unit-testable against a fake `supabase` port instead of only reachable
+// through a live HTTP call) ──
+
+type SupabasePort = { from: (table: string) => any }
+
+async function fetchSchedules(
+  supabase: SupabasePort,
+  from: string,
+  to: string,
+): Promise<ExistingScheduleRow[]> {
+  const { data, error } = await supabase
+    .from('todos')
+    .select('id,title,scheduled_date,start_at,end_at,version')
+    .is('deleted_at', null)
+    .gte('scheduled_date', from)
+    .lte('scheduled_date', to)
+    .limit(200)
+  if (error) throw error
+  return data as ExistingScheduleRow[]
+}
+
+/** Single-row lookup for propose_schedule_update -- the model only ever
+ * has an id from a prior search_schedules result, never a full row, so this
+ * is how it (and Reflection's conflict check) learns the item's current
+ * title/version. Returns null rather than throwing on a missing/deleted/
+ * foreign row so the caller can fail closed with a clear tool result instead
+ * of a generic 500. */
+async function fetchScheduleById(
+  supabase: SupabasePort,
+  id: string,
+): Promise<ExistingScheduleRow | null> {
+  const { data, error } = await supabase
+    .from('todos')
+    .select('id,title,scheduled_date,start_at,end_at,version')
+    .eq('id', id)
+    .is('deleted_at', null)
+    .maybeSingle()
+  if (error) throw error
+  return (data as ExistingScheduleRow | null) ?? null
+}
+
+async function searchSchedules(
+  supabase: SupabasePort,
+  args: { from?: string; to?: string },
+): Promise<unknown> {
+  if (!args.from || !args.to) return { error: 'from and to are required' }
+  try {
+    const rows = await fetchSchedules(supabase, args.from, args.to)
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        scheduledDate: r.scheduled_date,
+        startAt: r.start_at,
+        endAt: r.end_at,
+      })),
+    }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+async function findFreeSlots(
+  supabase: SupabasePort,
+  args: { scope?: string; durationMinutes?: number; windowStart?: string; windowEnd?: string },
+): Promise<unknown> {
+  const dates = expandScope(args.scope ?? 'today')
+  const duration = Math.max(15, args.durationMinutes ?? 30) * 60_000
+  const from = dates[0]
+  const to = dates.at(-1) ?? dates[0]
+
+  let rows: ExistingScheduleRow[]
+  try {
+    rows = await fetchSchedules(supabase, from, to)
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+  const busy = rows.filter((row) => row.start_at && row.end_at)
+
+  const lines: string[] = []
+  for (const date of dates) {
+    const dayBusy = busy
+      .filter((row) => row.scheduled_date === date)
+      .map((row) => ({ start: new Date(row.start_at!), end: new Date(row.end_at!) }))
+      .sort((a, b) => a.start.getTime() - b.start.getTime())
+
+    const windowStart = timeOn(date, args.windowStart) ?? timeOn(date, '08:00')!
+    const windowEnd = timeOn(date, args.windowEnd) ?? timeOn(date, '22:00')!
+
+    const slots: string[] = []
+    let cursor = windowStart
+    for (const range of dayBusy) {
+      if (range.start.getTime() > cursor.getTime()) {
+        if (range.start.getTime() - cursor.getTime() >= duration) {
+          slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
+        }
+      }
+      if (range.end.getTime() > cursor.getTime()) cursor = range.end
+    }
+    if (windowEnd.getTime() - cursor.getTime() >= duration) {
+      slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
+    }
+    if (slots.length > 0) lines.push(`${date}: ${slots.slice(0, 3).join(', ')}`)
+  }
+
+  return { slots: lines }
+}
+
+/** Accumulates across the whole tool-calling loop (which can span several
+ * OpenRouter round trips) so the final `done` message always reflects the
+ * latest propose_schedule/propose_schedule_update call, however many
+ * iterations it took to get there. */
+export type ToolDispatchState = {
+  proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null
+  conflictTitle: string | null
+  conflictCheckFailed: boolean
+  proposedScheduleUpdate:
+    | (ProposedScheduleUpdateArgs & {
+      title: string
+      version: number
+      conflictTitle: string | null
+      conflictCheckFailed: boolean
+    })
+    | null
+}
+
+export function newToolDispatchState(): ToolDispatchState {
+  return {
+    proposedSchedule: null,
+    conflictTitle: null,
+    conflictCheckFailed: false,
+    proposedScheduleUpdate: null,
+  }
+}
+
+/** Dispatches one accumulated tool call to its implementation, mutating
+ * `state` in place for the two propose_* tools (mirroring the shape the
+ * streamed `done` message reports) and returning the tool-result payload to
+ * push back into the conversation as a `role: 'tool'` message. */
+export async function dispatchToolCall(
+  supabase: SupabasePort,
+  toolName: string,
+  args: any,
+  state: ToolDispatchState,
+  today: Date = new Date(),
+): Promise<unknown> {
+  switch (toolName) {
+    case 'search_schedules':
+      return await searchSchedules(supabase, args)
+    case 'find_free_slots':
+      return await findFreeSlots(supabase, args)
+    case 'propose_schedule': {
+      state.proposedSchedule = args
+      // Reflection: guaranteed, not dependent on the model having called
+      // search_schedules first (the system prompt asks it to, but nothing
+      // enforces that).
+      //
+      // Fail closed: if the existing-schedule fetch itself fails, we cannot
+      // claim "no conflict" -- that would silently defeat the whole point of
+      // this check. Surface it as its own flag instead of folding it into
+      // conflictTitle (a real conflict has a real event title; "we couldn't
+      // check" doesn't, and the client renders conflictTitle inside a
+      // "there's a '<title>' at the same time" sentence).
+      const proposedDate = resolveDate(args.date ?? 'today', today)
+      let existing: ExistingScheduleRow[]
+      try {
+        existing = await fetchSchedules(supabase, proposedDate, proposedDate)
+      } catch {
+        existing = []
+        state.conflictCheckFailed = true
+      }
+      state.conflictTitle = state.conflictCheckFailed ? null : findConflict(existing, args, today)
+      return state.conflictCheckFailed
+        ? {
+          ok: false,
+          warning:
+            'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
+        }
+        : state.conflictTitle
+        ? { ok: true, warning: `Conflicts with existing '${state.conflictTitle}'` }
+        : { ok: true }
+    }
+    case 'propose_schedule_update': {
+      const updateArgs = args as ProposedScheduleUpdateArgs
+      try {
+        const target = await fetchScheduleById(supabase, updateArgs.id)
+        if (!target) {
+          state.proposedScheduleUpdate = null
+          return {
+            ok: false,
+            error:
+              'That item was not found -- it may have been deleted, or the id is wrong. Call search_schedules again.',
+          }
+        }
+
+        // Reflection, same fail-closed shape as propose_schedule: only
+        // reschedule has a new time to conflict-check, and the target's own
+        // current row must be excluded from that check or it would always
+        // "conflict" with itself.
+        let updateConflictTitle: string | null = null
+        let updateConflictCheckFailed = false
+        if (updateArgs.action === 'reschedule') {
+          const targetDate = resolveDate(updateArgs.date ?? 'today', today)
+          try {
+            const existing = await fetchSchedules(supabase, targetDate, targetDate)
+            updateConflictTitle = findConflict(
+              existing.filter((row) => row.id !== updateArgs.id),
+              {
+                title: target.title,
+                date: updateArgs.date ?? 'today',
+                startTime: updateArgs.startTime,
+                endTime: updateArgs.endTime,
+                isTask: false,
+              },
+              today,
+            )
+          } catch {
+            updateConflictCheckFailed = true
+          }
+        }
+
+        state.proposedScheduleUpdate = {
+          ...updateArgs,
+          title: target.title,
+          version: target.version,
+          conflictTitle: updateConflictCheckFailed ? null : updateConflictTitle,
+          conflictCheckFailed: updateConflictCheckFailed,
+        }
+        return updateConflictCheckFailed
+          ? {
+            ok: false,
+            warning:
+              'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
+          }
+          : updateConflictTitle
+          ? { ok: true, warning: `Conflicts with existing '${updateConflictTitle}'` }
+          : { ok: true }
+      } catch {
+        state.proposedScheduleUpdate = null
+        return {
+          ok: false,
+          error: 'Could not look up that item. Tell the user something went wrong.',
+        }
+      }
+    }
+    default:
+      return { error: 'unknown tool' }
+  }
+}
+
 // ── SSE stream parsing/accumulation (pure -- the actual fetch/reader loop
 // lives in index.ts, this is just the part worth unit-testing in isolation)
 //
