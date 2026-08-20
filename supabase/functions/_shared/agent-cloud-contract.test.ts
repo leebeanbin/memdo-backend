@@ -1,7 +1,9 @@
 import {
   accumulatedToolCallsArray,
   addAgentUsage,
+  AGENT_TOOL_NAMES,
   applyStreamChunk,
+  cloudAgentTools,
   dispatchToolCall,
   type ExistingScheduleRow,
   expandScope,
@@ -644,4 +646,31 @@ Deno.test('dispatchToolCall propose_review_actions stages a reflection without s
 
 Deno.test('resolveDate resolves yesterday relative to today', () => {
   assert(resolveDate('yesterday', dispatchToday) === '2026-08-15')
+})
+
+Deno.test('every tool advertised in cloudAgentTools has a live dispatch handler', async () => {
+  // AGENT_TOOL_NAMES is meant to be the single source of truth the schema
+  // and the dispatch table both read from -- this proves it actually is one
+  // by walking the real schema array and confirming each name dispatches to
+  // something other than the "unknown tool" fallback, rather than trusting
+  // that AGENT_TOOL_NAMES and the handler map were kept in sync by hand.
+  const advertisedNames = cloudAgentTools.map((tool) => tool.function.name)
+  assert(advertisedNames.length === Object.keys(AGENT_TOOL_NAMES).length)
+
+  for (const name of advertisedNames) {
+    const state = newToolDispatchState()
+    // fakeMultiTableSupabase(), not fakeSupabase() -- get_review_history's
+    // real query chain calls .order(), which only the multi-table fake
+    // implements.
+    const result: any = await dispatchToolCall(
+      fakeMultiTableSupabase({}),
+      name,
+      {},
+      state,
+      dispatchToday,
+    )
+    if (result && result.error === 'unknown tool') {
+      throw new Error(`${name} is advertised in cloudAgentTools but has no dispatch handler`)
+    }
+  }
 })

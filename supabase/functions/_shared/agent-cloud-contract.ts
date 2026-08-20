@@ -56,11 +56,28 @@ export type CloudAgentTurn = z.infer<typeof chatRequestSchema>['history'][number
 // currently cloud-only with no on-device tool AND no confirmation-card UI
 // yet for the two propose_* ones (see ToolDispatchState's doc comment) --
 // added ahead of both so the plumbing is ready once either lands.
+// Single source of truth for every tool name -- referenced by both the
+// schema below (what the model sees) and dispatchToolCall's handler map
+// (what actually runs). Before this, the same nine strings were typed twice
+// independently; a typo in either place would silently break routing with
+// no compile-time signal.
+export const AGENT_TOOL_NAMES = {
+  searchSchedules: 'search_schedules',
+  findFreeSlots: 'find_free_slots',
+  proposeSchedule: 'propose_schedule',
+  proposeScheduleUpdate: 'propose_schedule_update',
+  getDayContext: 'get_day_context',
+  getRoutinePreferences: 'get_routine_preferences',
+  getReviewHistory: 'get_review_history',
+  proposeRoutineUpdate: 'propose_routine_update',
+  proposeReviewActions: 'propose_review_actions',
+} as const
+
 export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'search_schedules',
+      name: AGENT_TOOL_NAMES.searchSchedules,
       description:
         "Search the user's schedule within a date range. Use this before answering questions about what's planned, or before proposing something to avoid a duplicate.",
       parameters: {
@@ -76,7 +93,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'find_free_slots',
+      name: AGENT_TOOL_NAMES.findFreeSlots,
       description: "Find open time blocks in the user's calendar.",
       parameters: {
         type: 'object',
@@ -99,7 +116,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'propose_schedule',
+      name: AGENT_TOOL_NAMES.proposeSchedule,
       description:
         'Propose a new schedule or task for the user to confirm. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim something was created without the user approving a proposal.',
       parameters: {
@@ -119,7 +136,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'propose_schedule_update',
+      name: AGENT_TOOL_NAMES.proposeScheduleUpdate,
       description:
         'Propose completing, moving, or deleting an EXISTING schedule or task. This does NOT change anything -- it only stages a proposal the user must explicitly approve. You must have a real `id` from a prior search_schedules call; never invent one or guess. Never claim an item was completed, moved, or deleted without the user approving a proposal.',
       parameters: {
@@ -148,7 +165,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'get_day_context',
+      name: AGENT_TOOL_NAMES.getDayContext,
       description:
         "Gets a breakdown of a single day's items (completed vs. incomplete, with titles), plus whether a daily reflection already exists for that day. Use this instead of search_schedules when the user is asking about how a specific day went, not just what's on it.",
       parameters: {
@@ -165,7 +182,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'get_routine_preferences',
+      name: AGENT_TOOL_NAMES.getRoutinePreferences,
       description:
         "Gets the user's routine settings: daily review time/days, news briefing time/days, planning prompt time, and whether notifications are on. Use this before discussing or proposing a change to any of these.",
       parameters: { type: 'object', properties: {} },
@@ -174,7 +191,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'get_review_history',
+      name: AGENT_TOOL_NAMES.getReviewHistory,
       description:
         'Gets the most recent daily reflections the user has written, most recent first. Use this when the user asks about patterns across past reviews.',
       parameters: {
@@ -188,7 +205,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'propose_routine_update',
+      name: AGENT_TOOL_NAMES.proposeRoutineUpdate,
       description:
         'Proposes a change to one or more routine settings for the user to confirm. This does NOT change anything -- it only stages a proposal. Only include the fields that should change; omit the rest. Never claim a setting was changed without the user approving a proposal.',
       parameters: {
@@ -207,7 +224,7 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
-      name: 'propose_review_actions',
+      name: AGENT_TOOL_NAMES.proposeReviewActions,
       description:
         "Proposes writing or updating a specific day's reflection text, based on the conversation. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim a reflection was saved without the user approving a proposal.",
       parameters: {
@@ -647,6 +664,147 @@ export function newToolDispatchState(): ToolDispatchState {
  * `state` in place for the two propose_* tools (mirroring the shape the
  * streamed `done` message reports) and returning the tool-result payload to
  * push back into the conversation as a `role: 'tool'` message. */
+type ToolHandler = (
+  supabase: SupabasePort,
+  args: any,
+  state: ToolDispatchState,
+  today: Date,
+) => Promise<unknown>
+
+async function handleProposeSchedule(
+  supabase: SupabasePort,
+  args: any,
+  state: ToolDispatchState,
+  today: Date,
+): Promise<unknown> {
+  state.proposedSchedule = args
+  // Reflection: guaranteed, not dependent on the model having called
+  // search_schedules first (the system prompt asks it to, but nothing
+  // enforces that).
+  //
+  // Fail closed: if the existing-schedule fetch itself fails, we cannot
+  // claim "no conflict" -- that would silently defeat the whole point of
+  // this check. The try/catch here is load-bearing, not incidental --
+  // removing it to minimize try/catch would silently reintroduce a fail-
+  // open conflict check. Surface it as its own flag instead of folding it
+  // into conflictTitle (a real conflict has a real event title; "we
+  // couldn't check" doesn't, and the client renders conflictTitle inside a
+  // "there's a '<title>' at the same time" sentence).
+  const proposedDate = resolveDate(args.date ?? 'today', today)
+  let existing: ExistingScheduleRow[]
+  try {
+    existing = await fetchSchedules(supabase, proposedDate, proposedDate)
+  } catch {
+    existing = []
+    state.conflictCheckFailed = true
+  }
+  state.conflictTitle = state.conflictCheckFailed ? null : findConflict(existing, args, today)
+  return state.conflictCheckFailed
+    ? {
+      ok: false,
+      warning:
+        'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
+    }
+    : state.conflictTitle
+    ? { ok: true, warning: `Conflicts with existing '${state.conflictTitle}'` }
+    : { ok: true }
+}
+
+async function handleProposeScheduleUpdate(
+  supabase: SupabasePort,
+  args: any,
+  state: ToolDispatchState,
+  today: Date,
+): Promise<unknown> {
+  const updateArgs = args as ProposedScheduleUpdateArgs
+  try {
+    const target = await fetchScheduleById(supabase, updateArgs.id)
+    if (!target) {
+      state.proposedScheduleUpdate = null
+      return {
+        ok: false,
+        error:
+          'That item was not found -- it may have been deleted, or the id is wrong. Call search_schedules again.',
+      }
+    }
+
+    // Reflection, same fail-closed shape as propose_schedule: only
+    // reschedule has a new time to conflict-check, and the target's own
+    // current row must be excluded from that check or it would always
+    // "conflict" with itself.
+    let updateConflictTitle: string | null = null
+    let updateConflictCheckFailed = false
+    if (updateArgs.action === 'reschedule') {
+      const targetDate = resolveDate(updateArgs.date ?? 'today', today)
+      try {
+        const existing = await fetchSchedules(supabase, targetDate, targetDate)
+        updateConflictTitle = findConflict(
+          existing.filter((row) => row.id !== updateArgs.id),
+          {
+            title: target.title,
+            date: updateArgs.date ?? 'today',
+            startTime: updateArgs.startTime,
+            endTime: updateArgs.endTime,
+            isTask: false,
+          },
+          today,
+        )
+      } catch {
+        updateConflictCheckFailed = true
+      }
+    }
+
+    state.proposedScheduleUpdate = {
+      ...updateArgs,
+      title: target.title,
+      version: target.version,
+      conflictTitle: updateConflictCheckFailed ? null : updateConflictTitle,
+      conflictCheckFailed: updateConflictCheckFailed,
+    }
+    return updateConflictCheckFailed
+      ? {
+        ok: false,
+        warning:
+          'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
+      }
+      : updateConflictTitle
+      ? { ok: true, warning: `Conflicts with existing '${updateConflictTitle}'` }
+      : { ok: true }
+  } catch {
+    state.proposedScheduleUpdate = null
+    return {
+      ok: false,
+      error: 'Could not look up that item. Tell the user something went wrong.',
+    }
+  }
+}
+
+// One handler per tool, keyed by the same AGENT_TOOL_NAMES constants the
+// schema above uses -- a lookup table rather than a switch/if-chain, so
+// adding a tool means adding an entry here rather than editing a growing
+// branch (Open/Closed: dispatchToolCall itself never changes).
+const toolHandlers: Record<string, ToolHandler> = {
+  [AGENT_TOOL_NAMES.searchSchedules]: (supabase, args) => searchSchedules(supabase, args),
+  [AGENT_TOOL_NAMES.findFreeSlots]: (supabase, args) => findFreeSlots(supabase, args),
+  [AGENT_TOOL_NAMES.proposeSchedule]: handleProposeSchedule,
+  [AGENT_TOOL_NAMES.proposeScheduleUpdate]: handleProposeScheduleUpdate,
+  [AGENT_TOOL_NAMES.getDayContext]: (supabase, args, _state, today) =>
+    getDayContext(supabase, args, today),
+  [AGENT_TOOL_NAMES.getRoutinePreferences]: (supabase) => getRoutinePreferences(supabase),
+  [AGENT_TOOL_NAMES.getReviewHistory]: (supabase, args) => getReviewHistory(supabase, args),
+  // Neither propose_* below has anything to conflict-check -- unlike a
+  // schedule, one preference value or one reflection doesn't collide with
+  // another the way two time-ranges can.
+  [AGENT_TOOL_NAMES.proposeRoutineUpdate]: async (_supabase, args, state) => {
+    state.proposedRoutineUpdate = args
+    return { ok: true }
+  },
+  [AGENT_TOOL_NAMES.proposeReviewActions]: async (_supabase, args, state) => {
+    state.proposedReviewAction = args
+    return { ok: true }
+  },
+}
+
 export async function dispatchToolCall(
   supabase: SupabasePort,
   toolName: string,
@@ -654,122 +812,9 @@ export async function dispatchToolCall(
   state: ToolDispatchState,
   today: Date = new Date(),
 ): Promise<unknown> {
-  switch (toolName) {
-    case 'search_schedules':
-      return await searchSchedules(supabase, args)
-    case 'find_free_slots':
-      return await findFreeSlots(supabase, args)
-    case 'propose_schedule': {
-      state.proposedSchedule = args
-      // Reflection: guaranteed, not dependent on the model having called
-      // search_schedules first (the system prompt asks it to, but nothing
-      // enforces that).
-      //
-      // Fail closed: if the existing-schedule fetch itself fails, we cannot
-      // claim "no conflict" -- that would silently defeat the whole point of
-      // this check. Surface it as its own flag instead of folding it into
-      // conflictTitle (a real conflict has a real event title; "we couldn't
-      // check" doesn't, and the client renders conflictTitle inside a
-      // "there's a '<title>' at the same time" sentence).
-      const proposedDate = resolveDate(args.date ?? 'today', today)
-      let existing: ExistingScheduleRow[]
-      try {
-        existing = await fetchSchedules(supabase, proposedDate, proposedDate)
-      } catch {
-        existing = []
-        state.conflictCheckFailed = true
-      }
-      state.conflictTitle = state.conflictCheckFailed ? null : findConflict(existing, args, today)
-      return state.conflictCheckFailed
-        ? {
-          ok: false,
-          warning:
-            'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
-        }
-        : state.conflictTitle
-        ? { ok: true, warning: `Conflicts with existing '${state.conflictTitle}'` }
-        : { ok: true }
-    }
-    case 'propose_schedule_update': {
-      const updateArgs = args as ProposedScheduleUpdateArgs
-      try {
-        const target = await fetchScheduleById(supabase, updateArgs.id)
-        if (!target) {
-          state.proposedScheduleUpdate = null
-          return {
-            ok: false,
-            error:
-              'That item was not found -- it may have been deleted, or the id is wrong. Call search_schedules again.',
-          }
-        }
-
-        // Reflection, same fail-closed shape as propose_schedule: only
-        // reschedule has a new time to conflict-check, and the target's own
-        // current row must be excluded from that check or it would always
-        // "conflict" with itself.
-        let updateConflictTitle: string | null = null
-        let updateConflictCheckFailed = false
-        if (updateArgs.action === 'reschedule') {
-          const targetDate = resolveDate(updateArgs.date ?? 'today', today)
-          try {
-            const existing = await fetchSchedules(supabase, targetDate, targetDate)
-            updateConflictTitle = findConflict(
-              existing.filter((row) => row.id !== updateArgs.id),
-              {
-                title: target.title,
-                date: updateArgs.date ?? 'today',
-                startTime: updateArgs.startTime,
-                endTime: updateArgs.endTime,
-                isTask: false,
-              },
-              today,
-            )
-          } catch {
-            updateConflictCheckFailed = true
-          }
-        }
-
-        state.proposedScheduleUpdate = {
-          ...updateArgs,
-          title: target.title,
-          version: target.version,
-          conflictTitle: updateConflictCheckFailed ? null : updateConflictTitle,
-          conflictCheckFailed: updateConflictCheckFailed,
-        }
-        return updateConflictCheckFailed
-          ? {
-            ok: false,
-            warning:
-              'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
-          }
-          : updateConflictTitle
-          ? { ok: true, warning: `Conflicts with existing '${updateConflictTitle}'` }
-          : { ok: true }
-      } catch {
-        state.proposedScheduleUpdate = null
-        return {
-          ok: false,
-          error: 'Could not look up that item. Tell the user something went wrong.',
-        }
-      }
-    }
-    case 'get_day_context':
-      return await getDayContext(supabase, args, today)
-    case 'get_routine_preferences':
-      return await getRoutinePreferences(supabase)
-    case 'get_review_history':
-      return await getReviewHistory(supabase, args)
-    case 'propose_routine_update':
-      // Nothing to conflict-check -- unlike a schedule, one preference value
-      // doesn't collide with another the way two time-ranges can.
-      state.proposedRoutineUpdate = args
-      return { ok: true }
-    case 'propose_review_actions':
-      state.proposedReviewAction = args
-      return { ok: true }
-    default:
-      return { error: 'unknown tool' }
-  }
+  const handler = toolHandlers[toolName]
+  if (!handler) return { error: 'unknown tool' }
+  return await handler(supabase, args, state, today)
 }
 
 // ── SSE stream parsing/accumulation (pure -- the actual fetch/reader loop
