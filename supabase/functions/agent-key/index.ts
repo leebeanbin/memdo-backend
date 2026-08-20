@@ -107,6 +107,20 @@ export default {
       }
 
       if (existing) {
+        const { error: deleteSecretError } = await supabase.rpc('vault_delete_secret', {
+          p_id: existing.secret_id,
+        })
+        if (deleteSecretError) {
+          console.error(
+            JSON.stringify({
+              requestId: currentRequestId,
+              operation: 'agent_key.delete.secret',
+              error: deleteSecretError,
+            }),
+          )
+          return apiError('INTERNAL_ERROR', '연결 해지에 실패했습니다.', 500, currentRequestId)
+        }
+
         const deleted = await supabase.from('user_api_keys').delete().eq('id', existing.id)
         if (deleted.error) {
           console.error(
@@ -117,17 +131,6 @@ export default {
             }),
           )
           return apiError('INTERNAL_ERROR', '연결 해지에 실패했습니다.', 500, currentRequestId)
-        }
-        try {
-          await supabase.rpc('vault_delete_secret', { p_id: existing.secret_id })
-        } catch (cleanupError) {
-          console.error(
-            JSON.stringify({
-              requestId: currentRequestId,
-              operation: 'agent_key.delete.cleanup',
-              error: String(cleanupError),
-            }),
-          )
         }
       }
 

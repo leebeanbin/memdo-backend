@@ -182,6 +182,16 @@
 - 남은 blocker: B12(MCP), B13(운영 자동화), #67(온디바이스 fallback 모델) 미착수. 재개 조건은 각
   문서의 "다음에 재개할 때" 절을 따른다.
 
+## 2026-08-19 — BYOK 해지 시 Vault 비밀 생명주기 보강
+
+- 목표: OpenRouter 연결 해지 시 Vault 삭제 실패가 성공으로 숨겨져 고아 비밀이 남지 않게 한다.
+- 변경 파일: `supabase/functions/agent-key/index.ts`.
+- 결정과 이유: Vault 비밀을 먼저 삭제하고 RPC 오류를 확인한 뒤 연결 메타데이터를 삭제한다. 재시도해도
+  멱등적이며, 실패한 Vault 삭제를 정상 해지로 응답하지 않는다.
+- 실행한 검증과 결과: Edge Function 21개 Deno type check, 변경 파일 format check, 공유 계약 테스트 47개
+  통과. 전체 format check는 기존 Markdown 5개의 포맷 차이로 실패하여 변경 파일만 별도 확인했다.
+- 커밋 / 남은 blocker: 미커밋. 원격 Edge Function 배포는 별도 작업으로 남음.
+
 ## 2026-08-19 — Agent가 기존 일정을 완료·이동·삭제 제안할 수 있게 확장
 
 - 목표: 클라우드 Agent가 새 일정 생성(`propose_schedule`)만 제안할 수 있고 기존 일정의 완료 처리·
