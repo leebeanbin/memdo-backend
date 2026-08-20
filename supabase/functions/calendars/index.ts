@@ -1,7 +1,9 @@
-import { apiError, json, withApi } from '../_shared/http.ts'
+import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
+    const startedAt = performance.now()
+
     if (request.method !== 'GET') {
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
     }
@@ -22,23 +24,10 @@ export default {
         .maybeSingle(),
     ])
 
-    if (calendars.error) {
+    const queryError = calendars.error ?? googleConnection.error
+    if (queryError) {
       console.error(
-        JSON.stringify({
-          requestId: currentRequestId,
-          operation: 'calendars',
-          error: calendars.error,
-        }),
-      )
-      return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
-    }
-    if (googleConnection.error) {
-      console.error(
-        JSON.stringify({
-          requestId: currentRequestId,
-          operation: 'calendars',
-          error: googleConnection.error,
-        }),
+        JSON.stringify({ requestId: currentRequestId, operation: 'calendars', error: queryError }),
       )
       return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
     }
@@ -69,6 +58,16 @@ export default {
       })
     }
 
+    logRequest({
+      eventName: 'calendars.list',
+      requestId: currentRequestId,
+      routeTemplate: '/calendars',
+      method: request.method,
+      status: 200,
+      durationMs: performance.now() - startedAt,
+      responseBytes: responseByteLength(items),
+      returnedRows: items.length,
+    })
     return json(items, 200, currentRequestId)
   }),
 }
