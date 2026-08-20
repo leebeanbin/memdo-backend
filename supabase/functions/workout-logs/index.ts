@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { POSTGRES_UNIQUE_VIOLATION } from '../_shared/http.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -161,7 +162,7 @@ async function handleCreate(
 
   if (logError) {
     // Handle unique constraint violation on hk_uuid (race condition)
-    if (logError.code === '23505' && hkUuid) {
+    if (logError.code === POSTGRES_UNIQUE_VIOLATION && hkUuid) {
       const { data: existing } = await supabase
         .from('workout_log_full')
         .select('*')

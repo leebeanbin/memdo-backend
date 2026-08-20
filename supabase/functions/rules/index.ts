@@ -1,5 +1,12 @@
 import { z } from 'zod'
-import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
+import {
+  apiError,
+  json,
+  logRequest,
+  POSTGRES_UNIQUE_VIOLATION,
+  responseByteLength,
+  withApi,
+} from '../_shared/http.ts'
 import {
   firstOccurrence,
   materializeRow,
@@ -127,7 +134,7 @@ export default {
           .select(ruleSelect)
           .single()
 
-        if (inserted.error && inserted.error.code === '23505') {
+        if (inserted.error && inserted.error.code === POSTGRES_UNIQUE_VIOLATION) {
           const existing = await context.supabase
             .from('schedule_rules')
             .select(ruleSelect)

@@ -15,6 +15,14 @@ export function requestId(request: Request): string {
   return request.headers.get('X-Request-ID') ?? crypto.randomUUID()
 }
 
+// Postgres error codes callers check against `error.code` after a Supabase
+// write, most often to distinguish an idempotency-key replay (unique
+// violation on a client-supplied id) from a real failure, or a dangling
+// foreign key reference from something worth a 500. Named so a reader
+// doesn't need PostgreSQL's numeric error-code table memorized.
+export const POSTGRES_UNIQUE_VIOLATION = '23505'
+export const POSTGRES_FOREIGN_KEY_VIOLATION = '23503'
+
 export function json(body: unknown, status: number, requestId: string): Response {
   return Response.json(body, {
     status,

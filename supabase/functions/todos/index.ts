@@ -1,5 +1,14 @@
 import { z } from 'zod'
-import { apiError, json, logRequest, responseByteLength, sha256, withApi } from '../_shared/http.ts'
+import {
+  apiError,
+  json,
+  logRequest,
+  POSTGRES_FOREIGN_KEY_VIOLATION,
+  POSTGRES_UNIQUE_VIOLATION,
+  responseByteLength,
+  sha256,
+  withApi,
+} from '../_shared/http.ts'
 import {
   addDays,
   expandOccurrences,
@@ -405,7 +414,7 @@ export default {
         // check runs before RLS would ever filter it, another user's) rule id
         // fails the foreign key rather than something we validated ourselves.
         // Surface it as a normal validation error, not a 500.
-        if (error.code === '23503') {
+        if (error.code === POSTGRES_FOREIGN_KEY_VIOLATION) {
           return apiError(
             'INVALID_REQUEST',
             '연결할 반복 규칙을 찾을 수 없습니다.',
@@ -413,7 +422,7 @@ export default {
             currentRequestId,
           )
         }
-        if (error.code !== '23505') throw error
+        if (error.code !== POSTGRES_UNIQUE_VIOLATION) throw error
 
         const existing = await context.supabase
           .from('todos')
