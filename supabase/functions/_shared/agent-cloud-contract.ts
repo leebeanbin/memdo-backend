@@ -1,22 +1,27 @@
 import { z } from 'zod'
 
 export const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions'
-// Verified live against https://openrouter.ai/api/v1/models on 2026-08-16 --
-// gpt-4o-mini/claude-3.5-sonnet/gemini-2.0-flash (this list's previous
-// values) no longer appear in that response at all. Re-check periodically;
-// OpenRouter's catalog turns over fast and a stale id here just 400s.
+// Verified live against https://openrouter.ai/api/v1/models on 2026-08-20 --
+// all four pre-existing ids still resolve. Re-check periodically; OpenRouter's
+// catalog turns over fast and a stale id here just 400s.
 export const DEFAULT_OPENROUTER_MODEL = 'openai/gpt-5.4-mini'
 export const MAX_TOOL_ITERATIONS = 5
 
 // Curated rather than free-text: OpenRouter proxies hundreds of models, most
-// unsuited to fast structured tool-calling for a chat assistant. Keeping
-// this list here (not just in the iOS picker) means the server also rejects
-// a tampered/unexpected model id instead of forwarding it to OpenRouter.
+// unsuited to fast structured tool-calling for a chat assistant. This is the
+// single source of truth for what's allowed -- agent-models-contract.ts's
+// catalog listing (model picker + live pricing) filters against this exact
+// array too, so there's no separate iOS-side list to keep in sync; adding an
+// id here makes it selectable and priced automatically.
 export const ALLOWED_OPENROUTER_MODELS = [
   'openai/gpt-5.4-mini',
   'openai/gpt-5.6-sol',
   'anthropic/claude-sonnet-5',
   'google/gemini-3.5-flash',
+  // Cheapest tool-capable model on OpenRouter as of 2026-08-20 (prompt
+  // $0.03/M, completion $0.13/M, 1M context) -- roughly 10-30x cheaper than
+  // the rest of this list, for BYOK users who want a low-cost default.
+  'qwen/qwen3.7-flash',
 ] as const
 
 // A rolling-hour cap per user -- BYOK means a runaway loop or bug burns the
