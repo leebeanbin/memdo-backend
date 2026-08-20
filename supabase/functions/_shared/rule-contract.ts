@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { stableUuid } from './deterministic-id.ts'
 
 export const ruleSelect =
   'id,calendar_id,title,entry_kind,is_all_day,note,start_time,end_time,time_bucket,reminder_offset_minutes,frequency,step_interval,anchor_date,until_date,occurrence_count,timezone_offset_minutes,created_at,updated_at'
@@ -194,16 +195,8 @@ export function firstOccurrence(rule: RecurrenceFields): string | null {
 
 /** Deterministic id for a rule+date pair, so re-materializing the same
  * occurrence (retry, or virtual -> real promotion) is naturally idempotent. */
-export async function occurrenceId(ruleId: string, date: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${ruleId}:${date}`)),
-  ).slice(0, 16)
-  digest[6] = (digest[6] & 0x0f) | 0x40
-  digest[8] = (digest[8] & 0x3f) | 0x80
-  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${
-    hex.slice(20)
-  }`
+function occurrenceId(ruleId: string, date: string): Promise<string> {
+  return stableUuid(`${ruleId}:${date}`)
 }
 
 /** Builds a real todos row for one occurrence of `rule` on `date`, from the
