@@ -3,6 +3,7 @@ import {
   addAgentUsage,
   AGENT_TOOL_NAMES,
   applyStreamChunk,
+  buildDonePayload,
   cloudAgentTools,
   dispatchToolCall,
   type ExistingScheduleRow,
@@ -671,6 +672,122 @@ Deno.test('every tool advertised in cloudAgentTools has a live dispatch handler'
     )
     if (result && result.error === 'unknown tool') {
       throw new Error(`${name} is advertised in cloudAgentTools but has no dispatch handler`)
+    }
+  }
+})
+
+// ── buildDonePayload <-> iOS AgentStreamLineDTO contract ──
+// iOS's Decodable structs (ScheduleAPI.swift) are the actual consumer of
+// this JSON shape but live in a different repo/language, so there's no
+// compiler link between them and this file the way there is between
+// cloudAgentTools and dispatchToolCall above. These tests hard-code the
+// key sets iOS's structs currently declare (as of AgentStreamLineDTO/
+// CloudProposedScheduleDTO/CloudProposedScheduleUpdateDTO in
+// ScheduleAPI.swift) and fail loudly if this file's output drifts from
+// them -- the nearest thing to a compile-time check across the boundary.
+
+const IOS_STREAM_LINE_KEYS = [
+  'delta',
+  'done',
+  'proposedSchedule',
+  'proposedScheduleUpdate',
+  'error',
+]
+const IOS_PROPOSED_SCHEDULE_KEYS = [
+  'title',
+  'date',
+  'startTime',
+  'endTime',
+  'isTask',
+  'note',
+  'conflictTitle',
+  'conflictCheckFailed',
+]
+const IOS_PROPOSED_SCHEDULE_UPDATE_KEYS = [
+  'id',
+  'action',
+  'date',
+  'startTime',
+  'endTime',
+  'title',
+  'version',
+  'conflictTitle',
+  'conflictCheckFailed',
+]
+
+Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares', () => {
+  const state = newToolDispatchState()
+  const payload = buildDonePayload(state)
+  // Superset is fine (Swift Decodable ignores unknown keys by default) --
+  // proposedRoutineUpdate/proposedReviewAction are exactly that, added
+  // ahead of iOS having anything to decode them into (see
+  // ToolDispatchState's doc comment). A key iOS DOES try to decode that's
+  // missing here would break the client, so that direction must hold.
+  for (const key of ['done', 'proposedSchedule', 'proposedScheduleUpdate']) {
+    assert(key in payload)
+  }
+  assert(IOS_STREAM_LINE_KEYS.includes('done'))
+  assert(IOS_STREAM_LINE_KEYS.includes('proposedSchedule'))
+  assert(IOS_STREAM_LINE_KEYS.includes('proposedScheduleUpdate'))
+})
+
+Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO field for field', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeSchedule,
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state)
+  assert(payload.proposedSchedule !== null)
+  const actualKeys = Object.keys(payload.proposedSchedule!).sort()
+  const expectedKeys = [...IOS_PROPOSED_SCHEDULE_KEYS].filter((k) => k !== 'note').sort()
+  // `note` is optional/omitted when absent (undefined props don't survive
+  // JSON.stringify, matching how the real HTTP response would look) --
+  // compare against the DTO's *required-for-this-case* key set instead of
+  // demanding an exact match that would be a false negative here.
+  for (const key of expectedKeys) {
+    if (!actualKeys.includes(key)) throw new Error(`missing key: ${key}`)
+  }
+  for (const key of actualKeys) {
+    if (!IOS_PROPOSED_SCHEDULE_KEYS.includes(key)) {
+      throw new Error(`unexpected key iOS doesn't declare: ${key}`)
+    }
+  }
+})
+
+Deno.test('buildDonePayload.proposedScheduleUpdate matches CloudProposedScheduleUpdateDTO field for field', async () => {
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: null,
+    end_at: null,
+    version: 2,
+  }]
+  await dispatchToolCall(
+    fakeSupabase(existing),
+    AGENT_TOOL_NAMES.proposeScheduleUpdate,
+    { id: 'a1', action: 'complete' },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state)
+  assert(payload.proposedScheduleUpdate !== null)
+  const actualKeys = Object.keys(payload.proposedScheduleUpdate!).sort()
+  const expectedKeys = [...IOS_PROPOSED_SCHEDULE_UPDATE_KEYS].filter((k) =>
+    k !== 'date' && k !== 'startTime' && k !== 'endTime'
+  )
+    .sort()
+  for (const key of expectedKeys) {
+    if (!actualKeys.includes(key)) throw new Error(`missing key: ${key}`)
+  }
+  for (const key of actualKeys) {
+    if (!IOS_PROPOSED_SCHEDULE_UPDATE_KEYS.includes(key)) {
+      throw new Error(`unexpected key iOS doesn't declare: ${key}`)
     }
   }
 })

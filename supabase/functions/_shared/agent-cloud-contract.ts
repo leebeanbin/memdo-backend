@@ -660,6 +660,43 @@ export function newToolDispatchState(): ToolDispatchState {
   }
 }
 
+/** Shape of the terminal streamed line agent-cloud-chat/index.ts sends --
+ * matches iOS's AgentStreamLineDTO (ScheduleAPI.swift) field for field.
+ * `proposedSchedule`'s conflict fields get folded in here since
+ * ToolDispatchState keeps them alongside rather than nested inside (see
+ * that type's doc comment); `proposedScheduleUpdate` already carries its
+ * own. Exported so both call sites in index.ts build this from the same
+ * function (a field added to ToolDispatchState can't end up wired into one
+ * and silently missing from the other) and so the exact key set is
+ * unit-testable against iOS's DTOs without a live HTTP call. */
+export function buildDonePayload(state: ToolDispatchState): {
+  done: true
+  proposedSchedule:
+    | (ProposedScheduleArgs & {
+      note?: string
+      conflictTitle: string | null
+      conflictCheckFailed: boolean
+    })
+    | null
+  proposedScheduleUpdate: ToolDispatchState['proposedScheduleUpdate']
+  proposedRoutineUpdate: ToolDispatchState['proposedRoutineUpdate']
+  proposedReviewAction: ToolDispatchState['proposedReviewAction']
+} {
+  return {
+    done: true,
+    proposedSchedule: state.proposedSchedule
+      ? {
+        ...state.proposedSchedule,
+        conflictTitle: state.conflictTitle,
+        conflictCheckFailed: state.conflictCheckFailed,
+      }
+      : null,
+    proposedScheduleUpdate: state.proposedScheduleUpdate,
+    proposedRoutineUpdate: state.proposedRoutineUpdate,
+    proposedReviewAction: state.proposedReviewAction,
+  }
+}
+
 /** Dispatches one accumulated tool call to its implementation, mutating
  * `state` in place for the two propose_* tools (mirroring the shape the
  * streamed `done` message reports) and returning the tool-result payload to
