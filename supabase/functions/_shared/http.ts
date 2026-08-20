@@ -103,3 +103,50 @@ export function logRequest(event: {
     durationMs: Math.round(event.durationMs * 100) / 100,
   }))
 }
+
+export type SuccessResponder = (
+  body: unknown,
+  status: number,
+  eventName: string,
+  returnedRows: number,
+) => Response
+
+/** Every CRUD route handler declared its own identical `success` closure
+ * (log then respond) -- four slightly different signatures had drifted in
+ * across todos/rules/categories/reviews/preferences/agent-key before this.
+ * One factory, one signature (body, status, eventName, returnedRows) for
+ * every caller. */
+export function successResponder(
+  opts: { request: Request; currentRequestId: string; routeTemplate: string; startedAt: number },
+): SuccessResponder {
+  return (body, status, eventName, returnedRows) => {
+    logRequest({
+      eventName,
+      requestId: opts.currentRequestId,
+      routeTemplate: opts.routeTemplate,
+      method: opts.request.method,
+      status,
+      durationMs: performance.now() - opts.startedAt,
+      responseBytes: responseByteLength(body),
+      returnedRows,
+    })
+    return json(body, status, opts.currentRequestId)
+  }
+}
+
+/** The `try { ...routes... } catch (error) { log; return INTERNAL_ERROR }`
+ * wrapper every CRUD route handler re-implemented identically (same log
+ * shape, same fallback message). `operation` becomes the logged operation
+ * name so a caught error is still attributable to its route. */
+export async function withCrudErrors(
+  operation: string,
+  currentRequestId: string,
+  routes: () => Promise<Response>,
+): Promise<Response> {
+  try {
+    return await routes()
+  } catch (error) {
+    console.error(JSON.stringify({ requestId: currentRequestId, operation, error }))
+    return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
+  }
+}

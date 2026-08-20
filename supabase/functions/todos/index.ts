@@ -1,13 +1,12 @@
 import { z } from 'zod'
 import {
   apiError,
-  json,
-  logRequest,
   POSTGRES_FOREIGN_KEY_VIOLATION,
   POSTGRES_UNIQUE_VIOLATION,
-  responseByteLength,
   sha256,
+  successResponder,
   withApi,
+  withCrudErrors,
 } from '../_shared/http.ts'
 import {
   addDays,
@@ -151,23 +150,14 @@ async function googleMirrorEventsInRange(
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
-    const startedAt = performance.now()
+    const success = successResponder({
+      request,
+      currentRequestId,
+      routeTemplate: '/todos',
+      startedAt: performance.now(),
+    })
 
-    const success = (body: unknown, status: number, eventName: string, returnedRows: number) => {
-      logRequest({
-        eventName,
-        requestId: currentRequestId,
-        routeTemplate: '/todos',
-        method: request.method,
-        status,
-        durationMs: performance.now() - startedAt,
-        responseBytes: responseByteLength(body),
-        returnedRows,
-      })
-      return json(body, status, currentRequestId)
-    }
-
-    try {
+    return await withCrudErrors('todos', currentRequestId, async () => {
       const path = new URL(request.url).pathname.split('/').filter(Boolean)
       const todosIndex = path.lastIndexOf('todos')
       const itemId = path[todosIndex + 1]
@@ -554,9 +544,6 @@ export default {
       }
 
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
-    } catch (error) {
-      console.error(JSON.stringify({ requestId: currentRequestId, operation: 'todos', error }))
-      return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
-    }
+    })
   }),
 }
