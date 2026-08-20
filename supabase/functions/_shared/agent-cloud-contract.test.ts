@@ -449,3 +449,199 @@ Deno.test('dispatchToolCall reports an unknown tool name instead of throwing', a
   )
   assert(result.error === 'unknown tool')
 })
+
+// ── get_day_context / get_routine_preferences / get_review_history /
+// propose_routine_update / propose_review_actions (Phase 6 additions) ──
+// fakeSupabase()/fakeSupabaseError() above only seed `todos`-shaped rows, so
+// these tests use a small table-aware fake instead.
+
+function fakeMultiTableSupabase(
+  tables: Record<string, unknown[]>,
+): { from: (table: string) => any } {
+  return {
+    from: (table: string) => {
+      const rows = tables[table] ?? []
+      let eqFilters: Array<[string, unknown]> = []
+      const chain: any = {
+        select: () => chain,
+        is: () => chain,
+        gte: () => chain,
+        lte: () => chain,
+        order: () => chain,
+        limit: (n: number) => {
+          const filtered = rows.filter((row: any) =>
+            eqFilters.every(([col, value]) => row[col] === value)
+          )
+          return {
+            ...chain,
+            then: (resolve: any) => resolve({ data: filtered.slice(0, n), error: null }),
+          }
+        },
+        eq: (col: string, value: unknown) => {
+          eqFilters = [...eqFilters, [col, value]]
+          return chain
+        },
+        maybeSingle: () => {
+          const match = rows.find((row: any) =>
+            eqFilters.every(([col, value]) => row[col] === value)
+          )
+          return Promise.resolve({ data: match ?? null, error: null })
+        },
+        then: (resolve: any) =>
+          resolve({
+            data: rows.filter((row: any) => eqFilters.every(([col, value]) => row[col] === value)),
+            error: null,
+          }),
+      }
+      return chain
+    },
+  }
+}
+
+Deno.test('dispatchToolCall get_day_context splits completed vs incomplete and flags a reflection', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({
+      todos: [
+        {
+          id: 't1',
+          title: '운동',
+          scheduled_date: '2026-08-16',
+          start_at: null,
+          end_at: null,
+          status: 'completed',
+        },
+        {
+          id: 't2',
+          title: '보고서 작성',
+          scheduled_date: '2026-08-16',
+          start_at: null,
+          end_at: null,
+          status: 'pending',
+        },
+      ],
+      daily_reviews: [{ review_date: '2026-08-16', reflection: '좋은 하루' }],
+    }),
+    'get_day_context',
+    {},
+    state,
+    dispatchToday,
+  )
+  assert(result.date === '2026-08-16')
+  assert(result.completedCount === 1)
+  assert(result.incompleteCount === 1)
+  assert(result.completed[0].title === '운동')
+  assert(result.incomplete[0].title === '보고서 작성')
+  assert(result.hasReflection === true)
+})
+
+Deno.test('dispatchToolCall get_day_context reports no reflection when none exists', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({ todos: [], daily_reviews: [] }),
+    'get_day_context',
+    { date: 'tomorrow' },
+    state,
+    dispatchToday,
+  )
+  assert(result.date === '2026-08-17')
+  assert(result.hasReflection === false)
+})
+
+Deno.test('dispatchToolCall get_routine_preferences reports unconfigured when no row exists', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({ user_preferences: [] }),
+    'get_routine_preferences',
+    {},
+    state,
+    dispatchToday,
+  )
+  assert(result.configured === false)
+})
+
+Deno.test('dispatchToolCall get_routine_preferences maps an existing row through preferencesDto', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({
+      user_preferences: [{
+        timezone: 'Asia/Seoul',
+        widget_style: 'next_todo',
+        default_mood: null,
+        hide_widget_content: false,
+        notifications_enabled: true,
+        planning_prompt_time: '08:00',
+        quiet_hours_start: null,
+        quiet_hours_end: null,
+        calendar_filter: [],
+        daily_review_enabled: true,
+        daily_review_time: '21:00',
+        daily_review_days: ['MO', 'TU'],
+        daily_review_include_reflection: true,
+        news_briefing_enabled: false,
+        news_briefing_time: null,
+        news_briefing_days: [],
+        news_briefing_last_generated_date: null,
+        updated_at: '2026-08-16T00:00:00Z',
+      }],
+    }),
+    'get_routine_preferences',
+    {},
+    state,
+    dispatchToday,
+  )
+  assert(result.configured === true)
+  assert(result.dailyReview.time === '21:00')
+  assert(result.notificationsEnabled === true)
+})
+
+Deno.test('dispatchToolCall get_review_history returns most recent reflections up to the limit', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({
+      daily_reviews: [
+        { review_date: '2026-08-15', reflection: '어제' },
+        { review_date: '2026-08-14', reflection: '그제' },
+      ],
+    }),
+    'get_review_history',
+    { limit: 1 },
+    state,
+    dispatchToday,
+  )
+  assert(result.reviews.length === 1)
+  assert(result.reviews[0].reviewDate === '2026-08-15')
+})
+
+Deno.test('dispatchToolCall propose_routine_update stages a partial change without touching the DB', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({}),
+    'propose_routine_update',
+    { dailyReviewEnabled: true, dailyReviewTime: '22:00' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.proposedRoutineUpdate?.dailyReviewEnabled === true)
+  assert(state.proposedRoutineUpdate?.dailyReviewTime === '22:00')
+  assert(state.proposedRoutineUpdate?.newsBriefingEnabled === undefined)
+})
+
+Deno.test('dispatchToolCall propose_review_actions stages a reflection without saving it', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({}),
+    'propose_review_actions',
+    { date: 'yesterday', reflection: '집중이 잘 됐다' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.proposedReviewAction?.date === 'yesterday')
+  assert(state.proposedReviewAction?.reflection === '집중이 잘 됐다')
+})
+
+Deno.test('resolveDate resolves yesterday relative to today', () => {
+  assert(resolveDate('yesterday', dispatchToday) === '2026-08-15')
+})

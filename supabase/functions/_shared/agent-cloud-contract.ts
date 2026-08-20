@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { preferencesDto } from './preferences-contract.ts'
 
 export const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions'
 // Verified live against https://openrouter.ai/api/v1/models on 2026-08-20 --
@@ -45,13 +46,16 @@ export type CloudAgentTurn = z.infer<typeof chatRequestSchema>['history'][number
 
 // OpenAI-compatible function-calling schema (OpenRouter proxies this format
 // regardless of the underlying model). search_schedules/find_free_slots/
-// propose_schedule mirror the on-device tool set (ProposeScheduleTool/
-// FindFreeSlotTool in AssistantView.swift) where a DB query is cheap server-
-// side -- this is the "open-ended, needs external data" half of the split
-// described in the on-device/cloud research (search vs. fixed-shape
-// proposals), not a fallback for old devices only. propose_schedule_update
-// (complete/reschedule/delete an existing item) is currently cloud-only --
-// the on-device path has no equivalent yet.
+// propose_schedule/propose_schedule_update mirror the on-device tool set
+// (ProposeScheduleTool/FindFreeSlotTool/UpdateScheduleTool in
+// AssistantView.swift) where a DB query is cheap server-side -- this is the
+// "open-ended, needs external data" half of the split described in the
+// on-device/cloud research (search vs. fixed-shape proposals), not a
+// fallback for old devices only. get_day_context/get_routine_preferences/
+// get_review_history/propose_routine_update/propose_review_actions are
+// currently cloud-only with no on-device tool AND no confirmation-card UI
+// yet for the two propose_* ones (see ToolDispatchState's doc comment) --
+// added ahead of both so the plumbing is ready once either lands.
 export const cloudAgentTools = [
   {
     type: 'function',
@@ -141,6 +145,81 @@ export const cloudAgentTools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_day_context',
+      description:
+        "Gets a breakdown of a single day's items (completed vs. incomplete, with titles), plus whether a daily reflection already exists for that day. Use this instead of search_schedules when the user is asking about how a specific day went, not just what's on it.",
+      parameters: {
+        type: 'object',
+        properties: {
+          date: {
+            type: 'string',
+            description: "'today', 'tomorrow', or yyyy-MM-dd. Omit for today.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_routine_preferences',
+      description:
+        "Gets the user's routine settings: daily review time/days, news briefing time/days, planning prompt time, and whether notifications are on. Use this before discussing or proposing a change to any of these.",
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_review_history',
+      description:
+        'Gets the most recent daily reflections the user has written, most recent first. Use this when the user asks about patterns across past reviews.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', description: 'Max reflections to return, default 10, max 30' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'propose_routine_update',
+      description:
+        'Proposes a change to one or more routine settings for the user to confirm. This does NOT change anything -- it only stages a proposal. Only include the fields that should change; omit the rest. Never claim a setting was changed without the user approving a proposal.',
+      parameters: {
+        type: 'object',
+        properties: {
+          dailyReviewEnabled: { type: 'boolean' },
+          dailyReviewTime: { type: 'string', description: 'HH:mm' },
+          newsBriefingEnabled: { type: 'boolean' },
+          newsBriefingTime: { type: 'string', description: 'HH:mm' },
+          planningPromptTime: { type: 'string', description: 'HH:mm' },
+          notificationsEnabled: { type: 'boolean' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'propose_review_actions',
+      description:
+        "Proposes writing or updating a specific day's reflection text, based on the conversation. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim a reflection was saved without the user approving a proposal.",
+      parameters: {
+        type: 'object',
+        properties: {
+          date: { type: 'string', description: "'today', 'yesterday', or yyyy-MM-dd" },
+          reflection: { type: 'string', description: 'The proposed reflection text, in Korean' },
+        },
+        required: ['date', 'reflection'],
+      },
+    },
+  },
 ]
 
 export function systemPrompt(today: string): string {
@@ -152,6 +231,10 @@ export function systemPrompt(today: string): string {
     'When the user asks to find free time or where to fit something, call find_free_slots.',
     'When the user asks about existing plans, or before proposing something new, call search_schedules to check first rather than guessing.',
     'When the user wants to complete, move, or delete an EXISTING schedule or task, first call search_schedules to find its real id, then call propose_schedule_update -- do not guess an id, and do not claim the change happened.',
+    'When the user asks how a specific day went (not just what was on it), call get_day_context instead of search_schedules.',
+    'When the user asks about or wants to change routine settings (daily review, news briefing, planning prompt, notifications), call get_routine_preferences first, then propose_routine_update if they want a change.',
+    'When the user asks about patterns across past reflections, call get_review_history.',
+    'When the user wants to write or update a reflection for a specific day, call propose_review_actions -- do not just describe it in text.',
     "You cannot directly modify, complete, move, or delete anything -- every change goes through a propose_* tool and needs the user's explicit approval.",
   ].join('\n')
 }
@@ -181,7 +264,11 @@ function localDateParts(
   return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth(), d: shifted.getUTCDate() }
 }
 
-/** Resolves a single proposed/queried date token relative to `today`. */
+/** Resolves a single proposed/queried date token relative to `today`.
+ * 'yesterday' exists for propose_review_actions (reflections are naturally
+ * about a day that's already over); the schedule-facing tools
+ * (propose_schedule, find_free_slots, ...) only ever need today/tomorrow/
+ * an explicit date, so this doesn't affect them. */
 export function resolveDate(
   token: string,
   today: Date = new Date(),
@@ -190,6 +277,7 @@ export function resolveDate(
   const { y, m, d } = localDateParts(today, offsetMinutes)
   if (token === 'today') return toISODate(new Date(Date.UTC(y, m, d)))
   if (token === 'tomorrow') return toISODate(new Date(Date.UTC(y, m, d + 1)))
+  if (token === 'yesterday') return toISODate(new Date(Date.UTC(y, m, d - 1)))
   return token
 }
 
@@ -406,10 +494,123 @@ async function findFreeSlots(
   return { slots: lines }
 }
 
+type DayItemRow = {
+  id: string
+  title: string
+  start_at: string | null
+  end_at: string | null
+  status: string
+}
+
+async function fetchDayItems(supabase: SupabasePort, date: string): Promise<DayItemRow[]> {
+  const { data, error } = await supabase
+    .from('todos')
+    .select('id,title,start_at,end_at,status')
+    .eq('scheduled_date', date)
+    .is('deleted_at', null)
+    .limit(200)
+  if (error) throw error
+  return data as DayItemRow[]
+}
+
+async function getDayContext(
+  supabase: SupabasePort,
+  args: { date?: string },
+  today: Date,
+): Promise<unknown> {
+  const date = resolveDate(args.date ?? 'today', today)
+  let items: DayItemRow[]
+  try {
+    items = await fetchDayItems(supabase, date)
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+  const completed = items.filter((row) => row.status === 'completed')
+  const incomplete = items.filter((row) => row.status !== 'completed')
+
+  let hasReflection = false
+  try {
+    const { data, error } = await supabase
+      .from('daily_reviews')
+      .select('review_date')
+      .eq('review_date', date)
+      .maybeSingle()
+    if (error) throw error
+    hasReflection = data != null
+  } catch {
+    // Reflection presence is a minor, non-blocking part of this tool's
+    // answer -- unlike propose_*'s conflict checks, there's nothing this
+    // tool commits to that a wrong "false" here would corrupt, so this
+    // fails soft rather than failing the whole call.
+    hasReflection = false
+  }
+
+  return {
+    date,
+    completedCount: completed.length,
+    incompleteCount: incomplete.length,
+    completed: completed.map((row) => ({ id: row.id, title: row.title })),
+    incomplete: incomplete.map((row) => ({
+      id: row.id,
+      title: row.title,
+      startAt: row.start_at,
+      endAt: row.end_at,
+    })),
+    hasReflection,
+  }
+}
+
+async function getRoutinePreferences(supabase: SupabasePort): Promise<unknown> {
+  const { data, error } = await supabase.from('user_preferences').select('*').maybeSingle()
+  if (error) return { error: error instanceof Error ? error.message : String(error) }
+  if (!data) return { configured: false }
+  return { configured: true, ...preferencesDto(data) }
+}
+
+/** Mirrors reviews/index.ts's private reviewDto() -- duplicated rather than
+ * imported since that function isn't exported (kept function-local there).
+ * Phase 10 (#5 in the responsibility-separation plan) moves reviewDto into
+ * its own _shared contract file, at which point both call sites should
+ * import the same one instead of each defining their own. */
+function reviewHistoryDto(row: Record<string, unknown>) {
+  return {
+    reviewDate: row.review_date,
+    reflection: row.reflection,
+  }
+}
+
+async function getReviewHistory(
+  supabase: SupabasePort,
+  args: { limit?: number },
+): Promise<unknown> {
+  const limit = Math.min(30, Math.max(1, args.limit ?? 10))
+  const { data, error } = await supabase
+    .from('daily_reviews')
+    .select('review_date,reflection')
+    .order('review_date', { ascending: false })
+    .limit(limit)
+  if (error) return { error: error instanceof Error ? error.message : String(error) }
+  return { reviews: (data as Record<string, unknown>[]).map(reviewHistoryDto) }
+}
+
 /** Accumulates across the whole tool-calling loop (which can span several
  * OpenRouter round trips) so the final `done` message always reflects the
  * latest propose_schedule/propose_schedule_update call, however many
  * iterations it took to get there. */
+export type ProposedRoutineUpdateArgs = {
+  dailyReviewEnabled?: boolean
+  dailyReviewTime?: string
+  newsBriefingEnabled?: boolean
+  newsBriefingTime?: string
+  planningPromptTime?: string
+  notificationsEnabled?: boolean
+}
+
+export type ProposedReviewActionArgs = {
+  date: string
+  reflection: string
+}
+
 export type ToolDispatchState = {
   proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null
   conflictTitle: string | null
@@ -422,6 +623,13 @@ export type ToolDispatchState = {
       conflictCheckFailed: boolean
     })
     | null
+  // No card renders these two yet (see AssistantView.swift's
+  // AgentScheduleUpdateProposal doc comment for the propose_schedule_update
+  // precedent this will eventually follow) -- carried through the `done`
+  // message regardless, same as the other two, so the plumbing is already
+  // correct once a card exists.
+  proposedRoutineUpdate: ProposedRoutineUpdateArgs | null
+  proposedReviewAction: ProposedReviewActionArgs | null
 }
 
 export function newToolDispatchState(): ToolDispatchState {
@@ -430,6 +638,8 @@ export function newToolDispatchState(): ToolDispatchState {
     conflictTitle: null,
     conflictCheckFailed: false,
     proposedScheduleUpdate: null,
+    proposedRoutineUpdate: null,
+    proposedReviewAction: null,
   }
 }
 
@@ -543,6 +753,20 @@ export async function dispatchToolCall(
         }
       }
     }
+    case 'get_day_context':
+      return await getDayContext(supabase, args, today)
+    case 'get_routine_preferences':
+      return await getRoutinePreferences(supabase)
+    case 'get_review_history':
+      return await getReviewHistory(supabase, args)
+    case 'propose_routine_update':
+      // Nothing to conflict-check -- unlike a schedule, one preference value
+      // doesn't collide with another the way two time-ranges can.
+      state.proposedRoutineUpdate = args
+      return { ok: true }
+    case 'propose_review_actions':
+      state.proposedReviewAction = args
+      return { ok: true }
     default:
       return { error: 'unknown tool' }
   }

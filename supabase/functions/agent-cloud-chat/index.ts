@@ -195,6 +195,24 @@ export default {
         const totalUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, costUsd: 0 }
         let completedCalls = 0
 
+        // Single source of truth for the `done` payload shape -- built fresh
+        // from dispatchState at both send sites below (no-tool-calls exit and
+        // ran-out-of-iterations exit) so a field added to ToolDispatchState
+        // can't end up wired into one and silently missing from the other.
+        const donePayload = () => ({
+          done: true,
+          proposedSchedule: dispatchState.proposedSchedule
+            ? {
+              ...dispatchState.proposedSchedule,
+              conflictTitle: dispatchState.conflictTitle,
+              conflictCheckFailed: dispatchState.conflictCheckFailed,
+            }
+            : null,
+          proposedScheduleUpdate: dispatchState.proposedScheduleUpdate,
+          proposedRoutineUpdate: dispatchState.proposedRoutineUpdate,
+          proposedReviewAction: dispatchState.proposedReviewAction,
+        })
+
         const close = async () => {
           if (completedCalls > 0) {
             try {
@@ -232,17 +250,7 @@ export default {
             const toolCalls = accumulatedToolCallsArray(acc)
 
             if (toolCalls.length === 0) {
-              send({
-                done: true,
-                proposedSchedule: dispatchState.proposedSchedule
-                  ? {
-                    ...dispatchState.proposedSchedule,
-                    conflictTitle: dispatchState.conflictTitle,
-                    conflictCheckFailed: dispatchState.conflictCheckFailed,
-                  }
-                  : null,
-                proposedScheduleUpdate: dispatchState.proposedScheduleUpdate,
-              })
+              send(donePayload())
               await close()
               return
             }
@@ -271,17 +279,7 @@ export default {
             }
           }
           // Ran out of iterations without a final text turn.
-          send({
-            done: true,
-            proposedSchedule: dispatchState.proposedSchedule
-              ? {
-                ...dispatchState.proposedSchedule,
-                conflictTitle: dispatchState.conflictTitle,
-                conflictCheckFailed: dispatchState.conflictCheckFailed,
-              }
-              : null,
-            proposedScheduleUpdate: dispatchState.proposedScheduleUpdate,
-          })
+          send(donePayload())
           await close()
         } catch (error) {
           console.error(
