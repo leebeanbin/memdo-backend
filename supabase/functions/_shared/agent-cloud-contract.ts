@@ -1,5 +1,8 @@
 import { z } from 'zod'
+import { AGENT_TOOL_NAMES, parseAgentToolCall } from './agent-tool-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
+
+export { AGENT_TOOL_NAMES }
 
 export const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions'
 // Verified live against https://openrouter.ai/api/v1/models on 2026-08-20 --
@@ -56,23 +59,6 @@ export type CloudAgentTurn = z.infer<typeof chatRequestSchema>['history'][number
 // currently cloud-only with no on-device tool AND no confirmation-card UI
 // yet for the two propose_* ones (see ToolDispatchState's doc comment) --
 // added ahead of both so the plumbing is ready once either lands.
-// Single source of truth for every tool name -- referenced by both the
-// schema below (what the model sees) and dispatchToolCall's handler map
-// (what actually runs). Before this, the same nine strings were typed twice
-// independently; a typo in either place would silently break routing with
-// no compile-time signal.
-export const AGENT_TOOL_NAMES = {
-  searchSchedules: 'search_schedules',
-  findFreeSlots: 'find_free_slots',
-  proposeSchedule: 'propose_schedule',
-  proposeScheduleUpdate: 'propose_schedule_update',
-  getDayContext: 'get_day_context',
-  getRoutinePreferences: 'get_routine_preferences',
-  getReviewHistory: 'get_review_history',
-  proposeRoutineUpdate: 'propose_routine_update',
-  proposeReviewActions: 'propose_review_actions',
-} as const
-
 export const cloudAgentTools = [
   {
     type: 'function',
@@ -173,7 +159,7 @@ export const cloudAgentTools = [
         properties: {
           date: {
             type: 'string',
-            description: "'today', 'tomorrow', or yyyy-MM-dd. Omit for today.",
+            description: "'today', 'tomorrow', 'yesterday', or yyyy-MM-dd. Omit for today.",
           },
         },
       },
@@ -727,7 +713,9 @@ async function handleProposeSchedule(
   // into conflictTitle (a real conflict has a real event title; "we
   // couldn't check" doesn't, and the client renders conflictTitle inside a
   // "there's a '<title>' at the same time" sentence).
-  const proposedDate = resolveDate(args.date ?? 'today', today)
+  // args.date is required by proposeScheduleArgsSchema (parseAgentToolCall
+  // already validated it before this handler ran) -- no fallback needed.
+  const proposedDate = resolveDate(args.date, today)
   let existing: ExistingScheduleRow[]
   try {
     existing = await fetchSchedules(supabase, proposedDate, proposedDate)
@@ -772,14 +760,19 @@ async function handleProposeScheduleUpdate(
     let updateConflictTitle: string | null = null
     let updateConflictCheckFailed = false
     if (updateArgs.action === 'reschedule') {
-      const targetDate = resolveDate(updateArgs.date ?? 'today', today)
+      // Required by proposeScheduleUpdateArgsSchema's 'reschedule' variant
+      // (parseAgentToolCall already validated this) -- ProposedScheduleUpdateArgs
+      // still types `date` as optional since it also covers complete/delete,
+      // which never carry one.
+      const date = updateArgs.date as string
+      const targetDate = resolveDate(date, today)
       try {
         const existing = await fetchSchedules(supabase, targetDate, targetDate)
         updateConflictTitle = findConflict(
           existing.filter((row) => row.id !== updateArgs.id),
           {
             title: target.title,
-            date: updateArgs.date ?? 'today',
+            date,
             startTime: updateArgs.startTime,
             endTime: updateArgs.endTime,
             isTask: false,
@@ -842,6 +835,10 @@ const toolHandlers: Record<string, ToolHandler> = {
   },
 }
 
+/** Runs every tool call through parseAgentToolCall's validation boundary
+ * before a handler ever executes -- an invalid or unsupported call returns
+ * a tool-result error and leaves `state` completely untouched (nothing gets
+ * staged) instead of forwarding whatever the model produced. */
 export async function dispatchToolCall(
   supabase: SupabasePort,
   toolName: string,
@@ -849,9 +846,23 @@ export async function dispatchToolCall(
   state: ToolDispatchState,
   today: Date = new Date(),
 ): Promise<unknown> {
+  const parsed = parseAgentToolCall(toolName, args)
+  if (!parsed.ok) {
+    if (parsed.kind === 'UNSUPPORTED_TOOL') {
+      return { error: 'UNSUPPORTED_TOOL' }
+    }
+    console.error(
+      JSON.stringify({
+        operation: 'agent_cloud_chat.invalid_argument',
+        toolName,
+        issues: parsed.issues,
+      }),
+    )
+    return { error: 'INVALID_AGENT_ARGUMENT', issues: parsed.issues }
+  }
+
   const handler = toolHandlers[toolName]
-  if (!handler) return { error: 'unknown tool' }
-  return await handler(supabase, args, state, today)
+  return await handler(supabase, parsed.args, state, today)
 }
 
 // ── SSE stream parsing/accumulation (pure -- the actual fetch/reader loop

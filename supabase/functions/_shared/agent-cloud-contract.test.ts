@@ -39,6 +39,20 @@ Deno.test('resolveDate handles today/tomorrow/explicit', () => {
   assert(resolveDate('2026-09-01', today) === '2026-09-01')
 })
 
+Deno.test('resolveDate today uses KST calendar date across the UTC day boundary', () => {
+  // Issue A-03: systemPrompt() used to compute "today" from a bare
+  // toISODate(new Date()) (UTC's calendar date) while every tool-argument
+  // date resolution went through resolveDate('today', ...) (KST, +540min)
+  // -- for ~9h/day the two disagreed on which day it was. Fixed in
+  // agent-cloud-chat/index.ts (systemPrompt(resolveDate('today', today)));
+  // this pins the boundary resolveDate itself must get right on both sides.
+  //
+  // UTC 2026-08-20 15:30 == KST 2026-08-21 00:30 -- already the 21st.
+  assert(resolveDate('today', new Date('2026-08-20T15:30:00Z')) === '2026-08-21')
+  // UTC 2026-08-21 14:59 == KST 2026-08-21 23:59 -- still the 21st.
+  assert(resolveDate('today', new Date('2026-08-21T14:59:00Z')) === '2026-08-21')
+})
+
 Deno.test('expandScope this_week is 7 consecutive days starting today', () => {
   const dates = expandScope('this_week', today)
   assert(dates.length === 7)
@@ -450,7 +464,54 @@ Deno.test('dispatchToolCall reports an unknown tool name instead of throwing', a
     state,
     dispatchToday,
   )
-  assert(result.error === 'unknown tool')
+  assert(result.error === 'UNSUPPORTED_TOOL')
+})
+
+// ── Issue A-04/B-04: invalid arguments must never reach a handler, so the
+// handler's own state mutations (staging a proposal) must never happen --
+// checking the tool result alone isn't enough, since a handler could in
+// principle return an error string while still having mutated state first. ──
+
+Deno.test('dispatchToolCall leaves state untouched when propose_schedule gets an invalid date', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule',
+    { title: '점심', date: '2026-99-40', startTime: '12:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(result.error === 'INVALID_AGENT_ARGUMENT')
+  assert(state.proposedSchedule === null)
+})
+
+Deno.test('dispatchToolCall leaves state untouched when propose_schedule_update reschedule omits date', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule_update',
+    { id: 'a1', action: 'reschedule' },
+    state,
+    dispatchToday,
+  )
+  assert(result.error === 'INVALID_AGENT_ARGUMENT')
+  assert(state.proposedScheduleUpdate === null)
+})
+
+Deno.test('dispatchToolCall leaves state untouched when find_free_slots duration is out of range', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: 'today', durationMinutes: 999999 },
+    state,
+    dispatchToday,
+  )
+  assert(result.error === 'INVALID_AGENT_ARGUMENT')
+  // find_free_slots never stages state to begin with -- this confirms it
+  // also never reaches fetchSchedules by asserting the whole state object
+  // is still the pristine default rather than checking one field.
+  assert(JSON.stringify(state) === JSON.stringify(newToolDispatchState()))
 })
 
 // ── get_day_context / get_routine_preferences / get_review_history /
@@ -670,7 +731,7 @@ Deno.test('every tool advertised in cloudAgentTools has a live dispatch handler'
       state,
       dispatchToday,
     )
-    if (result && result.error === 'unknown tool') {
+    if (result && result.error === 'UNSUPPORTED_TOOL') {
       throw new Error(`${name} is advertised in cloudAgentTools but has no dispatch handler`)
     }
   }
