@@ -91,14 +91,15 @@ repository 권한을 요청하지 않는다. provider token이나 refresh token�
 
 Apple App Review 4.8 요구사항에 따라 Google·GitHub와 동등한 위치에 Sign in with Apple을 추가했다
 (`MemdoApp.swift`, Supabase Auth의 Apple provider 연결). 로그인 화면은 Apple·Google·GitHub 세
-provider로 제한하고 새 익명 세션 진입은 제공하지 않는다([ADR-071](../../memdo/docs/10-decisions-and-open-questions.md)).
+provider로 제한하고 새 익명 세션 진입은 제공하지
+않는다([ADR-071](../../memdo/docs/10-decisions-and-open-questions.md)).
 
 ## 완료 조건과 확인 상태
 
 - Apple·Google·GitHub에서 각각 신규 가입·재로그인·로그아웃 성공. — 익명 세션 경로는 실제 계정으로
-  검증됨(work-log 2026-08-03). 세 provider 모두 client ID/secret은 `.env.local`에 채워져 있고
-  로그인 화면·callback 코드는 구현돼 있으나, 이 값으로 세 provider 각각의 실제 로그인 왕복을
-  마지막으로 재확인한 기록은 없다 — 재개 시 가장 먼저 확인할 항목이다.
+  검증됨(work-log 2026-08-03). 세 provider 모두 client ID/secret은 `.env.local`에 채워져 있고 로그인
+  화면·callback 코드는 구현돼 있으나, 이 값으로 세 provider 각각의 실제 로그인 왕복을 마지막으로
+  재확인한 기록은 없다 — 재개 시 가장 먼저 확인할 항목이다.
 - callback 취소와 provider 오류가 앱에서 안전하게 복구됨. — 코드 경로 존재, 실기기 재확인 필요.
 - 첫 가입 시 기본 캘린더가 정확히 한 번 생성됨. — 검증됨(work-log 2026-08-03, trigger 기반).
 - 다른 사용자의 calendar와 todo 조회가 RLS로 거부됨. — 검증됨(보안 advisor, RLS 정책).

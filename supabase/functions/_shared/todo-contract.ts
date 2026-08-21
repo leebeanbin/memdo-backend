@@ -42,18 +42,20 @@ export const todoInputSchema = z.object({
   }
 })
 
+const todoStatusEnum = z.enum([
+  'planned',
+  'in_progress',
+  'partial',
+  'completed',
+  'skipped',
+  'rescheduled',
+  'cancelled',
+])
+
 export const todoListQuerySchema = z.object({
   from: z.iso.date().optional(),
   to: z.iso.date().optional(),
-  status: z.array(z.enum([
-    'planned',
-    'in_progress',
-    'partial',
-    'completed',
-    'skipped',
-    'rescheduled',
-    'cancelled',
-  ])).optional(),
+  status: z.array(todoStatusEnum).optional(),
   limit: z.number().int().min(1).max(50).default(20),
   cursor: z.string().max(512).optional(),
 }).refine((value) => !value.from || !value.to || value.from <= value.to, {
@@ -62,15 +64,7 @@ export const todoListQuerySchema = z.object({
 
 export const todoUpdateSchema = todoInputSchema.and(z.object({
   version: z.number().int().min(1),
-  status: z.enum([
-    'planned',
-    'in_progress',
-    'partial',
-    'completed',
-    'skipped',
-    'rescheduled',
-    'cancelled',
-  ]),
+  status: todoStatusEnum,
 }))
 
 export const todoDeleteSchema = z.object({

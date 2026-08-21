@@ -53,39 +53,49 @@ type TokenResponse = {
   token_type: string
 }
 
-export async function exchangeCodeForTokens(code: string): Promise<TokenResponse> {
+/** Both token-endpoint callers below differed only in the request body and
+ * the label in their error message -- same URL, header, and
+ * ok-check-then-throw shape otherwise. */
+async function requestGoogleToken(
+  body: URLSearchParams,
+  errorLabel: string,
+): Promise<TokenResponse> {
   const response = await fetch(GOOGLE_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
+    body,
+  })
+  if (!response.ok) {
+    throw new Error(
+      `google token ${errorLabel} failed: ${response.status} ${await response.text()}`,
+    )
+  }
+  return await response.json()
+}
+
+export async function exchangeCodeForTokens(code: string): Promise<TokenResponse> {
+  return await requestGoogleToken(
+    new URLSearchParams({
       code,
       client_id: googleClientId(),
       client_secret: googleClientSecret(),
       redirect_uri: redirectUri(),
       grant_type: 'authorization_code',
     }),
-  })
-  if (!response.ok) {
-    throw new Error(`google token exchange failed: ${response.status} ${await response.text()}`)
-  }
-  return await response.json()
+    'exchange',
+  )
 }
 
 export async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-  const response = await fetch(GOOGLE_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
+  return await requestGoogleToken(
+    new URLSearchParams({
       refresh_token: refreshToken,
       client_id: googleClientId(),
       client_secret: googleClientSecret(),
       grant_type: 'refresh_token',
     }),
-  })
-  if (!response.ok) {
-    throw new Error(`google token refresh failed: ${response.status} ${await response.text()}`)
-  }
-  return await response.json()
+    'refresh',
+  )
 }
 
 export async function revokeGoogleToken(token: string): Promise<void> {

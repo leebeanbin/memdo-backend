@@ -109,3 +109,11 @@ import_map = "../deno.json"
 [functions.agent-cloud-chat]
 verify_jwt = true
 import_map = "../deno.json"
+
+[functions.agent-models]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.agent-usage]
+verify_jwt = true
+import_map = "../deno.json"

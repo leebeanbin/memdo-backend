@@ -1,25 +1,23 @@
-import { apiError, requestId as extractRequestId, withApi } from '../_shared/http.ts'
+import { apiError, withApi } from '../_shared/http.ts'
 import {
   accumulatedToolCallsArray,
+  addAgentUsage,
+  type AgentUsage,
   applyStreamChunk,
+  buildDonePayload,
   chatRequestSchema,
   cloudAgentTools,
   DEFAULT_OPENROUTER_MODEL,
-  type ExistingScheduleRow,
-  expandScope,
-  findConflict,
-  formatSlot,
+  dispatchToolCall,
   MAX_TOOL_ITERATIONS,
   newStreamAccumulator,
+  newToolDispatchState,
   OPENROUTER_CHAT_URL,
   parseStreamLine,
-  type ProposedScheduleArgs,
   RATE_LIMIT_PER_HOUR,
   resolveDate,
   type StreamAccumulator,
   systemPrompt,
-  timeOn,
-  toISODate,
 } from '../_shared/agent-cloud-contract.ts'
 import { OPENROUTER_PROVIDER } from '../_shared/agent-key-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
@@ -30,88 +28,6 @@ type ChatMessage = {
   tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
   tool_call_id?: string
   name?: string
-}
-
-async function fetchSchedules(
-  supabase: { from: (table: string) => any },
-  from: string,
-  to: string,
-): Promise<ExistingScheduleRow[]> {
-  const { data, error } = await supabase
-    .from('todos')
-    .select('title,scheduled_date,start_at,end_at')
-    .is('deleted_at', null)
-    .gte('scheduled_date', from)
-    .lte('scheduled_date', to)
-    .limit(200)
-  if (error) throw error
-  return data as ExistingScheduleRow[]
-}
-
-async function searchSchedules(
-  supabase: { from: (table: string) => any },
-  args: { from?: string; to?: string },
-): Promise<unknown> {
-  if (!args.from || !args.to) return { error: 'from and to are required' }
-  try {
-    const rows = await fetchSchedules(supabase, args.from, args.to)
-    return {
-      items: rows.map((r) => ({
-        title: r.title,
-        scheduledDate: r.scheduled_date,
-        startAt: r.start_at,
-        endAt: r.end_at,
-      })),
-    }
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
-  }
-}
-
-async function findFreeSlots(
-  supabase: { from: (table: string) => any },
-  args: { scope?: string; durationMinutes?: number; windowStart?: string; windowEnd?: string },
-): Promise<unknown> {
-  const dates = expandScope(args.scope ?? 'today')
-  const duration = Math.max(15, args.durationMinutes ?? 30) * 60_000
-  const from = dates[0]
-  const to = dates.at(-1) ?? dates[0]
-
-  let rows: ExistingScheduleRow[]
-  try {
-    rows = await fetchSchedules(supabase, from, to)
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
-  }
-  const busy = rows.filter((row) => row.start_at && row.end_at)
-
-  const lines: string[] = []
-  for (const date of dates) {
-    const dayBusy = busy
-      .filter((row) => row.scheduled_date === date)
-      .map((row) => ({ start: new Date(row.start_at!), end: new Date(row.end_at!) }))
-      .sort((a, b) => a.start.getTime() - b.start.getTime())
-
-    const windowStart = timeOn(date, args.windowStart) ?? timeOn(date, '08:00')!
-    const windowEnd = timeOn(date, args.windowEnd) ?? timeOn(date, '22:00')!
-
-    const slots: string[] = []
-    let cursor = windowStart
-    for (const range of dayBusy) {
-      if (range.start.getTime() > cursor.getTime()) {
-        if (range.start.getTime() - cursor.getTime() >= duration) {
-          slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
-        }
-      }
-      if (range.end.getTime() > cursor.getTime()) cursor = range.end
-    }
-    if (windowEnd.getTime() - cursor.getTime() >= duration) {
-      slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
-    }
-    if (slots.length > 0) lines.push(`${date}: ${slots.slice(0, 3).join(', ')}`)
-  }
-
-  return { slots: lines }
 }
 
 /** Streams one OpenRouter chat-completions call and accumulates the result.
@@ -157,6 +73,12 @@ async function callOpenRouterStreamed(
         if (chunk.content && onContent) onContent(chunk.content)
       }
     }
+    buffer += decoder.decode()
+    const finalChunk = parseStreamLine(buffer)
+    if (finalChunk) {
+      applyStreamChunk(acc, finalChunk)
+      if (finalChunk.content && onContent) onContent(finalChunk.content)
+    }
   } finally {
     reader.releaseLock()
   }
@@ -164,8 +86,7 @@ async function callOpenRouterStreamed(
 }
 
 export default {
-  fetch: withApi<any>(async (request, context) => {
-    const currentRequestId = extractRequestId(request)
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
     const userId = context.userClaims!.id
 
     if (request.method !== 'POST') {
@@ -258,8 +179,14 @@ export default {
     }
 
     const today = new Date()
+    // resolveDate('today', ...) applies DEFAULT_TIMEZONE_OFFSET_MINUTES the
+    // same way every tool-argument date resolution below does -- a bare
+    // toISODate(today) here would tell the model UTC's date, which
+    // disagrees with what resolveDate('today', ...) computes for the model's
+    // own tool calls during the ~9h/day window where UTC and KST fall on
+    // different calendar days.
     const messages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt(toISODate(today)) },
+      { role: 'system', content: systemPrompt(resolveDate('today', today)) },
       ...parsed.data.history.map((turn) => ({ role: turn.role, content: turn.content })),
       { role: 'user', content: parsed.data.message },
     ]
@@ -271,9 +198,38 @@ export default {
         const send = (obj: unknown) =>
           controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
 
-        let proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null = null
-        let conflictTitle: string | null = null
-        let conflictCheckFailed = false
+        const dispatchState = newToolDispatchState()
+        const totalUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, costUsd: 0 }
+        let completedCalls = 0
+
+        // Built fresh from dispatchState at both send sites below
+        // (no-tool-calls exit and ran-out-of-iterations exit) via the same
+        // buildDonePayload() so they can't drift apart.
+        const donePayload = () => buildDonePayload(dispatchState)
+
+        const close = async () => {
+          if (completedCalls > 0) {
+            try {
+              const logged = await service.from('agent_usage_log').insert({
+                user_id: userId,
+                model,
+                prompt_tokens: totalUsage.promptTokens,
+                completion_tokens: totalUsage.completionTokens,
+                cost_usd: totalUsage.costUsd,
+              })
+              if (logged.error) throw logged.error
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'agent_cloud_chat.usage_log',
+                  error: String(error),
+                }),
+              )
+            }
+          }
+          controller.close()
+        }
 
         try {
           for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
@@ -283,16 +239,13 @@ export default {
               messages,
               (delta) => send({ delta }),
             )
+            addAgentUsage(totalUsage, acc.usage)
+            completedCalls++
             const toolCalls = accumulatedToolCallsArray(acc)
 
             if (toolCalls.length === 0) {
-              send({
-                done: true,
-                proposedSchedule: proposedSchedule
-                  ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
-                  : null,
-              })
-              controller.close()
+              send(donePayload())
+              await close()
               return
             }
 
@@ -304,51 +257,13 @@ export default {
 
             for (const call of toolCalls) {
               const args = JSON.parse(call.function.arguments || '{}')
-              let result: unknown
-              switch (call.function.name) {
-                case 'search_schedules':
-                  result = await searchSchedules(context.supabase, args)
-                  break
-                case 'find_free_slots':
-                  result = await findFreeSlots(context.supabase, args)
-                  break
-                case 'propose_schedule': {
-                  proposedSchedule = args
-                  // Reflection: guaranteed, not dependent on the model
-                  // having called search_schedules first (the system
-                  // prompt asks it to, but nothing enforces that).
-                  //
-                  // Fail closed: if the existing-schedule fetch itself
-                  // fails, we cannot claim "no conflict" -- that would
-                  // silently defeat the whole point of this check. Surface
-                  // it as its own flag instead of folding it into
-                  // conflictTitle (a real conflict has a real event title;
-                  // "we couldn't check" doesn't, and the client renders
-                  // conflictTitle inside a "there's a '<title>' at the same
-                  // time" sentence).
-                  const proposedDate = resolveDate(args.date ?? 'today', today)
-                  let existing: ExistingScheduleRow[]
-                  try {
-                    existing = await fetchSchedules(context.supabase, proposedDate, proposedDate)
-                  } catch {
-                    existing = []
-                    conflictCheckFailed = true
-                  }
-                  conflictTitle = conflictCheckFailed ? null : findConflict(existing, args, today)
-                  result = conflictCheckFailed
-                    ? {
-                      ok: false,
-                      warning:
-                        'Could not verify existing schedules for conflicts -- tell the user to double-check before saving.',
-                    }
-                    : conflictTitle
-                    ? { ok: true, warning: `Conflicts with existing '${conflictTitle}'` }
-                    : { ok: true }
-                  break
-                }
-                default:
-                  result = { error: 'unknown tool' }
-              }
+              const result = await dispatchToolCall(
+                context.supabase,
+                call.function.name,
+                args,
+                dispatchState,
+                today,
+              )
               messages.push({
                 role: 'tool',
                 tool_call_id: call.id,
@@ -358,13 +273,8 @@ export default {
             }
           }
           // Ran out of iterations without a final text turn.
-          send({
-            done: true,
-            proposedSchedule: proposedSchedule
-              ? { ...proposedSchedule, conflictTitle, conflictCheckFailed }
-              : null,
-          })
-          controller.close()
+          send(donePayload())
+          await close()
         } catch (error) {
           console.error(
             JSON.stringify({
@@ -374,7 +284,7 @@ export default {
             }),
           )
           send({ error: 'Agent 응답을 받지 못했습니다.' })
-          controller.close()
+          await close()
         }
       },
     })

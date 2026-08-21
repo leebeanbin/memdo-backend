@@ -1,5 +1,11 @@
 import { z } from 'zod'
-import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
+import {
+  apiError,
+  POSTGRES_UNIQUE_VIOLATION,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import {
   firstOccurrence,
   materializeRow,
@@ -31,24 +37,15 @@ function ruleDto(row: Record<string, unknown>) {
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
-    const startedAt = performance.now()
     const userId = context.userClaims!.id
+    const success = successResponder({
+      request,
+      currentRequestId,
+      routeTemplate: '/rules',
+      startedAt: performance.now(),
+    })
 
-    const success = (body: unknown, status: number, eventName: string, returnedRows: number) => {
-      logRequest({
-        eventName,
-        requestId: currentRequestId,
-        routeTemplate: '/rules',
-        method: request.method,
-        status,
-        durationMs: performance.now() - startedAt,
-        responseBytes: responseByteLength(body),
-        returnedRows,
-      })
-      return json(body, status, currentRequestId)
-    }
-
-    try {
+    return await withCrudErrors('rules', currentRequestId, async () => {
       const path = new URL(request.url).pathname.split('/').filter(Boolean)
       const rulesIndex = path.lastIndexOf('rules')
       const ruleId = path[rulesIndex + 1]
@@ -127,7 +124,7 @@ export default {
           .select(ruleSelect)
           .single()
 
-        if (inserted.error && inserted.error.code === '23505') {
+        if (inserted.error && inserted.error.code === POSTGRES_UNIQUE_VIOLATION) {
           const existing = await context.supabase
             .from('schedule_rules')
             .select(ruleSelect)
@@ -234,9 +231,6 @@ export default {
       }
 
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
-    } catch (error) {
-      console.error(JSON.stringify({ requestId: currentRequestId, operation: 'rules', error }))
-      return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
-    }
+    })
   }),
 }

@@ -1,4 +1,11 @@
-import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
+import {
+  apiError,
+  json,
+  logRequest,
+  responseByteLength,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import {
   decodeSyncCursor,
   encodeSyncCursor,
@@ -11,7 +18,7 @@ export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
     const startedAt = performance.now()
 
-    try {
+    return await withCrudErrors('sync.pull', currentRequestId, async () => {
       if (request.method !== 'GET') {
         return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
       }
@@ -65,9 +72,6 @@ export default {
         returnedRows: rows.length,
       })
       return json(body, 200, currentRequestId)
-    } catch (error) {
-      console.error(JSON.stringify({ requestId: currentRequestId, operation: 'sync.pull', error }))
-      return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
-    }
+    })
   }),
 }

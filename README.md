@@ -1,7 +1,7 @@
 # Memdo Backend
 
-Supabase 기반 Memdo 백엔드의 독립 저장소다. 일정 CRUD부터 반복 일정, Google Calendar 읽기 전용
-미러, 사용자 BYOK 기반 클라우드 Agent까지 개발을 완료했다.
+Supabase 기반 Memdo 백엔드의 독립 저장소다. 일정 CRUD부터 반복 일정, Google Calendar 읽기 전용 미러,
+사용자 BYOK 기반 클라우드 Agent까지 개발을 완료했다.
 
 ## 정확한 위치와 문서 순서
 
@@ -39,15 +39,15 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 일정 CRUD부터 반복
   재동기화 (B8) — `google-calendar-{start,callback,status,disconnect,sync}`
 - `GET/PUT /functions/v1/categories` 사용자 정의 카테고리 (iOS와 동기화)
 - `workout-logs` 운동 기록 (원래 migration 없이 배포됐던 것을 버전 관리로 rescue)
-- `agent-key`(OpenRouter BYOK 키 vault 저장)와 `agent-cloud-chat`(SSE streaming, tool calling,
-  서버 측 conflict reflection, hourly rate limit)로 클라우드 Agent 경로 완료 (B10)
+- `agent-key`(OpenRouter BYOK 키 vault 저장)와 `agent-cloud-chat`(SSE streaming, tool calling, 서버
+  측 conflict reflection, hourly rate limit)로 클라우드 Agent 경로 완료 (B10)
 - iOS 온디바이스 Agent(Apple FoundationModels)는 이 백엔드를 거치지 않고 기기에서 직접 실행
 
 B9(뉴스 브리핑)는 서버 pgmq 파이프라인 대신 iOS가 RSS를 직접 수집해 온디바이스로 요약하는 방식으로
 구현했다. B11(Slack)은 OAuth 앱 설치 대신 사용자가 발급한 Incoming Webhook URL을 iOS Keychain에
 저장하는 방식으로 구현했다 — 둘 다 이 저장소에 대응하는 Edge Function이 없다. B12(MCP)와 B13(운영
-dashboard·백업 자동화)은 구현하지 않았다. 자세한 배경은
-[`docs/roadmap.md`](docs/roadmap.md)를 참고한다.
+dashboard·백업 자동화)은 구현하지 않았다. 자세한 배경은 [`docs/roadmap.md`](docs/roadmap.md)를
+참고한다.
 
 ## 확정된 확장 경계
 
