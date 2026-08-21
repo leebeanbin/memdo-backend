@@ -127,14 +127,15 @@
 
 - 목표: 로그인 scope와 분리된 별도 동의로 Google Calendar를 연결하고, Memdo Todo와 섞지 않는 읽기
   전용 미러를 구축한다.
-- 변경 파일: `google_calendar_connections`·`google_calendar_oauth_states`·`google_calendar_mirror_events`
-  migration, `google-calendar-{start,callback,status,disconnect,sync}` Edge Function, vault
-  RPC 재사용.
+- 변경 파일:
+  `google_calendar_connections`·`google_calendar_oauth_states`·`google_calendar_mirror_events`
+  migration, `google-calendar-{start,callback,status,disconnect,sync}` Edge Function, vault RPC
+  재사용.
 - 결정과 이유: refresh token은 Supabase Vault에 저장하고 service-role만 읽는다. 증분 동기화는
   Google의 `nextSyncToken`을 그대로 저장하고, `410 Gone` 응답을 받으면 해당 캘린더만 전체
   재동기화한다. Todo 테이블에 직접 쓰지 않고 별도 mirror 테이블·owner RLS로 격리한다.
-- 실행한 검증과 결과: 실제 Google 계정으로 연결→동기화→해제→재인증 왕복, 보안 advisor 0건, Deno
-  계약 test, CI green.
+- 실행한 검증과 결과: 실제 Google 계정으로 연결→동기화→해제→재인증 왕복, 보안 advisor 0건, Deno 계약
+  test, CI green.
 - 커밋: `4c0f40c`. 남은 blocker 없음(Phase A 범위 완료, write scope와 MCP는 B12 이후).
 
 ## 2026-08-16 — B10 클라우드 Agent(OpenRouter BYOK)
@@ -143,16 +144,16 @@
   OpenRouter API 키로 더 강한 클라우드 모델을 쓸 수 있게 한다.
 - 변경 파일: `user_api_keys`·`agent_chat_requests` migration, `agent-key`·`agent-cloud-chat` Edge
   Function, `_shared/agent-key-contract.ts`·`_shared/agent-cloud-contract.ts`(+ 단위 테스트 14개).
-- 결정과 이유: 키는 Vault에 저장하고 서버는 절대 평문으로 보관하지 않는다. 응답은 SSE로 스트리밍하고,
-  `propose_schedule` 도구 호출마다 서버가 기존 일정과의 시간 충돌을 직접 재검사(Reflection)해 모델
-  주장을 신뢰하지 않는다. 시간당 요청 수를 제한한다. 모델 allowlist는 2026-08 기준 OpenRouter가 실제
-  서빙하는 모델만 `curl`로 직접 확인해 채웠다(WebFetch 요약은 신뢰하지 않음). ChatGPT
-  Plus/Claude Pro·Max/Google AI Pro 등 기존 구독 재사용은 API 미제공 또는 서드파티 도구에 대한
-  Anthropic의 2026-04-04 Consumer ToS 집행 때문에 채택하지 않았다.
+- 결정과 이유: 키는 Vault에 저장하고 서버는 절대 평문으로 보관하지 않는다. 응답은 SSE로
+  스트리밍하고, `propose_schedule` 도구 호출마다 서버가 기존 일정과의 시간 충돌을 직접
+  재검사(Reflection)해 모델 주장을 신뢰하지 않는다. 시간당 요청 수를 제한한다. 모델 allowlist는
+  2026-08 기준 OpenRouter가 실제 서빙하는 모델만 `curl`로 직접 확인해 채웠다(WebFetch 요약은
+  신뢰하지 않음). ChatGPT Plus/Claude Pro·Max/Google AI Pro 등 기존 구독 재사용은 API 미제공 또는
+  서드파티 도구에 대한 Anthropic의 2026-04-04 Consumer ToS 집행 때문에 채택하지 않았다.
 - 실행한 검증과 결과: 타임존 안전 날짜 계산(Deno test, `TZ=UTC`/`TZ=America/New_York` 교차 검증),
   streaming/tool-call 누적 로직 단위 테스트, CI green, 실제 OpenRouter 키로 왕복 확인.
-- 커밋: `87885e9`, `61d9ad0`, `2a20108`, `b9df806`, `20fb92d`. 남은 blocker: 비
-  Apple-Intelligence 기기용 온디바이스 fallback 모델은 스코프만 잡고 미구현(#67).
+- 커밋: `87885e9`, `61d9ad0`, `2a20108`, `b9df806`, `20fb92d`. 남은 blocker: 비 Apple-Intelligence
+  기기용 온디바이스 fallback 모델은 스코프만 잡고 미구현(#67).
 
 ## 2026-08-16 — 카테고리 동기화, 운동 기록 rescue, meeting_url 이력화
 
@@ -174,7 +175,8 @@
   마무리한다.
 - 변경 파일: 이 저장소의 `README.md`·`docs/README.md`·`docs/roadmap.md`·`docs/work-log.md`, iOS
   저장소의 `README.md`·`docs/09-roadmap-and-backlog.md`·`docs/10-decisions-and-open-questions.md`
-  (ADR-073~075 추가)·`docs/20-ai-agent-architecture.md`·`docs/21-integration-hub-google-calendar-mcp.md`.
+  (ADR-073~075
+  추가)·`docs/20-ai-agent-architecture.md`·`docs/21-integration-hub-google-calendar-mcp.md`.
 - 결정과 이유: 설계 문서(`20`, `21`)는 원래 구상한 상위 아키텍처(Agents SDK, MCP, Slack OAuth)를
   참고 자료로 남기되, 각 문서 상단에 실제 배포된 범위와의 차이를 명시해 향후 재개 시 문서와 코드를
   다시 맞추는 작업을 반복하지 않게 했다.
@@ -186,10 +188,10 @@
 
 - 목표: OpenRouter 연결 해지 시 Vault 삭제 실패가 성공으로 숨겨져 고아 비밀이 남지 않게 한다.
 - 변경 파일: `supabase/functions/agent-key/index.ts`.
-- 결정과 이유: Vault 비밀을 먼저 삭제하고 RPC 오류를 확인한 뒤 연결 메타데이터를 삭제한다. 재시도해도
-  멱등적이며, 실패한 Vault 삭제를 정상 해지로 응답하지 않는다.
-- 실행한 검증과 결과: Edge Function 21개 Deno type check, 변경 파일 format check, 공유 계약 테스트 47개
-  통과. 전체 format check는 기존 Markdown 5개의 포맷 차이로 실패하여 변경 파일만 별도 확인했다.
+- 결정과 이유: Vault 비밀을 먼저 삭제하고 RPC 오류를 확인한 뒤 연결 메타데이터를 삭제한다.
+  재시도해도 멱등적이며, 실패한 Vault 삭제를 정상 해지로 응답하지 않는다.
+- 실행한 검증과 결과: Edge Function 21개 Deno type check, 변경 파일 format check, 공유 계약 테스트
+  47개 통과. 전체 format check는 기존 Markdown 5개의 포맷 차이로 실패하여 변경 파일만 별도 확인했다.
 - 커밋 / 남은 blocker: 미커밋. 원격 Edge Function 배포는 별도 작업으로 남음.
 
 ## 2026-08-19 — Agent가 기존 일정을 완료·이동·삭제 제안할 수 있게 확장
@@ -197,20 +199,22 @@
 - 목표: 클라우드 Agent가 새 일정 생성(`propose_schedule`)만 제안할 수 있고 기존 일정의 완료 처리·
   이동·삭제는 전혀 손대지 못하던 격차를 메운다. Agent-루틴-알림 통합 검토에서 확인된 첫 번째 gap.
 - 변경 파일: `supabase/functions/_shared/agent-cloud-contract.ts`,
-  `supabase/functions/_shared/agent-cloud-contract.test.ts`, `supabase/functions/agent-cloud-chat/index.ts`.
-- 결정과 이유: 영속 `change_proposals` 테이블은 실제로 존재하지 않는다(설계 문서에만 있었음, migration
-  전무 확인). 기존 `propose_schedule`과 동일하게 "DB에 쓰지 않고 구조화된 제안만 스트림으로 반환 →
-  클라이언트가 승인 후 기존 todos PATCH/reschedule/DELETE API를 직접 호출" 패턴을 그대로 확장하는 쪽을
-  택했다. 새 도구 `propose_schedule_update(id, action, date?, startTime?, endTime?)`를 추가하고, 모델이
-  대상을 정확히 지목할 수 있도록 `search_schedules` 응답에 `id`를 포함시켰다. reschedule 액션에는
+  `supabase/functions/_shared/agent-cloud-contract.test.ts`,
+  `supabase/functions/agent-cloud-chat/index.ts`.
+- 결정과 이유: 영속 `change_proposals` 테이블은 실제로 존재하지 않는다(설계 문서에만 있었음,
+  migration 전무 확인). 기존 `propose_schedule`과 동일하게 "DB에 쓰지 않고 구조화된 제안만
+  스트림으로 반환 → 클라이언트가 승인 후 기존 todos PATCH/reschedule/DELETE API를 직접 호출" 패턴을
+  그대로 확장하는 쪽을 택했다. 새 도구
+  `propose_schedule_update(id, action, date?, startTime?, endTime?)`를 추가하고, 모델이 대상을
+  정확히 지목할 수 있도록 `search_schedules` 응답에 `id`를 포함시켰다. reschedule 액션에는
   `propose_schedule`과 동일한 fail-closed Reflection(충돌 조회 실패 시 "충돌 없음"으로 묵인하지 않고
-  `conflictCheckFailed`로 명시)을 대상 자신을 제외하고 적용했다. 대상이 없거나(삭제됨/잘못된 id) 조회
-  자체가 실패하면 제안을 만들지 않고 에러를 모델에 돌려준다.
-- 실행한 검증과 결과: `deno fmt`(변경 파일), `deno check`(21개 함수 전체), `deno test`(48개 통과, 신규
-  self-exclusion 테스트 포함). 실제 OpenRouter 호출을 통한 수동 e2e는 아직 미실행.
+  `conflictCheckFailed`로 명시)을 대상 자신을 제외하고 적용했다. 대상이 없거나(삭제됨/잘못된 id)
+  조회 자체가 실패하면 제안을 만들지 않고 에러를 모델에 돌려준다.
+- 실행한 검증과 결과: `deno fmt`(변경 파일), `deno check`(21개 함수 전체), `deno test`(48개 통과,
+  신규 self-exclusion 테스트 포함). 실제 OpenRouter 호출을 통한 수동 e2e는 아직 미실행.
 - 커밋 / 남은 blocker: 미커밋. iOS 쪽 `ScheduleAPI.swift` DTO에 `proposedScheduleUpdate` 필드를 아직
-  추가하지 않아 클라이언트는 이 필드를 무시한다 — 다음 이어서 할 일. 온디바이스 Agent에는 대응 도구가
-  없다(클라우드 전용). 루틴/알림 도구(`propose_routine_update`)와 실제 동의 집행, 알림
+  추가하지 않아 클라이언트는 이 필드를 무시한다 — 다음 이어서 할 일. 온디바이스 Agent에는 대응
+  도구가 없다(클라우드 전용). 루틴/알림 도구(`propose_routine_update`)와 실제 동의 집행, 알림
   `reconcile()`은 이 변경에 포함되지 않았다.
 
 ## 이후 기록 형식

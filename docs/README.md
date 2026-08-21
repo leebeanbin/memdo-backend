@@ -21,32 +21,32 @@
 
 ## 코드 지도
 
-| 위치                                              | 책임                                                   |
-| ------------------------------------------------- | ------------------------------------------------------ |
-| `supabase/config.toml`                            | 로컬 Supabase, OAuth provider, redirect 설정            |
-| `supabase/migrations/`                            | schema, index, RLS, cron job 전체 이력                  |
-| `supabase/functions/calendars/`                   | 인증 사용자의 캘린더 조회                                |
-| `supabase/functions/todos/`                       | 인증 사용자의 일정 CRUD, 원자적 재예약                    |
-| `supabase/functions/days/`                        | 날짜별 일정과 리뷰 상태 조회                              |
-| `supabase/functions/demo-bootstrap/`               | Debug 개발 데이터 생성                                  |
-| `supabase/functions/sync/`                        | 일정 증분 pull과 삭제 tombstone                          |
-| `supabase/functions/preferences/`                 | 사용자 설정 조회·전체 저장                                |
-| `supabase/functions/rules/`                       | 반복 일정 규칙, on-demand virtual occurrence (B5)         |
-| `supabase/functions/reviews/`                     | 하루 리뷰 기록 (B6)                                      |
-| `supabase/functions/summaries/`                   | 기간 요약 (B6)                                          |
-| `supabase/functions/search/`                      | pg_trgm 일정 검색 (B7)                                   |
-| `supabase/functions/google-calendar-start/`       | Google OAuth 인가 시작 (B8)                              |
-| `supabase/functions/google-calendar-callback/`    | Google OAuth callback, refresh token vault 저장 (B8)     |
-| `supabase/functions/google-calendar-status/`      | 연결 상태 조회 (B8)                                      |
-| `supabase/functions/google-calendar-disconnect/`  | 연결 해제, vault secret 삭제 (B8)                        |
-| `supabase/functions/google-calendar-sync/`        | incremental sync token, `410 Gone` 전체 재동기화 (B8)     |
-| `supabase/functions/categories/`                  | 사용자 정의 카테고리 조회·저장                            |
-| `supabase/functions/workout-logs/`                | 운동 기록 CRUD                                          |
-| `supabase/functions/agent-key/`                   | OpenRouter BYOK 키 저장·삭제 (vault) (B10)                |
-| `supabase/functions/agent-cloud-chat/`            | OpenRouter streaming chat, tool calling, server reflection, rate limit (B10) |
-| `supabase/functions/_shared/`                     | HTTP 응답, 일정·Agent 입력 계약, vault 헬퍼               |
-| `.env.example`                                    | 커밋 가능한 환경변수 이름 목록                            |
-| `docs/`                                           | 결정, 작업 순서, 작업 기록                                |
+| 위치                                             | 책임                                                                         |
+| ------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `supabase/config.toml`                           | 로컬 Supabase, OAuth provider, redirect 설정                                 |
+| `supabase/migrations/`                           | schema, index, RLS, cron job 전체 이력                                       |
+| `supabase/functions/calendars/`                  | 인증 사용자의 캘린더 조회                                                    |
+| `supabase/functions/todos/`                      | 인증 사용자의 일정 CRUD, 원자적 재예약                                       |
+| `supabase/functions/days/`                       | 날짜별 일정과 리뷰 상태 조회                                                 |
+| `supabase/functions/demo-bootstrap/`             | Debug 개발 데이터 생성                                                       |
+| `supabase/functions/sync/`                       | 일정 증분 pull과 삭제 tombstone                                              |
+| `supabase/functions/preferences/`                | 사용자 설정 조회·전체 저장                                                   |
+| `supabase/functions/rules/`                      | 반복 일정 규칙, on-demand virtual occurrence (B5)                            |
+| `supabase/functions/reviews/`                    | 하루 리뷰 기록 (B6)                                                          |
+| `supabase/functions/summaries/`                  | 기간 요약 (B6)                                                               |
+| `supabase/functions/search/`                     | pg_trgm 일정 검색 (B7)                                                       |
+| `supabase/functions/google-calendar-start/`      | Google OAuth 인가 시작 (B8)                                                  |
+| `supabase/functions/google-calendar-callback/`   | Google OAuth callback, refresh token vault 저장 (B8)                         |
+| `supabase/functions/google-calendar-status/`     | 연결 상태 조회 (B8)                                                          |
+| `supabase/functions/google-calendar-disconnect/` | 연결 해제, vault secret 삭제 (B8)                                            |
+| `supabase/functions/google-calendar-sync/`       | incremental sync token, `410 Gone` 전체 재동기화 (B8)                        |
+| `supabase/functions/categories/`                 | 사용자 정의 카테고리 조회·저장                                               |
+| `supabase/functions/workout-logs/`               | 운동 기록 CRUD                                                               |
+| `supabase/functions/agent-key/`                  | OpenRouter BYOK 키 저장·삭제 (vault) (B10)                                   |
+| `supabase/functions/agent-cloud-chat/`           | OpenRouter streaming chat, tool calling, server reflection, rate limit (B10) |
+| `supabase/functions/_shared/`                    | HTTP 응답, 일정·Agent 입력 계약, vault 헬퍼                                  |
+| `.env.example`                                   | 커밋 가능한 환경변수 이름 목록                                               |
+| `docs/`                                          | 결정, 작업 순서, 작업 기록                                                   |
 
 ## 현재 상태
 
