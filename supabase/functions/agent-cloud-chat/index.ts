@@ -15,9 +15,9 @@ import {
   OPENROUTER_CHAT_URL,
   parseStreamLine,
   RATE_LIMIT_PER_HOUR,
+  resolveDate,
   type StreamAccumulator,
   systemPrompt,
-  toISODate,
 } from '../_shared/agent-cloud-contract.ts'
 import { OPENROUTER_PROVIDER } from '../_shared/agent-key-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
@@ -179,8 +179,14 @@ export default {
     }
 
     const today = new Date()
+    // resolveDate('today', ...) applies DEFAULT_TIMEZONE_OFFSET_MINUTES the
+    // same way every tool-argument date resolution below does -- a bare
+    // toISODate(today) here would tell the model UTC's date, which
+    // disagrees with what resolveDate('today', ...) computes for the model's
+    // own tool calls during the ~9h/day window where UTC and KST fall on
+    // different calendar days.
     const messages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt(toISODate(today)) },
+      { role: 'system', content: systemPrompt(resolveDate('today', today)) },
       ...parsed.data.history.map((turn) => ({ role: turn.role, content: turn.content })),
       { role: 'user', content: parsed.data.message },
     ]
