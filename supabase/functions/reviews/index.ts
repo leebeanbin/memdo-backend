@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
+import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
 import { reviewInputSchema } from '../_shared/summary-contract.ts'
 
 const dateSchema = z.iso.date()
@@ -15,24 +15,15 @@ function reviewDto(row: Record<string, unknown>) {
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
-    const startedAt = performance.now()
     const userId = context.userClaims!.id
+    const success = successResponder({
+      request,
+      currentRequestId,
+      routeTemplate: '/reviews',
+      startedAt: performance.now(),
+    })
 
-    const success = (body: unknown, eventName: string, returnedRows: number) => {
-      logRequest({
-        eventName,
-        requestId: currentRequestId,
-        routeTemplate: '/reviews',
-        method: request.method,
-        status: 200,
-        durationMs: performance.now() - startedAt,
-        responseBytes: responseByteLength(body),
-        returnedRows,
-      })
-      return json(body, 200, currentRequestId)
-    }
-
-    try {
+    return await withCrudErrors('reviews', currentRequestId, async () => {
       const path = new URL(request.url).pathname.split('/').filter(Boolean)
       const reviewsIndex = path.lastIndexOf('reviews')
       const dateParam = path[reviewsIndex + 1]
@@ -44,7 +35,7 @@ export default {
           .order('review_date', { ascending: false })
           .limit(30)
         if (error) throw error
-        return success(data.map(reviewDto), 'reviews.list', data.length)
+        return success(data.map(reviewDto), 200, 'reviews.list', data.length)
       }
 
       if (request.method === 'GET' && dateParam) {
@@ -65,7 +56,7 @@ export default {
         if (!data) {
           return apiError('RESOURCE_NOT_FOUND', '회고를 찾을 수 없습니다.', 404, currentRequestId)
         }
-        return success(reviewDto(data), 'reviews.get', 1)
+        return success(reviewDto(data), 200, 'reviews.get', 1)
       }
 
       if (request.method === 'PUT' && dateParam) {
@@ -93,13 +84,10 @@ export default {
           .select('review_date,reflection,created_at,updated_at')
           .single()
         if (error) throw error
-        return success(reviewDto(data), 'reviews.put', 1)
+        return success(reviewDto(data), 200, 'reviews.put', 1)
       }
 
       return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
-    } catch (error) {
-      console.error(JSON.stringify({ requestId: currentRequestId, operation: 'reviews', error }))
-      return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
-    }
+    })
   }),
 }

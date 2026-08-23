@@ -1,12 +1,12 @@
-import { createClient } from '@supabase/supabase-js'
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers':
-    'authorization, apikey, content-type, idempotency-key, x-request-id',
-}
-
-// ── Types ─────────────────────────────────────────────────────────────────────
+import { z } from 'zod'
+import {
+  apiError,
+  POSTGRES_UNIQUE_VIOLATION,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
+import { serviceClient } from '../_shared/google-calendar-contract.ts'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
@@ -33,54 +33,71 @@ function toDTO(row: Row) {
   }
 }
 
-// ── Main handler ──────────────────────────────────────────────────────────────
+export default {
+  fetch: withApi<any>(async (request, context, currentRequestId) => {
+    const userId = context.userClaims!.id
+    // Not context.supabase -- this table's RLS posture was never verified
+    // (this file never went through withApi before), so it keeps the same
+    // service-role client + explicit .eq('user_id', userId) filtering on
+    // every query it already had, rather than switching to an RLS-enforced
+    // client on unverified trust.
+    const supabase = serviceClient()
+    const success = successResponder({
+      request,
+      currentRequestId,
+      routeTemplate: '/workout-logs',
+      startedAt: performance.now(),
+    })
 
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders })
-  }
+    return await withCrudErrors('workout-logs', currentRequestId, async () => {
+      const path = new URL(request.url).pathname.split('/').filter(Boolean)
+      const workoutLogsIndex = path.lastIndexOf('workout-logs')
+      const itemId = path[workoutLogsIndex + 1]
+      const action = path[workoutLogsIndex + 2]
+      const hasItemPath = z.uuid().safeParse(itemId).success
 
-  const supabase = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
-    { auth: { autoRefreshToken: false, persistSession: false } },
-  )
+      if (request.method === 'PATCH' && hasItemPath && action === 'details') {
+        return await handleUpdateDetails(
+          supabase,
+          userId,
+          itemId,
+          request,
+          success,
+          currentRequestId,
+        )
+      }
 
-  const authHeader = req.headers.get('Authorization')
-  if (!authHeader) {
-    return errorResponse(401, 'UNAUTHORIZED', 'Authorization header required')
-  }
-  const { data: { user }, error: authError } = await supabase.auth.getUser(
-    authHeader.replace('Bearer ', ''),
-  )
-  if (authError || !user) {
-    return errorResponse(401, 'UNAUTHORIZED', 'Invalid token')
-  }
+      if (request.method === 'GET' && !hasItemPath) {
+        return await handleList(supabase, userId, new URL(request.url), success, currentRequestId)
+      }
 
-  const url = new URL(req.url)
+      if (request.method === 'POST' && !hasItemPath) {
+        return await handleCreate(supabase, userId, request, success, currentRequestId)
+      }
 
-  // Route: /workout-logs/{id}/details  (PATCH)
-  const detailsMatch = url.pathname.match(/\/workout-logs\/([0-9a-f-]{36})\/details$/i)
-  if (detailsMatch && req.method === 'PATCH') {
-    return handleUpdateDetails(supabase, user.id, detailsMatch[1], req)
-  }
-
-  // Route: /workout-logs  (GET | POST)
-  if (req.method === 'GET') return handleList(supabase, user.id, url)
-  if (req.method === 'POST') {
-    return handleCreate(supabase, user.id, req, req.headers.get('Idempotency-Key'))
-  }
-
-  return errorResponse(405, 'METHOD_NOT_ALLOWED', 'Method not allowed')
-})
+      return apiError('METHOD_NOT_ALLOWED', '지원하지 않는 요청입니다.', 405, currentRequestId)
+    })
+  }),
+}
 
 // ── GET /workout-logs?from=YYYY-MM-DD&to=YYYY-MM-DD ──────────────────────────
 
-async function handleList(supabase: any, userId: string, url: URL) {
+async function handleList(
+  supabase: Row,
+  userId: string,
+  url: URL,
+  success: ReturnType<typeof successResponder>,
+  currentRequestId: string,
+) {
   const from = url.searchParams.get('from')
   const to = url.searchParams.get('to')
   if (!from || !to) {
-    return errorResponse(400, 'BAD_REQUEST', 'from and to query params required')
+    return apiError(
+      'INVALID_REQUEST',
+      'from, to 쿼리 파라미터가 필요합니다.',
+      400,
+      currentRequestId,
+    )
   }
 
   const { data, error } = await supabase
@@ -90,21 +107,23 @@ async function handleList(supabase: any, userId: string, url: URL) {
     .gte('scheduled_date', from)
     .lte('scheduled_date', to)
     .order('started_at', { ascending: false })
+  if (error) throw error
 
-  if (error) return errorResponse(500, 'DB_ERROR', error.message)
-  return jsonResponse({ items: (data ?? []).map(toDTO) })
+  const items = (data ?? []).map(toDTO)
+  return success({ items }, 200, 'workout_logs.list', items.length)
 }
 
 // ── POST /workout-logs ────────────────────────────────────────────────────────
 
 async function handleCreate(
-  supabase: any,
+  supabase: Row,
   userId: string,
   req: Request,
-  _idempotencyKey: string | null,
+  success: ReturnType<typeof successResponder>,
+  currentRequestId: string,
 ) {
   const body = await req.json().catch(() => null)
-  if (!body) return errorResponse(400, 'BAD_REQUEST', 'JSON body required')
+  if (!body) return apiError('INVALID_REQUEST', 'JSON 본문이 필요합니다.', 400, currentRequestId)
 
   const {
     hkUuid,
@@ -125,10 +144,13 @@ async function handleCreate(
   } = body
 
   if (!activityType || !startedAt || !endedAt || !durationSec || !scheduledDate) {
-    return errorResponse(400, 'BAD_REQUEST', 'Missing required fields')
+    return apiError('INVALID_REQUEST', '필수 항목을 확인해 주세요.', 400, currentRequestId)
   }
 
-  // Idempotency: return existing if same hk_uuid already recorded for this user
+  // Idempotency via hk_uuid (HealthKit's own stable id, not the
+  // Idempotency-Key header every other POST endpoint uses) -- a workout can
+  // arrive from a HealthKit sync with the same hk_uuid more than once, and
+  // the response should be the existing row rather than a duplicate.
   if (hkUuid) {
     const { data: existing } = await supabase
       .from('workout_log_full')
@@ -136,7 +158,7 @@ async function handleCreate(
       .eq('user_id', userId)
       .eq('hk_uuid', hkUuid)
       .maybeSingle()
-    if (existing) return jsonResponse(toDTO(existing), 200)
+    if (existing) return success(toDTO(existing), 200, 'workout_logs.create', 1)
   }
 
   const { data: log, error: logError } = await supabase
@@ -160,20 +182,20 @@ async function handleCreate(
     .single()
 
   if (logError) {
-    // Handle unique constraint violation on hk_uuid (race condition)
-    if (logError.code === '23505' && hkUuid) {
+    // Race: two concurrent syncs with the same hk_uuid.
+    if (logError.code === POSTGRES_UNIQUE_VIOLATION && hkUuid) {
       const { data: existing } = await supabase
         .from('workout_log_full')
         .select('*')
         .eq('user_id', userId)
         .eq('hk_uuid', hkUuid)
         .maybeSingle()
-      if (existing) return jsonResponse(toDTO(existing), 200)
+      if (existing) return success(toDTO(existing), 200, 'workout_logs.create', 1)
     }
-    return errorResponse(500, 'DB_ERROR', logError.message)
+    throw logError
   }
 
-  // Details insert is non-fatal — the view uses COALESCE for missing rows.
+  // Details insert is non-fatal -- the view uses COALESCE for missing rows.
   const { error: detailError } = await supabase
     .from('workout_log_details')
     .insert({
@@ -182,26 +204,33 @@ async function handleCreate(
       notes: notes ?? '',
       exercises: exercises ?? null,
     })
-
-  if (detailError) console.error('workout_log_details insert failed:', detailError.message)
+  if (detailError) {
+    console.error(JSON.stringify({
+      requestId: currentRequestId,
+      operation: 'workout_logs.create.details',
+      error: detailError,
+    }))
+  }
 
   const { data: full, error: readError } = await supabase
     .from('workout_log_full')
     .select('*')
     .eq('id', log.id)
     .single()
+  if (readError) throw readError
 
-  if (readError) return errorResponse(500, 'DB_ERROR', readError.message)
-  return jsonResponse(toDTO(full), 201)
+  return success(toDTO(full), 201, 'workout_logs.create', 1)
 }
 
 // ── PATCH /workout-logs/{id}/details ─────────────────────────────────────────
 
 async function handleUpdateDetails(
-  supabase: any,
+  supabase: Row,
   userId: string,
   workoutId: string,
   req: Request,
+  success: ReturnType<typeof successResponder>,
+  currentRequestId: string,
 ) {
   const { data: parent, error: parentError } = await supabase
     .from('workout_logs')
@@ -209,12 +238,13 @@ async function handleUpdateDetails(
     .eq('id', workoutId)
     .eq('user_id', userId)
     .maybeSingle()
-
-  if (parentError) return errorResponse(500, 'DB_ERROR', parentError.message)
-  if (!parent) return errorResponse(404, 'NOT_FOUND', 'Workout not found')
+  if (parentError) throw parentError
+  if (!parent) {
+    return apiError('RESOURCE_NOT_FOUND', '운동 기록을 찾을 수 없습니다.', 404, currentRequestId)
+  }
 
   const body = await req.json().catch(() => null)
-  if (!body) return errorResponse(400, 'BAD_REQUEST', 'JSON body required')
+  if (!body) return apiError('INVALID_REQUEST', 'JSON 본문이 필요합니다.', 400, currentRequestId)
 
   const { locationName, notes, exercises } = body
 
@@ -227,31 +257,14 @@ async function handleUpdateDetails(
       exercises: exercises ?? null,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'workout_log_id' })
-
-  if (upsertError) return errorResponse(500, 'DB_ERROR', upsertError.message)
+  if (upsertError) throw upsertError
 
   const { data: full, error: readError } = await supabase
     .from('workout_log_full')
     .select('*')
     .eq('id', workoutId)
     .single()
+  if (readError) throw readError
 
-  if (readError) return errorResponse(500, 'DB_ERROR', readError.message)
-  return jsonResponse(toDTO(full))
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function jsonResponse(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  })
-}
-
-function errorResponse(status: number, code: string, message: string) {
-  return new Response(JSON.stringify({ error: { code, message } }), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  })
+  return success(toDTO(full), 200, 'workout_logs.update_details', 1)
 }

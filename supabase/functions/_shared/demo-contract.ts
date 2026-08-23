@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { stableUuid } from './deterministic-id.ts'
+import { addDays } from './rule-contract.ts'
 
 export const demoBootstrapSchema = z.object({
   localDate: z.iso.date(),
@@ -106,12 +108,6 @@ export async function buildDemoRows(input: DemoRowInput) {
   ])
 }
 
-function addDays(value: string, amount: number): string {
-  const date = new Date(`${value}T12:00:00Z`)
-  date.setUTCDate(date.getUTCDate() + amount)
-  return date.toISOString().slice(0, 10)
-}
-
 function localInstant(
   day: string,
   hour: number,
@@ -122,16 +118,4 @@ function localInstant(
   return new Date(
     Date.UTC(year, month - 1, date, hour, minute) - timezoneOffsetMinutes * 60_000,
   ).toISOString()
-}
-
-async function stableUuid(value: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)),
-  ).slice(0, 16)
-  digest[6] = (digest[6] & 0x0f) | 0x40
-  digest[8] = (digest[8] & 0x3f) | 0x80
-  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${
-    hex.slice(20)
-  }`
 }
