@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import { AGENT_TOOL_NAMES, parseAgentToolCall } from './agent-tool-contract.ts'
+import { type ConflictCandidate, findConflict as findIntervalConflict } from './conflict-service.ts'
+import { freeSlotsInWindow } from './free-slot-service.ts'
 import { preferencesDto } from './preferences-contract.ts'
 
 export { AGENT_TOOL_NAMES }
@@ -367,10 +369,26 @@ export function resolveProposedInterval(
   return { start, end }
 }
 
+function toConflictCandidates(rows: ExistingScheduleRow[]): ConflictCandidate[] {
+  return rows
+    .filter((row) => row.start_at && row.end_at)
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      start: new Date(row.start_at!),
+      end: new Date(row.end_at!),
+    }))
+}
+
 /** The server-side half of Reflection for propose_schedule: guaranteed to
  * run regardless of whether the model chose to call search_schedules first
  * (the system prompt asks it to, but nothing enforces that). Returns the
- * title of the first conflicting existing item, or null. */
+ * title of the first conflicting existing item, or null.
+ *
+ * Resolving `proposed` into a TimeRange (date/time token resolution) stays
+ * here rather than moving into conflict-service.ts -- that would need
+ * resolveDate/timeOn, which are defined in this file, creating a circular
+ * import. Only the pure interval-overlap check is delegated. */
 export function findConflict(
   existing: ExistingScheduleRow[],
   proposed: ProposedScheduleArgs,
@@ -378,13 +396,8 @@ export function findConflict(
 ): string | null {
   const interval = resolveProposedInterval(proposed, today)
   if (!interval) return null
-  for (const row of existing) {
-    if (!row.start_at || !row.end_at) continue
-    const rowStart = new Date(row.start_at)
-    const rowEnd = new Date(row.end_at)
-    if (interval.start < rowEnd && interval.end > rowStart) return row.title
-  }
-  return null
+  const conflict = findIntervalConflict(interval, toConflictCandidates(existing))
+  return conflict?.title ?? null
 }
 
 // ── DB-backed tool implementations + dispatch (moved out of index.ts so the
@@ -473,25 +486,14 @@ async function findFreeSlots(
     const dayBusy = busy
       .filter((row) => row.scheduled_date === date)
       .map((row) => ({ start: new Date(row.start_at!), end: new Date(row.end_at!) }))
-      .sort((a, b) => a.start.getTime() - b.start.getTime())
 
     const windowStart = timeOn(date, args.windowStart) ?? timeOn(date, '08:00')!
     const windowEnd = timeOn(date, args.windowEnd) ?? timeOn(date, '22:00')!
 
-    const slots: string[] = []
-    let cursor = windowStart
-    for (const range of dayBusy) {
-      if (range.start.getTime() > cursor.getTime()) {
-        if (range.start.getTime() - cursor.getTime() >= duration) {
-          slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
-        }
-      }
-      if (range.end.getTime() > cursor.getTime()) cursor = range.end
+    const candidates = freeSlotsInWindow(dayBusy, windowStart, windowEnd, duration)
+    if (candidates.length > 0) {
+      lines.push(`${date}: ${candidates.map((c) => formatSlot(c.start, c.end)).join(', ')}`)
     }
-    if (windowEnd.getTime() - cursor.getTime() >= duration) {
-      slots.push(formatSlot(cursor, new Date(cursor.getTime() + duration)))
-    }
-    if (slots.length > 0) lines.push(`${date}: ${slots.slice(0, 3).join(', ')}`)
   }
 
   return { slots: lines }

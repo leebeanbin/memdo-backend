@@ -320,6 +320,33 @@ Deno.test('dispatchToolCall propose_schedule surfaces a real conflict', async ()
   assert(state.conflictTitle === '팀 회의')
 })
 
+Deno.test('conflict/no-time (boundary fixture): rows with no start_at/end_at never reach ConflictService', async () => {
+  // Agent Domain Fixture Contract: v1 -- unlike free-slot-service.test.ts/
+  // conflict-service.test.ts's canonical fixtures, this isn't testing
+  // conflict-service.ts's pure findConflict directly (ConflictCandidate's
+  // start/end are non-optional, so a no-time row can't even be constructed
+  // as one) -- it's testing that toConflictCandidates() filters such rows
+  // out before they'd reach it.
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'task-1',
+    title: '할 일',
+    scheduled_date: '2026-08-16',
+    start_at: null,
+    end_at: null,
+    version: 1,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'propose_schedule',
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.conflictTitle === null)
+})
+
 Deno.test('dispatchToolCall propose_schedule fails closed when the conflict check itself errors', async () => {
   const state = newToolDispatchState()
   const result: any = await dispatchToolCall(
