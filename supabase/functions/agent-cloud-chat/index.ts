@@ -14,8 +14,8 @@ import {
   newToolDispatchState,
   OPENROUTER_CHAT_URL,
   parseStreamLine,
-  RATE_LIMIT_PER_HOUR,
   resolveDate,
+  resolveRateLimitPerHour,
   type StreamAccumulator,
   systemPrompt,
 } from '../_shared/agent-cloud-contract.ts'
@@ -118,7 +118,12 @@ export default {
       )
       return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
     }
-    if ((recentCount ?? 0) >= RATE_LIMIT_PER_HOUR) {
+    const effectiveLimit = resolveRateLimitPerHour(userId, {
+      evalAccountUserId: Deno.env.get('MEMDO_EVAL_ACCOUNT_USER_ID'),
+      evalRateLimitEnabled: Deno.env.get('MEMDO_EVAL_RATE_LIMIT_ENABLED'),
+      evalRateLimitPerHour: Deno.env.get('MEMDO_EVAL_RATE_LIMIT_PER_HOUR'),
+    })
+    if ((recentCount ?? 0) >= effectiveLimit) {
       return apiError(
         'RATE_LIMITED',
         '시간당 요청 한도를 넘었어요. 잠시 후 다시 시도해 주세요.',

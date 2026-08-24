@@ -10,7 +10,7 @@
 //
 // Usage:
 //   SUPABASE_URL=... SUPABASE_PUBLISHABLE_KEY=... SUPABASE_ACCESS_TOKEN=... \
-//     deno run --allow-net --allow-read --allow-env eval/run.ts [--fixtures <dir>] [--model <id>] [--json <path>]
+//     deno run --allow-net --allow-read --allow-env --allow-write eval/run.ts [--fixtures <dir>] [--model <id>] [--json <path>]
 //
 // or: npm run eval -- --model openai/gpt-5.4-mini
 
@@ -24,6 +24,20 @@ type CaseResult = {
   reason: string
   dispatchedTools: DispatchedTool[]
   assistantText: string
+}
+
+/** Distinguishes a 429 from every other failure mode -- runEval() treats
+ * this one specially (stop the whole run, don't grade the rest), while any
+ * other error still propagates and fails the run outright. */
+export class RateLimitedError extends Error {}
+
+export type EvalReport = {
+  model: string
+  fixtureCount: number
+  completedCount: number
+  rateLimited: boolean
+  results: CaseResult[]
+  summary: { pass: number; fail: number; manualReview: number }
 }
 
 function parseArgs(argv: string[]) {
@@ -87,6 +101,9 @@ async function runFixture(
     },
     body: JSON.stringify({ message: fixture.input, history: [], model: opts.model }),
   })
+  if (response.status === 429) {
+    throw new RateLimitedError(`agent-cloud-chat 429: ${await response.text().catch(() => '')}`)
+  }
   if (!response.ok || !response.body) {
     throw new Error(`agent-cloud-chat ${response.status}: ${await response.text().catch(() => '')}`)
   }
@@ -112,25 +129,34 @@ async function runFixture(
   return { dispatchedTools, assistantText }
 }
 
-async function main() {
-  const args = parseArgs(Deno.args)
-  const fixturesDir = args.fixtures ?? '../memdo/eval/agent-v0'
-  const model = args.model ?? DEFAULT_MODEL
-
-  const baseUrl = requiredEnv('SUPABASE_URL')
-  const publishableKey = requiredEnv('SUPABASE_PUBLISHABLE_KEY')
-  const accessToken = requiredEnv('SUPABASE_ACCESS_TOKEN')
-
-  const fixtures = await loadFixtures(fixturesDir)
-  console.log(
-    `Loaded ${fixtures.length} fixtures from ${fixturesDir}, running against ${model}...\n`,
-  )
-
+/** Runs every fixture in fixturesDir against one model and grades each one.
+ * A 429 partway through stops the run right there -- that fixture and every
+ * fixture after it are excluded entirely from grading and from the summary
+ * (never counted as pass/fail), and completedCount/rateLimited report
+ * exactly how far the run got. Any other error still propagates and fails
+ * the run outright. */
+export async function runEval(opts: {
+  fixturesDir: string
+  model: string
+  baseUrl: string
+  publishableKey: string
+  accessToken: string
+}): Promise<EvalReport> {
+  const fixtures = await loadFixtures(opts.fixturesDir)
   const results: CaseResult[] = []
+  let rateLimited = false
   for (const fixture of fixtures) {
-    const actual = await runFixture(fixture, { baseUrl, publishableKey, accessToken, model })
-    const graded = gradeCase(fixture, actual)
-    results.push({ fixture, verdict: graded.verdict, reason: graded.reason, ...actual })
+    try {
+      const actual = await runFixture(fixture, opts)
+      const graded = gradeCase(fixture, actual)
+      results.push({ fixture, verdict: graded.verdict, reason: graded.reason, ...actual })
+    } catch (error) {
+      if (error instanceof RateLimitedError) {
+        rateLimited = true
+        break
+      }
+      throw error
+    }
   }
 
   const summary = { pass: 0, fail: 0, manualReview: 0 }
@@ -140,8 +166,31 @@ async function main() {
     else summary.manualReview++
   }
 
+  return {
+    model: opts.model,
+    fixtureCount: fixtures.length,
+    completedCount: results.length,
+    rateLimited,
+    results,
+    summary,
+  }
+}
+
+async function main() {
+  const args = parseArgs(Deno.args)
+  const fixturesDir = args.fixtures ?? '../memdo/eval/agent-v0'
+  const model = args.model ?? DEFAULT_MODEL
+
+  const baseUrl = requiredEnv('SUPABASE_URL')
+  const publishableKey = requiredEnv('SUPABASE_PUBLISHABLE_KEY')
+  const accessToken = requiredEnv('SUPABASE_ACCESS_TOKEN')
+
+  console.log(`Running the agent-v0 corpus from ${fixturesDir} against ${model}...\n`)
+
+  const report = await runEval({ fixturesDir, model, baseUrl, publishableKey, accessToken })
+
   console.log('── Results ──\n')
-  for (const r of results) {
+  for (const r of report.results) {
     console.log(`[${r.verdict.toUpperCase()}] ${r.fixture.id} (${r.fixture.category}): ${r.reason}`)
     if (r.verdict === 'manual-review') {
       console.log(`  assistantText: ${JSON.stringify(r.assistantText)}`)
@@ -149,8 +198,13 @@ async function main() {
   }
 
   console.log('\n── Summary ──')
+  if (report.rateLimited) {
+    console.log(
+      `Rate-limited after ${report.completedCount}/${report.fixtureCount} fixtures -- run stopped early.`,
+    )
+  }
   console.log(
-    `pass: ${summary.pass}  fail: ${summary.fail}  manual-review: ${summary.manualReview}  (of ${fixtures.length})`,
+    `pass: ${report.summary.pass}  fail: ${report.summary.fail}  manual-review: ${report.summary.manualReview}  (${report.completedCount}/${report.fixtureCount} completed)`,
   )
 
   if (args.json) {
@@ -159,10 +213,12 @@ async function main() {
         model,
         executedAt: new Date().toISOString(),
         corpus: 'agent-v0',
-        fixtureCount: fixtures.length,
+        fixtureCount: report.fixtureCount,
+        completedCount: report.completedCount,
+        rateLimited: report.rateLimited,
       },
-      summary,
-      cases: results,
+      summary: report.summary,
+      cases: report.results,
     }
     await Deno.writeTextFile(args.json, JSON.stringify(output, null, 2))
     console.log(`\nWrote full results to ${args.json}`)
