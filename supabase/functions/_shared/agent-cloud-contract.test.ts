@@ -190,11 +190,28 @@ Deno.test('parseStreamLine extracts usage from the final chunk without a delta',
   assert(chunk?.usage?.costUsd === 0.00095)
 })
 
+Deno.test('parseStreamLine extracts id alongside a content delta', () => {
+  const chunk = parseStreamLine(
+    'data: {"id":"chatcmpl-abc123","choices":[{"delta":{"content":"안녕"},"finish_reason":null}]}',
+  )
+  assert(chunk?.content === '안녕')
+  assert(chunk?.id === 'chatcmpl-abc123')
+})
+
 Deno.test('applyStreamChunk concatenates content across chunks', () => {
   const acc = newStreamAccumulator()
   applyStreamChunk(acc, { content: '안' })
   applyStreamChunk(acc, { content: '녕' })
   assert(acc.content === '안녕')
+})
+
+Deno.test('applyStreamChunk sets providerCompletionId and a later chunk without id does not clear it', () => {
+  const acc = newStreamAccumulator()
+  assert(acc.providerCompletionId === null)
+  applyStreamChunk(acc, { id: 'chatcmpl-abc123', content: '안' })
+  assert(acc.providerCompletionId === 'chatcmpl-abc123')
+  applyStreamChunk(acc, { content: '녕' })
+  assert(acc.providerCompletionId === 'chatcmpl-abc123')
 })
 
 Deno.test('addAgentUsage totals every tool-loop request', () => {

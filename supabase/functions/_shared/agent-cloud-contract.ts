@@ -955,6 +955,10 @@ export type StreamChunk = {
   toolCalls?: StreamToolCallDelta[]
   finishReason?: string | null
   usage?: AgentUsage
+  // OpenRouter's chatcmpl-... completion id, present on every chunk of one
+  // completion (an id read from stream data, not an HTTP request-
+  // correlation id).
+  id?: string
 }
 
 export type AgentUsage = {
@@ -1004,7 +1008,10 @@ export function parseStreamLine(rawLine: string): StreamChunk | null {
       costUsd: Math.max(0, usage.cost),
     }
   }
-  return chunk.content || chunk.toolCalls || chunk.finishReason || chunk.usage ? chunk : null
+  if (typeof parsed.id === 'string' && parsed.id.length > 0) chunk.id = parsed.id
+  return chunk.content || chunk.toolCalls || chunk.finishReason || chunk.usage || chunk.id
+    ? chunk
+    : null
 }
 
 export type AccumulatedToolCall = { id: string; name: string; arguments: string }
@@ -1013,6 +1020,10 @@ export type StreamAccumulator = {
   content: string
   toolCalls: Map<number, AccumulatedToolCall>
   usage: AgentUsage
+  // Last successfully observed OpenRouter completion id -- an id read from
+  // stream data, not an HTTP request-correlation id (see
+  // agent_audit_log.provider_completion_id's column comment).
+  providerCompletionId: string | null
 }
 
 export function newStreamAccumulator(): StreamAccumulator {
@@ -1020,6 +1031,7 @@ export function newStreamAccumulator(): StreamAccumulator {
     content: '',
     toolCalls: new Map(),
     usage: { promptTokens: 0, completionTokens: 0, costUsd: 0 },
+    providerCompletionId: null,
   }
 }
 
@@ -1033,6 +1045,7 @@ export function applyStreamChunk(acc: StreamAccumulator, chunk: StreamChunk): vo
     acc.toolCalls.set(delta.index, existing)
   }
   if (chunk.usage) acc.usage = chunk.usage
+  if (chunk.id) acc.providerCompletionId = chunk.id
 }
 
 export function addAgentUsage(total: AgentUsage, usage: AgentUsage): void {
