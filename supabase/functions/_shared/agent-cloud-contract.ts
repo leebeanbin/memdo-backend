@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { AGENT_TOOL_NAMES, parseAgentToolCall } from './agent-tool-contract.ts'
 import { type ConflictCandidate, findConflict as findIntervalConflict } from './conflict-service.ts'
 import { freeSlotsInWindow } from './free-slot-service.ts'
+import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
 
 export { AGENT_TOOL_NAMES }
@@ -14,21 +15,31 @@ export const DEFAULT_OPENROUTER_MODEL = 'openai/gpt-5.4-mini'
 export const MAX_TOOL_ITERATIONS = 5
 
 // Curated rather than free-text: OpenRouter proxies hundreds of models, most
-// unsuited to fast structured tool-calling for a chat assistant. This is the
-// single source of truth for what's allowed -- agent-models-contract.ts's
-// catalog listing (model picker + live pricing) filters against this exact
-// array too, so there's no separate iOS-side list to keep in sync; adding an
-// id here makes it selectable and priced automatically.
-export const ALLOWED_OPENROUTER_MODELS = [
-  'openai/gpt-5.4-mini',
-  'openai/gpt-5.6-sol',
-  'anthropic/claude-sonnet-5',
-  'google/gemini-3.5-flash',
-  // Cheapest tool-capable model on OpenRouter as of 2026-08-20 (prompt
-  // $0.03/M, completion $0.13/M, 1M context) -- roughly 10-30x cheaper than
-  // the rest of this list, for BYOK users who want a low-cost default.
-  'qwen/qwen3.7-flash',
-] as const
+// unsuited to fast structured tool-calling for a chat assistant. Derived
+// from MODEL_REGISTRY (model-registry-contract.ts) rather than a
+// separately-maintained array -- toggling a model's `enabled`/`supportsTools`
+// there is what adds/removes it here. agent-models-contract.ts's catalog
+// listing (model picker + live pricing) determines registry-side
+// eligibility via the same selectableModelIds() call, so there's no second
+// copy of this predicate to keep in sync.
+const selectableIds = selectableModelIds(MODEL_REGISTRY)
+if (selectableIds.length === 0) throw new Error('MODEL_REGISTRY has no selectable models')
+
+// z.enum needs a non-empty literal tuple type; selectableIds is a plain
+// string[] computed at module load, so this cast is required. The
+// trade-off: chatRequestSchema's inferred `model` type widens to `string`
+// instead of a literal union of ids -- acceptable since nothing downstream
+// narrows on that literal type today.
+export const ALLOWED_OPENROUTER_MODELS = selectableIds as [string, ...string[]]
+
+// Cheap guard against shipping a default that's been disabled in the
+// registry -- catches a fat-fingered edit at module load instead of
+// silently 400ing every request that omits `model`.
+if (!ALLOWED_OPENROUTER_MODELS.includes(DEFAULT_OPENROUTER_MODEL)) {
+  throw new Error(
+    `DEFAULT_OPENROUTER_MODEL (${DEFAULT_OPENROUTER_MODEL}) is not a selectable model`,
+  )
+}
 
 // A rolling-hour cap per user -- BYOK means a runaway loop or bug burns the
 // *user's own* balance, not this backend's, but that's still worth guarding

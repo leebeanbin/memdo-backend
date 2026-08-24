@@ -85,7 +85,7 @@ async function fetchUsageSince(
   }
 }
 
-type ModelComparison = {
+export type ModelComparison = {
   model: string
   pass: number
   fail: number

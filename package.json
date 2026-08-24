@@ -11,7 +11,8 @@
     "test": "deno test --node-modules-dir=manual supabase/functions/_shared eval",
     "eval": "deno run --allow-net --allow-read --allow-env --allow-write eval/run.ts",
     "eval:seed": "deno run --allow-net --allow-env eval/seed.ts",
-    "eval:compare": "deno run --allow-net --allow-read --allow-env --allow-write eval/compare.ts"
+    "eval:compare": "deno run --allow-net --allow-read --allow-env --allow-write eval/compare.ts",
+    "eval:promote-registry": "deno run --allow-read eval/promote-registry.ts"
   },
   "devDependencies": {
     "deno": "^2.9.4",
