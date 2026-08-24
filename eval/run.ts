@@ -3,6 +3,11 @@
 // (SUPABASE_ACCESS_TOKEN) with an OpenRouter key already connected via the
 // app's agent-key flow -- every call spends real OpenRouter credits.
 //
+// Run `npm run eval:seed` (eval/seed.ts) first -- PROPOSE_SCHEDULE_UPDATE
+// fixtures (search-005/006) need the prerequisite rows it seeds to exist.
+// That only guarantees those specific rows, not that the whole account is
+// otherwise clean (see eval-seed-contract.ts's doc comment on the backend).
+//
 // Usage:
 //   SUPABASE_URL=... SUPABASE_PUBLISHABLE_KEY=... SUPABASE_ACCESS_TOKEN=... \
 //     deno run --allow-net --allow-read --allow-env eval/run.ts [--fixtures <dir>] [--model <id>] [--json <path>]
@@ -11,26 +16,11 @@
 
 import { type DispatchedTool, type EvalFixture, gradeCase, type GradeVerdict } from './grade.ts'
 
-export type EvalVerdict = GradeVerdict | 'skipped'
-
-// This Epic doesn't build a deterministic seed/eval account (see
-// memdo/eval/agent-v0/README.md's Epic F prerequisite note) -- every
-// PROPOSE_SCHEDULE_UPDATE fixture needs a real pre-existing schedule in
-// whatever account SUPABASE_ACCESS_TOKEN belongs to, which nothing here can
-// guarantee. gradeCase() has no way to tell "no prerequisite data" apart
-// from "model failed after finding data" from dispatchedTools alone (it's a
-// tool-selection trace, not proof anything was found) -- so this decision
-// belongs here, upstream of grading, not inside gradeCase(). Once Epic F
-// guarantees deterministic fixture state before each run (not just "an
-// account exists" but "it's seeded/reset immediately before this runner
-// runs"), this filter can be removed without changing gradeCase() at all.
-const STATE_DEPENDENT_BEHAVIORS = new Set(['PROPOSE_SCHEDULE_UPDATE'])
-
 const DEFAULT_MODEL = 'openai/gpt-5.4-mini'
 
 type CaseResult = {
   fixture: EvalFixture
-  verdict: EvalVerdict
+  verdict: GradeVerdict
   reason: string
   dispatchedTools: DispatchedTool[]
   assistantText: string
@@ -139,41 +129,28 @@ async function main() {
   const results: CaseResult[] = []
   for (const fixture of fixtures) {
     const actual = await runFixture(fixture, { baseUrl, publishableKey, accessToken, model })
-
-    if (STATE_DEPENDENT_BEHAVIORS.has(fixture.expectedBehavior)) {
-      results.push({
-        fixture,
-        verdict: 'skipped',
-        reason:
-          'state-dependent fixture -- no deterministic seed/eval account in this Epic (see README)',
-        ...actual,
-      })
-      continue
-    }
-
     const graded = gradeCase(fixture, actual)
     results.push({ fixture, verdict: graded.verdict, reason: graded.reason, ...actual })
   }
 
-  const summary = { pass: 0, fail: 0, skipped: 0, manualReview: 0 }
+  const summary = { pass: 0, fail: 0, manualReview: 0 }
   for (const r of results) {
     if (r.verdict === 'pass') summary.pass++
     else if (r.verdict === 'fail') summary.fail++
-    else if (r.verdict === 'skipped') summary.skipped++
     else summary.manualReview++
   }
 
   console.log('── Results ──\n')
   for (const r of results) {
     console.log(`[${r.verdict.toUpperCase()}] ${r.fixture.id} (${r.fixture.category}): ${r.reason}`)
-    if (r.verdict === 'manual-review' || r.verdict === 'skipped') {
+    if (r.verdict === 'manual-review') {
       console.log(`  assistantText: ${JSON.stringify(r.assistantText)}`)
     }
   }
 
   console.log('\n── Summary ──')
   console.log(
-    `pass: ${summary.pass}  fail: ${summary.fail}  skipped: ${summary.skipped}  manual-review: ${summary.manualReview}  (of ${fixtures.length})`,
+    `pass: ${summary.pass}  fail: ${summary.fail}  manual-review: ${summary.manualReview}  (of ${fixtures.length})`,
   )
 
   if (args.json) {
