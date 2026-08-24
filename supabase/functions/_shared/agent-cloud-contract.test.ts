@@ -879,3 +879,85 @@ Deno.test('buildDonePayload.proposedScheduleUpdate matches CloudProposedSchedule
     }
   }
 })
+
+// ── dispatchedTools (Epic E eval runner) ──
+
+Deno.test('dispatchToolCall records a validated call in dispatchedTools before the handler runs', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeSchedule,
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(state.dispatchedTools.length === 1)
+  assert(state.dispatchedTools[0].name === AGENT_TOOL_NAMES.proposeSchedule)
+  assert((state.dispatchedTools[0].args as { title: string }).title === '점심')
+})
+
+Deno.test('dispatchToolCall does not record an invalid/unsupported call', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(fakeSupabase([]), 'not_a_real_tool', {}, state, dispatchToday)
+  await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: 'today', durationMinutes: 999999 },
+    state,
+    dispatchToday,
+  )
+  assert(state.dispatchedTools.length === 0)
+})
+
+Deno.test('dispatchToolCall accumulates multiple calls across iterations in order', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.searchSchedules,
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeSchedule,
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(state.dispatchedTools.length === 2)
+  assert(state.dispatchedTools[0].name === AGENT_TOOL_NAMES.searchSchedules)
+  assert(state.dispatchedTools[1].name === AGENT_TOOL_NAMES.proposeSchedule)
+})
+
+Deno.test('dispatchToolCall still records the call when the handler itself returns an error', async () => {
+  // propose_schedule_update targeting an id that doesn't exist -- the
+  // handler returns { error: ... } but the call was still validated and
+  // dispatched, so it belongs in dispatchedTools (tool-selection trace, not
+  // handler-success trace -- see ToolDispatchState.dispatchedTools).
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeScheduleUpdate,
+    { id: 'does-not-exist', action: 'complete' },
+    state,
+    dispatchToday,
+  )
+  assert(typeof result.error === 'string')
+  assert(state.dispatchedTools.length === 1)
+  assert(state.dispatchedTools[0].name === AGENT_TOOL_NAMES.proposeScheduleUpdate)
+})
+
+Deno.test('buildDonePayload includes dispatchedTools', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.searchSchedules,
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state)
+  assert(payload.dispatchedTools.length === 1)
+  assert(payload.dispatchedTools[0].name === AGENT_TOOL_NAMES.searchSchedules)
+})

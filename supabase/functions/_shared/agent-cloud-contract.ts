@@ -635,6 +635,25 @@ export type ToolDispatchState = {
   // correct once a card exists.
   proposedRoutineUpdate: ProposedRoutineUpdateArgs | null
   proposedReviewAction: ProposedReviewActionArgs | null
+  /** A tool-*selection* trace, not a handler/business-success trace: one
+   * entry per tool call that passed parseAgentToolCall's validation and was
+   * handed to its handler, pushed BEFORE the handler runs -- so this
+   * records "the model asked for this tool with these args and we accepted
+   * the call," not "the handler succeeded." A handler that later returns
+   * `{ error: ... }` (e.g. propose_schedule_update targeting a deleted
+   * item) still shows up here. Malformed/unsupported/schema-invalid calls
+   * are NOT recorded (they never reach dispatch -- parseAgentToolCall
+   * rejects them first). Added for Epic E's eval runner (agent-v0 corpus,
+   * see memdo/eval/agent-v0/), which otherwise has no way to tell
+   * "search_schedules was called then the model answered in text" apart
+   * from "the model just answered in text," since neither produces a
+   * proposedSchedule/proposedScheduleUpdate. Not a general audit trail
+   * (docs §13's agentRunId/latencyMs/etc. table) -- just this one signal,
+   * which happens to be the same underlying data. Named `dispatchedTools`
+   * rather than `toolCalls` to avoid colliding with the unrelated
+   * `toolCalls` concept in agent-cloud-chat/index.ts's own stream-delta
+   * accumulator (AccumulatedToolCall). */
+  dispatchedTools: { name: string; args: unknown }[]
 }
 
 export function newToolDispatchState(): ToolDispatchState {
@@ -645,6 +664,7 @@ export function newToolDispatchState(): ToolDispatchState {
     proposedScheduleUpdate: null,
     proposedRoutineUpdate: null,
     proposedReviewAction: null,
+    dispatchedTools: [],
   }
 }
 
@@ -669,9 +689,11 @@ export function buildDonePayload(state: ToolDispatchState): {
   proposedScheduleUpdate: ToolDispatchState['proposedScheduleUpdate']
   proposedRoutineUpdate: ToolDispatchState['proposedRoutineUpdate']
   proposedReviewAction: ToolDispatchState['proposedReviewAction']
+  dispatchedTools: ToolDispatchState['dispatchedTools']
 } {
   return {
     done: true,
+    dispatchedTools: state.dispatchedTools,
     proposedSchedule: state.proposedSchedule
       ? {
         ...state.proposedSchedule,
@@ -862,6 +884,11 @@ export async function dispatchToolCall(
     )
     return { error: 'INVALID_AGENT_ARGUMENT', issues: parsed.issues }
   }
+
+  // Pushed before the handler runs -- see ToolDispatchState.dispatchedTools'
+  // doc comment for why this is a tool-selection trace, not a
+  // handler-success trace.
+  state.dispatchedTools.push({ name: toolName, args: parsed.args })
 
   const handler = toolHandlers[toolName]
   return await handler(supabase, parsed.args, state, today)
