@@ -9,7 +9,8 @@
     "functions:deploy": "supabase functions deploy --use-api",
     "check": "deno check --node-modules-dir=manual supabase/functions/*/index.ts && deno fmt --check",
     "test": "deno test --node-modules-dir=manual supabase/functions/_shared eval",
-    "eval": "deno run --allow-net --allow-read --allow-env eval/run.ts"
+    "eval": "deno run --allow-net --allow-read --allow-env eval/run.ts",
+    "eval:seed": "deno run --allow-net --allow-env eval/seed.ts"
   },
   "devDependencies": {
     "deno": "^2.9.4",
