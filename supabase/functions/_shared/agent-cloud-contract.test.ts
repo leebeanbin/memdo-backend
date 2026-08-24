@@ -14,6 +14,7 @@ import {
   parseStreamLine,
   resolveDate,
   resolveProposedInterval,
+  resolveRateLimitPerHour,
   timeOn,
 } from './agent-cloud-contract.ts'
 
@@ -960,4 +961,71 @@ Deno.test('buildDonePayload includes dispatchedTools', async () => {
   const payload = buildDonePayload(state)
   assert(payload.dispatchedTools.length === 1)
   assert(payload.dispatchedTools[0].name === AGENT_TOOL_NAMES.searchSchedules)
+})
+
+Deno.test('resolveRateLimitPerHour: normal user always gets 30 regardless of env', () => {
+  assert(resolveRateLimitPerHour('user-1', {}) === 30)
+  assert(
+    resolveRateLimitPerHour('user-1', {
+      evalAccountUserId: 'eval-user',
+      evalRateLimitEnabled: 'true',
+      evalRateLimitPerHour: '250',
+    }) === 30,
+  )
+})
+
+Deno.test('resolveRateLimitPerHour: eval account gets 30 when the flag is off', () => {
+  assert(
+    resolveRateLimitPerHour('eval-user', {
+      evalAccountUserId: 'eval-user',
+      evalRateLimitEnabled: 'false',
+      evalRateLimitPerHour: '250',
+    }) === 30,
+  )
+  assert(
+    resolveRateLimitPerHour('eval-user', {
+      evalAccountUserId: 'eval-user',
+      evalRateLimitPerHour: '250',
+    }) === 30,
+  )
+})
+
+Deno.test('resolveRateLimitPerHour: eval account with flag on falls back to 30 on missing/non-numeric configured value', () => {
+  assert(
+    resolveRateLimitPerHour('eval-user', {
+      evalAccountUserId: 'eval-user',
+      evalRateLimitEnabled: 'true',
+    }) === 30,
+  )
+  assert(
+    resolveRateLimitPerHour('eval-user', {
+      evalAccountUserId: 'eval-user',
+      evalRateLimitEnabled: 'true',
+      evalRateLimitPerHour: 'not-a-number',
+    }) === 30,
+  )
+})
+
+Deno.test('resolveRateLimitPerHour: raises only above RATE_LIMIT_PER_HOUR -- boundary regression 1/29/30/31/250', () => {
+  const withLimit = (evalRateLimitPerHour: string) =>
+    resolveRateLimitPerHour('eval-user', {
+      evalAccountUserId: 'eval-user',
+      evalRateLimitEnabled: 'true',
+      evalRateLimitPerHour,
+    })
+  assert(withLimit('1') === 30)
+  assert(withLimit('29') === 30)
+  assert(withLimit('30') === 30)
+  assert(withLimit('31') === 31)
+  assert(withLimit('250') === 250)
+})
+
+Deno.test('resolveRateLimitPerHour: a non-eval user is unaffected even with the flag on', () => {
+  assert(
+    resolveRateLimitPerHour('some-other-user', {
+      evalAccountUserId: 'eval-user',
+      evalRateLimitEnabled: 'true',
+      evalRateLimitPerHour: '250',
+    }) === 30,
+  )
 })

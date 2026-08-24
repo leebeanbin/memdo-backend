@@ -35,6 +35,36 @@ export const ALLOWED_OPENROUTER_MODELS = [
 // against by default rather than assuming good behavior.
 export const RATE_LIMIT_PER_HOUR = 30
 
+/** Resolves the effective per-hour request limit for a caller. Every
+ * account gets RATE_LIMIT_PER_HOUR except the dedicated eval account
+ * (MEMDO_EVAL_ACCOUNT_USER_ID), which can get a higher configured limit --
+ * this RAISES the limit for one known, allowlisted account (Epic F-2's
+ * multi-model comparisons need more than 30 requests/hour to be
+ * practical), it never bypasses it: the eval account still hits its own
+ * (higher) ceiling and 429s past it, exactly like every other account does
+ * past 30. Requires ALL of: evalRateLimitEnabled === 'true', a valid
+ * positive integer evalRateLimitPerHour, AND that value being strictly
+ * greater than RATE_LIMIT_PER_HOUR -- this contract is "raise only," never
+ * "set to an arbitrary value." A configured 30 or lower is not a smaller
+ * raise, it's someone fat-fingering the base protection down, so it falls
+ * back to RATE_LIMIT_PER_HOUR exactly like a missing/invalid value would.
+ * Normal-user behavior is completely unaffected by any of these env vars,
+ * regardless of their values. */
+export function resolveRateLimitPerHour(
+  userId: string,
+  env: {
+    evalAccountUserId?: string
+    evalRateLimitEnabled?: string
+    evalRateLimitPerHour?: string
+  },
+): number {
+  if (env.evalRateLimitEnabled !== 'true') return RATE_LIMIT_PER_HOUR
+  if (!env.evalAccountUserId || userId !== env.evalAccountUserId) return RATE_LIMIT_PER_HOUR
+  const parsed = env.evalRateLimitPerHour ? Number(env.evalRateLimitPerHour) : NaN
+  if (!Number.isInteger(parsed) || parsed <= RATE_LIMIT_PER_HOUR) return RATE_LIMIT_PER_HOUR
+  return parsed
+}
+
 export const chatRequestSchema = z.object({
   message: z.string().trim().min(1).max(2000),
   // Client-managed history (this endpoint is stateless, matching every other
