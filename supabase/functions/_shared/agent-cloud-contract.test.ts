@@ -2,9 +2,11 @@ import {
   accumulatedToolCallsArray,
   addAgentUsage,
   AGENT_TOOL_NAMES,
+  ALLOWED_OPENROUTER_MODELS,
   applyStreamChunk,
   buildDonePayload,
   cloudAgentTools,
+  DEFAULT_OPENROUTER_MODEL,
   dispatchToolCall,
   type ExistingScheduleRow,
   expandScope,
@@ -17,6 +19,7 @@ import {
   resolveRateLimitPerHour,
   timeOn,
 } from './agent-cloud-contract.ts'
+import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
@@ -1028,4 +1031,14 @@ Deno.test('resolveRateLimitPerHour: a non-eval user is unaffected even with the 
       evalRateLimitPerHour: '250',
     }) === 30,
   )
+})
+
+Deno.test('ALLOWED_OPENROUTER_MODELS is exactly selectableModelIds(MODEL_REGISTRY)', () => {
+  const expected = selectableModelIds(MODEL_REGISTRY)
+  assert(ALLOWED_OPENROUTER_MODELS.length === expected.length)
+  for (const id of expected) assert(ALLOWED_OPENROUTER_MODELS.includes(id))
+})
+
+Deno.test('DEFAULT_OPENROUTER_MODEL is a selectable registry id', () => {
+  assert(ALLOWED_OPENROUTER_MODELS.includes(DEFAULT_OPENROUTER_MODEL))
 })
