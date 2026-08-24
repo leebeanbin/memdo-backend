@@ -754,6 +754,21 @@ Deno.test('dispatchToolCall propose_review_actions stages a reflection without s
   assert(state.proposedReviewAction?.reflection === '집중이 잘 됐다')
 })
 
+Deno.test('dispatchToolCall request_clarification stages a question without touching the DB', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({}),
+    AGENT_TOOL_NAMES.requestClarification,
+    { question: '몇 시에 만나고 싶으세요?', missingFields: ['startTime'] },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.clarificationRequest?.question === '몇 시에 만나고 싶으세요?')
+  assert(state.clarificationRequest?.missingFields?.[0] === 'startTime')
+  assert(state.clarificationRequest?.reason === undefined)
+})
+
 Deno.test('resolveDate resolves yesterday relative to today', () => {
   assert(resolveDate('yesterday', dispatchToday) === '2026-08-15')
 })
@@ -802,6 +817,8 @@ const IOS_STREAM_LINE_KEYS = [
   'proposedScheduleUpdate',
   'proposedRoutineUpdate',
   'proposedReviewAction',
+  'clarificationRequest',
+  'toolNames',
   'error',
 ]
 const IOS_PROPOSED_SCHEDULE_KEYS = [
@@ -841,6 +858,11 @@ const IOS_PROPOSED_REVIEW_ACTION_KEYS = [
   'date',
   'reflection',
 ]
+const IOS_CLARIFICATION_REQUEST_KEYS = [
+  'question',
+  'missingFields',
+  'reason',
+]
 
 Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares', () => {
   const state = newToolDispatchState()
@@ -855,6 +877,8 @@ Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineD
       'proposedScheduleUpdate',
       'proposedRoutineUpdate',
       'proposedReviewAction',
+      'clarificationRequest',
+      'toolNames',
     ]
   ) {
     assert(key in payload)
@@ -976,6 +1000,29 @@ Deno.test('buildDonePayload.proposedReviewAction matches CloudProposedReviewActi
   }
 })
 
+Deno.test('buildDonePayload.clarificationRequest matches CloudClarificationRequestDTO field for field', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.requestClarification,
+    { question: '몇 시에 만나고 싶으세요?', missingFields: ['startTime'], reason: '시간 없음' },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state)
+  assert(payload.clarificationRequest !== null)
+  const actualKeys = Object.keys(payload.clarificationRequest!).sort()
+  const expectedKeys = [...IOS_CLARIFICATION_REQUEST_KEYS].sort()
+  for (const key of expectedKeys) {
+    if (!actualKeys.includes(key)) throw new Error(`missing key: ${key}`)
+  }
+  for (const key of actualKeys) {
+    if (!IOS_CLARIFICATION_REQUEST_KEYS.includes(key)) {
+      throw new Error(`unexpected key iOS doesn't declare: ${key}`)
+    }
+  }
+})
+
 // ── dispatchedTools (Epic E eval runner) ──
 
 Deno.test('dispatchToolCall records a validated call in dispatchedTools before the handler runs', async () => {
@@ -1056,6 +1103,28 @@ Deno.test('buildDonePayload includes dispatchedTools', async () => {
   const payload = buildDonePayload(state)
   assert(payload.dispatchedTools.length === 1)
   assert(payload.dispatchedTools[0].name === AGENT_TOOL_NAMES.searchSchedules)
+})
+
+Deno.test('buildDonePayload.toolNames is a name-only projection of dispatchedTools, in order', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.searchSchedules,
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.findFreeSlots,
+    { scope: 'today', durationMinutes: 30 },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state)
+  assert(payload.toolNames.length === 2)
+  assert(payload.toolNames[0] === AGENT_TOOL_NAMES.searchSchedules)
+  assert(payload.toolNames[1] === AGENT_TOOL_NAMES.findFreeSlots)
 })
 
 Deno.test('resolveRateLimitPerHour: normal user always gets 30 regardless of env', () => {

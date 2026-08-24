@@ -14,6 +14,7 @@ export const AGENT_TOOL_NAMES = {
   getReviewHistory: 'get_review_history',
   proposeRoutineUpdate: 'propose_routine_update',
   proposeReviewActions: 'propose_review_actions',
+  requestClarification: 'request_clarification',
 } as const
 
 // ── Argument validation boundary ────────────────────────────────────────
@@ -138,6 +139,11 @@ export const proposeReviewActionsArgsSchema = z.object({
   date: dateExpressionWithYesterdaySchema,
   reflection: z.string().trim().min(1).max(4000),
 })
+export const requestClarificationArgsSchema = z.object({
+  question: z.string().trim().min(1).max(500),
+  missingFields: z.array(z.string().trim().min(1).max(50)).max(5).optional(),
+  reason: z.string().trim().min(1).max(200).optional(),
+})
 
 const agentArgsSchemaByTool: Record<string, z.ZodType> = {
   [AGENT_TOOL_NAMES.searchSchedules]: searchSchedulesArgsSchema,
@@ -149,6 +155,7 @@ const agentArgsSchemaByTool: Record<string, z.ZodType> = {
   [AGENT_TOOL_NAMES.getReviewHistory]: getReviewHistoryArgsSchema,
   [AGENT_TOOL_NAMES.proposeRoutineUpdate]: proposeRoutineUpdateArgsSchema,
   [AGENT_TOOL_NAMES.proposeReviewActions]: proposeReviewActionsArgsSchema,
+  [AGENT_TOOL_NAMES.requestClarification]: requestClarificationArgsSchema,
 }
 
 export type AgentArgumentIssue = { field: string; reason: string }
