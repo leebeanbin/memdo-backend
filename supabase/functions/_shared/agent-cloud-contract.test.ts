@@ -800,6 +800,8 @@ const IOS_STREAM_LINE_KEYS = [
   'done',
   'proposedSchedule',
   'proposedScheduleUpdate',
+  'proposedRoutineUpdate',
+  'proposedReviewAction',
   'error',
 ]
 const IOS_PROPOSED_SCHEDULE_KEYS = [
@@ -823,21 +825,41 @@ const IOS_PROPOSED_SCHEDULE_UPDATE_KEYS = [
   'conflictTitle',
   'conflictCheckFailed',
 ]
+// Epic I closed the gap this drift-guard exists to catch -- iOS now decodes
+// both of these (CloudProposedRoutineUpdateDTO/CloudProposedReviewActionDTO
+// in ScheduleAPI.swift), so they're checked the same way as the two above,
+// not just asserted present-but-unconsumed.
+const IOS_PROPOSED_ROUTINE_UPDATE_KEYS = [
+  'dailyReviewEnabled',
+  'dailyReviewTime',
+  'newsBriefingEnabled',
+  'newsBriefingTime',
+  'planningPromptTime',
+  'notificationsEnabled',
+]
+const IOS_PROPOSED_REVIEW_ACTION_KEYS = [
+  'date',
+  'reflection',
+]
 
 Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares', () => {
   const state = newToolDispatchState()
   const payload = buildDonePayload(state)
   // Superset is fine (Swift Decodable ignores unknown keys by default) --
-  // proposedRoutineUpdate/proposedReviewAction are exactly that, added
-  // ahead of iOS having anything to decode them into (see
-  // ToolDispatchState's doc comment). A key iOS DOES try to decode that's
-  // missing here would break the client, so that direction must hold.
-  for (const key of ['done', 'proposedSchedule', 'proposedScheduleUpdate']) {
+  // a key iOS DOES try to decode that's missing here would break the
+  // client, so that direction must hold.
+  for (
+    const key of [
+      'done',
+      'proposedSchedule',
+      'proposedScheduleUpdate',
+      'proposedRoutineUpdate',
+      'proposedReviewAction',
+    ]
+  ) {
     assert(key in payload)
+    assert(IOS_STREAM_LINE_KEYS.includes(key))
   }
-  assert(IOS_STREAM_LINE_KEYS.includes('done'))
-  assert(IOS_STREAM_LINE_KEYS.includes('proposedSchedule'))
-  assert(IOS_STREAM_LINE_KEYS.includes('proposedScheduleUpdate'))
 })
 
 Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO field for field', async () => {
@@ -896,6 +918,59 @@ Deno.test('buildDonePayload.proposedScheduleUpdate matches CloudProposedSchedule
   }
   for (const key of actualKeys) {
     if (!IOS_PROPOSED_SCHEDULE_UPDATE_KEYS.includes(key)) {
+      throw new Error(`unexpected key iOS doesn't declare: ${key}`)
+    }
+  }
+})
+
+Deno.test('buildDonePayload.proposedRoutineUpdate matches CloudProposedRoutineUpdateDTO field for field', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeRoutineUpdate,
+    {
+      dailyReviewEnabled: true,
+      dailyReviewTime: '22:00',
+      newsBriefingEnabled: false,
+      newsBriefingTime: '08:00',
+      planningPromptTime: '07:30',
+      notificationsEnabled: true,
+    },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state)
+  assert(payload.proposedRoutineUpdate !== null)
+  const actualKeys = Object.keys(payload.proposedRoutineUpdate!).sort()
+  const expectedKeys = [...IOS_PROPOSED_ROUTINE_UPDATE_KEYS].sort()
+  for (const key of expectedKeys) {
+    if (!actualKeys.includes(key)) throw new Error(`missing key: ${key}`)
+  }
+  for (const key of actualKeys) {
+    if (!IOS_PROPOSED_ROUTINE_UPDATE_KEYS.includes(key)) {
+      throw new Error(`unexpected key iOS doesn't declare: ${key}`)
+    }
+  }
+})
+
+Deno.test('buildDonePayload.proposedReviewAction matches CloudProposedReviewActionDTO field for field', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeReviewActions,
+    { date: 'yesterday', reflection: '집중이 잘 됐다' },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state)
+  assert(payload.proposedReviewAction !== null)
+  const actualKeys = Object.keys(payload.proposedReviewAction!).sort()
+  const expectedKeys = [...IOS_PROPOSED_REVIEW_ACTION_KEYS].sort()
+  for (const key of expectedKeys) {
+    if (!actualKeys.includes(key)) throw new Error(`missing key: ${key}`)
+  }
+  for (const key of actualKeys) {
+    if (!IOS_PROPOSED_REVIEW_ACTION_KEYS.includes(key)) {
       throw new Error(`unexpected key iOS doesn't declare: ${key}`)
     }
   }
