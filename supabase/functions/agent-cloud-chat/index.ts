@@ -1,4 +1,4 @@
-import { apiError, withApi } from '../_shared/http.ts'
+import { AGENT_WORKFLOW_NAME, type AgentAuditResultKind } from '../_shared/agent-audit-contract.ts'
 import {
   accumulatedToolCallsArray,
   addAgentUsage,
@@ -21,6 +21,7 @@ import {
 } from '../_shared/agent-cloud-contract.ts'
 import { OPENROUTER_PROVIDER } from '../_shared/agent-key-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
+import { apiError, withApi } from '../_shared/http.ts'
 
 type ChatMessage = {
   role: string
@@ -197,6 +198,17 @@ export default {
     ]
     const model = parsed.data.model || Deno.env.get('OPENROUTER_MODEL') || DEFAULT_OPENROUTER_MODEL
 
+    // Generated only after every preflight check above has passed --
+    // everything before this point (method/body validation, rate limit,
+    // key lookup, vault read) exits before reaching here and is
+    // deliberately not an audited agent execution. startedAt therefore
+    // measures the accepted execution's own duration, not preflight/auth
+    // overhead; agentRunId is independent of currentRequestId (client-
+    // controllable via the X-Request-ID header) since it's the audit
+    // table's DB-enforced uniqueness key.
+    const startedAt = performance.now()
+    const agentRunId = crypto.randomUUID()
+
     const encoder = new TextEncoder()
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -206,13 +218,19 @@ export default {
         const dispatchState = newToolDispatchState()
         const totalUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, costUsd: 0 }
         let completedCalls = 0
+        let lastProviderCompletionId: string | null = null
 
         // Built fresh from dispatchState at both send sites below
         // (no-tool-calls exit and ran-out-of-iterations exit) via the same
         // buildDonePayload() so they can't drift apart.
         const donePayload = () => buildDonePayload(dispatchState)
 
-        const close = async () => {
+        const close = async (resultKind: AgentAuditResultKind) => {
+          // Snapshotted before either DB write below runs, so it measures
+          // the accepted execution's duration only -- not observability
+          // overhead from persisting the result.
+          const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
+
           if (completedCalls > 0) {
             try {
               const logged = await service.from('agent_usage_log').insert({
@@ -233,6 +251,38 @@ export default {
               )
             }
           }
+
+          // Unconditional (unlike agent_usage_log above) -- this is exactly
+          // what covers a first-iteration OpenRouter failure with
+          // completedCalls === 0, since that failure is caught by the
+          // try/catch below and still reaches this close() call.
+          // Failure-isolated, not "non-blocking": a failure here is caught
+          // and logged, never changing the user-facing agent result, but
+          // it's awaited before controller.close(), so it can delay when
+          // the stream actually closes.
+          try {
+            const logged = await service.from('agent_audit_log').insert({
+              agent_run_id: agentRunId,
+              user_id: userId,
+              workflow_name: AGENT_WORKFLOW_NAME,
+              model,
+              tool_names: dispatchState.dispatchedTools.map((t) => t.name),
+              tool_call_count: dispatchState.dispatchedTools.length,
+              latency_ms: latencyMs,
+              result_kind: resultKind,
+              provider_completion_id: lastProviderCompletionId,
+            })
+            if (logged.error) throw logged.error
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                requestId: currentRequestId,
+                operation: 'agent_cloud_chat.audit_log',
+                error: String(error),
+              }),
+            )
+          }
+
           controller.close()
         }
 
@@ -246,11 +296,12 @@ export default {
             )
             addAgentUsage(totalUsage, acc.usage)
             completedCalls++
+            lastProviderCompletionId = acc.providerCompletionId ?? lastProviderCompletionId
             const toolCalls = accumulatedToolCallsArray(acc)
 
             if (toolCalls.length === 0) {
               send(donePayload())
-              await close()
+              await close('answered')
               return
             }
 
@@ -279,7 +330,7 @@ export default {
           }
           // Ran out of iterations without a final text turn.
           send(donePayload())
-          await close()
+          await close('exhausted_iterations')
         } catch (error) {
           console.error(
             JSON.stringify({
@@ -289,7 +340,7 @@ export default {
             }),
           )
           send({ error: 'Agent 응답을 받지 못했습니다.' })
-          await close()
+          await close('error')
         }
       },
     })
