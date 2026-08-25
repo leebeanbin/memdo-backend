@@ -117,3 +117,15 @@ import_map = "../deno.json"
 [functions.agent-usage]
 verify_jwt = true
 import_map = "../deno.json"
+
+[functions.eval-bootstrap]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.account]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.apple-auth-token-exchange]
+verify_jwt = true
+import_map = "../deno.json"
