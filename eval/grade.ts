@@ -24,6 +24,7 @@ const EXPECTED_TOOL_NAME: Record<string, string | null> = {
   PROPOSE_SCHEDULE_UPDATE: AGENT_TOOL_NAMES.proposeScheduleUpdate,
   SEARCH_SCHEDULES: AGENT_TOOL_NAMES.searchSchedules,
   FIND_FREE_SLOTS: AGENT_TOOL_NAMES.findFreeSlots,
+  CLARIFICATION_REQUIRED: AGENT_TOOL_NAMES.requestClarification,
   ANSWER: null,
   UNSUPPORTED: null,
 }
@@ -63,11 +64,15 @@ const MUTATION_PROPOSAL_TOOLS = new Set<string>([
 ])
 
 /** dispatchedTools (the full call sequence, backend tool names =
- * AGENT_TOOL_NAMES values) against the corpus's expectedBehavior label. The
- * corpus README already states these labels are eval-only, not a runtime
- * enum, so this file keeps treating them that way (no AgentIntent-style
- * type introduced). Pure -- never called for a fixture run.ts has already
- * decided is state-dependent and ungradeable (see run.ts). */
+ * AGENT_TOOL_NAMES values) against the corpus's expectedBehavior label. This
+ * file deliberately still doesn't consume iOS's AgentIntent type (Epic J,
+ * AgentIntent.swift): grading needs the full ordered dispatchedTools
+ * sequence (e.g. "search_schedules before propose_schedule_update"), which a
+ * collapsed intent value would throw away, so this file keeps operating on
+ * raw tool-call sequences by design -- not because no runtime mechanism
+ * exists for these labels (CLARIFICATION_REQUIRED now does: see
+ * request_clarification). Pure -- never called for a fixture run.ts has
+ * already decided is state-dependent and ungradeable (see run.ts). */
 export function gradeCase(
   fixture: Pick<EvalFixture, 'expectedBehavior' | 'expected'>,
   actual: { dispatchedTools: DispatchedTool[] },

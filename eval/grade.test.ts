@@ -191,6 +191,40 @@ Deno.test('ANSWER expected, but a tool fires anyway: fail', () => {
   assertEquals(result.verdict, 'fail')
 })
 
+// ── CLARIFICATION_REQUIRED (Epic J: request_clarification) ──
+
+Deno.test('CLARIFICATION_REQUIRED expected, request_clarification called: pass', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'CLARIFICATION_REQUIRED' },
+    { dispatchedTools: [call('request_clarification', { question: '몇 시에 만나고 싶으세요?' })] },
+  )
+  assertEquals(result.verdict, 'pass')
+})
+
+Deno.test('CLARIFICATION_REQUIRED expected, no tool called: fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'CLARIFICATION_REQUIRED' },
+    { dispatchedTools: [] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('CLARIFICATION_REQUIRED expected, but propose_schedule fires instead: fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'CLARIFICATION_REQUIRED' },
+    { dispatchedTools: [call('propose_schedule', { title: '회의' })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('PROPOSE_SCHEDULE expected, but request_clarification fires instead: fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { isTask: true } },
+    { dispatchedTools: [call('request_clarification', { question: '몇 시에 만나고 싶으세요?' })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
 // ── PROPOSE_SCHEDULE (create) sanity ──
 
 Deno.test('PROPOSE_SCHEDULE expected, matching args: pass', () => {

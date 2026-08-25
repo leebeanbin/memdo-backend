@@ -266,6 +266,34 @@ export const cloudAgentTools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: AGENT_TOOL_NAMES.requestClarification,
+      description:
+        "Call this INSTEAD of guessing or asking in plain text when you don't have enough information to safely propose a schedule/task, update an existing item, change routine settings, or write a reflection -- e.g. a missing date/time, a missing title, an unclear referent, or an unclear requested action. Ask exactly ONE clear question.",
+      parameters: {
+        type: 'object',
+        properties: {
+          question: {
+            type: 'string',
+            description: 'The single clarifying question to ask, in Korean',
+          },
+          missingFields: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional: which specific pieces of information are missing',
+          },
+          reason: {
+            type: 'string',
+            description:
+              'Optional: brief internal reason this is ambiguous -- not necessarily shown to the user verbatim',
+          },
+        },
+        required: ['question'],
+      },
+    },
+  },
 ]
 
 export function systemPrompt(today: string): string {
@@ -281,6 +309,7 @@ export function systemPrompt(today: string): string {
     'When the user asks about or wants to change routine settings (daily review, news briefing, planning prompt, notifications), call get_routine_preferences first, then propose_routine_update if they want a change.',
     'When the user asks about patterns across past reflections, call get_review_history.',
     'When the user wants to write or update a reflection for a specific day, call propose_review_actions -- do not just describe it in text.',
+    "When you don't have enough information to safely propose a schedule/task, update an existing item, change routine settings, or write a reflection -- a missing date/time, a missing title, an unclear referent, or an unclear requested action -- call request_clarification with exactly ONE clear question instead of guessing or asking in plain text.",
     "You cannot directly modify, complete, move, or delete anything -- every change goes through a propose_* tool and needs the user's explicit approval.",
   ].join('\n')
 }
@@ -657,6 +686,12 @@ export type ProposedReviewActionArgs = {
   reflection: string
 }
 
+export type ClarificationRequestArgs = {
+  question: string
+  missingFields?: string[]
+  reason?: string
+}
+
 export type ToolDispatchState = {
   proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null
   conflictTitle: string | null
@@ -676,6 +711,12 @@ export type ToolDispatchState = {
   // correct once a card exists.
   proposedRoutineUpdate: ProposedRoutineUpdateArgs | null
   proposedReviewAction: ProposedReviewActionArgs | null
+  /** Staged by request_clarification (Epic J) -- no DB read/write, same
+   * pure-staging shape as proposedRoutineUpdate/proposedReviewAction above.
+   * Unlike those two, there is no approval card for this: iOS surfaces it as
+   * a distinct clarification UI state, and the user's reply flows into the
+   * next normal turn rather than an approve/decline action. */
+  clarificationRequest: ClarificationRequestArgs | null
   /** A tool-*selection* trace, not a handler/business-success trace: one
    * entry per tool call that passed parseAgentToolCall's validation and was
    * handed to its handler, pushed BEFORE the handler runs -- so this
@@ -705,6 +746,7 @@ export function newToolDispatchState(): ToolDispatchState {
     proposedScheduleUpdate: null,
     proposedRoutineUpdate: null,
     proposedReviewAction: null,
+    clarificationRequest: null,
     dispatchedTools: [],
   }
 }
@@ -730,11 +772,18 @@ export function buildDonePayload(state: ToolDispatchState): {
   proposedScheduleUpdate: ToolDispatchState['proposedScheduleUpdate']
   proposedRoutineUpdate: ToolDispatchState['proposedRoutineUpdate']
   proposedReviewAction: ToolDispatchState['proposedReviewAction']
+  clarificationRequest: ToolDispatchState['clarificationRequest']
   dispatchedTools: ToolDispatchState['dispatchedTools']
+  // Projection of dispatchedTools' names, not a separately tracked list --
+  // lets iOS tell FIND_FREE_SLOTS/SEARCH_SCHEDULES apart from ANSWER
+  // (classifyAgentIntent, AgentIntent.swift) without needing a dynamic-JSON
+  // Decodable wrapper just to read tool names out of dispatchedTools' args.
+  toolNames: string[]
 } {
   return {
     done: true,
     dispatchedTools: state.dispatchedTools,
+    toolNames: state.dispatchedTools.map((t) => t.name),
     proposedSchedule: state.proposedSchedule
       ? {
         ...state.proposedSchedule,
@@ -745,6 +794,7 @@ export function buildDonePayload(state: ToolDispatchState): {
     proposedScheduleUpdate: state.proposedScheduleUpdate,
     proposedRoutineUpdate: state.proposedRoutineUpdate,
     proposedReviewAction: state.proposedReviewAction,
+    clarificationRequest: state.clarificationRequest,
   }
 }
 
@@ -896,6 +946,10 @@ const toolHandlers: Record<string, ToolHandler> = {
   },
   [AGENT_TOOL_NAMES.proposeReviewActions]: async (_supabase, args, state) => {
     state.proposedReviewAction = args
+    return { ok: true }
+  },
+  [AGENT_TOOL_NAMES.requestClarification]: async (_supabase, args, state) => {
+    state.clarificationRequest = args
     return { ok: true }
   },
 }

@@ -51,6 +51,24 @@ Deno.test('parseAgentToolCall accepts a valid call for every tool', () => {
     date: 'yesterday',
     reflection: '집중이 잘 됐다',
   })
+  assertValid(AGENT_TOOL_NAMES.requestClarification, { question: '몇 시에 만나고 싶으세요?' })
+  assertValid(AGENT_TOOL_NAMES.requestClarification, {
+    question: '몇 시에 만나고 싶으세요?',
+    missingFields: ['startTime'],
+    reason: '시간 없음',
+  })
+})
+
+Deno.test('parseAgentToolCall rejects request_clarification with no question', () => {
+  assertInvalid(AGENT_TOOL_NAMES.requestClarification, {})
+  assertInvalid(AGENT_TOOL_NAMES.requestClarification, { question: '' })
+})
+
+Deno.test('parseAgentToolCall rejects request_clarification with too many missingFields', () => {
+  assertInvalid(AGENT_TOOL_NAMES.requestClarification, {
+    question: '몇 시에 만나고 싶으세요?',
+    missingFields: ['a', 'b', 'c', 'd', 'e', 'f'],
+  })
 })
 
 // ── The invalid values called out explicitly in the Sprint 1 plan/doc 20
