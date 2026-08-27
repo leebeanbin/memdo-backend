@@ -2,6 +2,7 @@ import {
   accumulatedToolCallsArray,
   addAgentUsage,
   AGENT_TOOL_NAMES,
+  type AgentTurnTrace,
   ALLOWED_OPENROUTER_MODELS,
   applyStreamChunk,
   buildDonePayload,
@@ -36,6 +37,15 @@ function localAt(hhmm: string): string {
 
 // Fixed reference point so date-relative tests don't depend on when they run.
 const today = new Date('2026-08-16T00:00:00Z')
+
+// Placeholder trace for buildDonePayload() calls that aren't testing the
+// trace fields themselves (see the dedicated 'buildDonePayload includes a
+// founder trace' tests below for those).
+const fakeTrace: AgentTurnTrace = {
+  requestedModel: 'test-model',
+  resolvedModel: null,
+  latencyMs: 0,
+}
 
 Deno.test('resolveDate handles today/tomorrow/explicit', () => {
   assert(resolveDate('today', today) === '2026-08-16')
@@ -198,6 +208,18 @@ Deno.test('parseStreamLine extracts id alongside a content delta', () => {
   assert(chunk?.id === 'chatcmpl-abc123')
 })
 
+Deno.test('parseStreamLine extracts the resolved model (D2 founder trace)', () => {
+  const chunk = parseStreamLine(
+    'data: {"model":"nvidia/nemotron-3-super-120b-a12b:free","choices":[{"delta":{"content":"안녕"},"finish_reason":null}]}',
+  )
+  assert(chunk?.model === 'nvidia/nemotron-3-super-120b-a12b:free')
+})
+
+Deno.test('parseStreamLine returns a chunk for model alone, even with no content/tool_calls', () => {
+  const chunk = parseStreamLine('data: {"model":"openai/gpt-5.4-mini","choices":[]}')
+  assert(chunk?.model === 'openai/gpt-5.4-mini')
+})
+
 Deno.test('applyStreamChunk concatenates content across chunks', () => {
   const acc = newStreamAccumulator()
   applyStreamChunk(acc, { content: '안' })
@@ -212,6 +234,15 @@ Deno.test('applyStreamChunk sets providerCompletionId and a later chunk without 
   assert(acc.providerCompletionId === 'chatcmpl-abc123')
   applyStreamChunk(acc, { content: '녕' })
   assert(acc.providerCompletionId === 'chatcmpl-abc123')
+})
+
+Deno.test('applyStreamChunk sets resolvedModel and a later chunk without model does not clear it (D2)', () => {
+  const acc = newStreamAccumulator()
+  assert(acc.resolvedModel === null)
+  applyStreamChunk(acc, { model: 'nvidia/nemotron-3-super-120b-a12b:free', content: '안' })
+  assert(acc.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
+  applyStreamChunk(acc, { content: '녕' })
+  assert(acc.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
 })
 
 Deno.test('addAgentUsage totals every tool-loop request', () => {
@@ -501,6 +532,15 @@ Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correc
     dispatchToday,
   )
   assert(typeof freeSlotsResult.slots[0] === 'string')
+
+  // D2: dispatchedTools' entries carry `result` after the handler resolves
+  // (mutated onto the same pushed entry, not looked up separately) -- the
+  // founder trace's data source.
+  assert(state.dispatchedTools.length === 2)
+  assert(state.dispatchedTools[0].name === 'search_schedules')
+  assert(state.dispatchedTools[0].result === searchResult)
+  assert(state.dispatchedTools[1].name === 'find_free_slots')
+  assert(state.dispatchedTools[1].result === freeSlotsResult)
 })
 
 Deno.test('find_free_slots with no durationMinutes answers an availability question, not a duration slice', async () => {
@@ -906,7 +946,13 @@ const IOS_STREAM_LINE_KEYS = [
   'clarificationRequest',
   'toolNames',
   'error',
+  // D2 founder trace additions:
+  'dispatchedTools',
+  'trace',
 ]
+// AgentTurnTraceDTO (ScheduleAPI.swift) -- same drift-check purpose as
+// IOS_STREAM_LINE_KEYS above.
+const IOS_TRACE_KEYS = ['requestedModel', 'resolvedModel', 'latencyMs']
 const IOS_PROPOSED_SCHEDULE_KEYS = [
   'title',
   'date',
@@ -952,7 +998,7 @@ const IOS_CLARIFICATION_REQUEST_KEYS = [
 
 Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares', () => {
   const state = newToolDispatchState()
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   // Superset is fine (Swift Decodable ignores unknown keys by default) --
   // a key iOS DOES try to decode that's missing here would break the
   // client, so that direction must hold.
@@ -965,10 +1011,16 @@ Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineD
       'proposedReviewAction',
       'clarificationRequest',
       'toolNames',
+      'dispatchedTools',
+      'trace',
     ]
   ) {
     assert(key in payload)
     assert(IOS_STREAM_LINE_KEYS.includes(key))
+  }
+  for (const key of ['requestedModel', 'resolvedModel', 'latencyMs']) {
+    assert(key in payload.trace)
+    assert(IOS_TRACE_KEYS.includes(key))
   }
 })
 
@@ -981,7 +1033,7 @@ Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO fi
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedSchedule !== null)
   const actualKeys = Object.keys(payload.proposedSchedule!).sort()
   const expectedKeys = [...IOS_PROPOSED_SCHEDULE_KEYS].filter((k) => k !== 'note').sort()
@@ -1016,7 +1068,7 @@ Deno.test('buildDonePayload.proposedScheduleUpdate matches CloudProposedSchedule
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedScheduleUpdate !== null)
   const actualKeys = Object.keys(payload.proposedScheduleUpdate!).sort()
   const expectedKeys = [...IOS_PROPOSED_SCHEDULE_UPDATE_KEYS].filter((k) =>
@@ -1049,7 +1101,7 @@ Deno.test('buildDonePayload.proposedRoutineUpdate matches CloudProposedRoutineUp
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedRoutineUpdate !== null)
   const actualKeys = Object.keys(payload.proposedRoutineUpdate!).sort()
   const expectedKeys = [...IOS_PROPOSED_ROUTINE_UPDATE_KEYS].sort()
@@ -1072,7 +1124,7 @@ Deno.test('buildDonePayload.proposedReviewAction matches CloudProposedReviewActi
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedReviewAction !== null)
   const actualKeys = Object.keys(payload.proposedReviewAction!).sort()
   const expectedKeys = [...IOS_PROPOSED_REVIEW_ACTION_KEYS].sort()
@@ -1095,7 +1147,7 @@ Deno.test('buildDonePayload.clarificationRequest matches CloudClarificationReque
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.clarificationRequest !== null)
   const actualKeys = Object.keys(payload.clarificationRequest!).sort()
   const expectedKeys = [...IOS_CLARIFICATION_REQUEST_KEYS].sort()
@@ -1186,9 +1238,25 @@ Deno.test('buildDonePayload includes dispatchedTools', async () => {
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.dispatchedTools.length === 1)
   assert(payload.dispatchedTools[0].name === AGENT_TOOL_NAMES.searchSchedules)
+  // D2: result is populated by the time it reaches the payload (dispatchToolCall
+  // awaits the handler before returning, so buildDonePayload always sees it).
+  assert('result' in payload.dispatchedTools[0])
+})
+
+Deno.test('buildDonePayload includes the founder trace (D2), separate from dispatchedTools', async () => {
+  const state = newToolDispatchState()
+  const trace: AgentTurnTrace = {
+    requestedModel: 'openrouter/free',
+    resolvedModel: 'nvidia/nemotron-3-super-120b-a12b:free',
+    latencyMs: 842,
+  }
+  const payload = buildDonePayload(state, trace)
+  assert(payload.trace.requestedModel === 'openrouter/free')
+  assert(payload.trace.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
+  assert(payload.trace.latencyMs === 842)
 })
 
 Deno.test('buildDonePayload.toolNames is a name-only projection of dispatchedTools, in order', async () => {
@@ -1207,7 +1275,7 @@ Deno.test('buildDonePayload.toolNames is a name-only projection of dispatchedToo
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.toolNames.length === 2)
   assert(payload.toolNames[0] === AGENT_TOOL_NAMES.searchSchedules)
   assert(payload.toolNames[1] === AGENT_TOOL_NAMES.findFreeSlots)

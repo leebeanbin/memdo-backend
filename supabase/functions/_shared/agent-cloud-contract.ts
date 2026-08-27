@@ -772,8 +772,17 @@ export type ToolDispatchState = {
    * which happens to be the same underlying data. Named `dispatchedTools`
    * rather than `toolCalls` to avoid colliding with the unrelated
    * `toolCalls` concept in agent-cloud-chat/index.ts's own stream-delta
-   * accumulator (AccumulatedToolCall). */
-  dispatchedTools: { name: string; args: unknown }[]
+   * accumulator (AccumulatedToolCall).
+   *
+   * `result` is set after the handler resolves (dispatchToolCall mutates
+   * the same pushed entry in place) -- absent means the handler never
+   * actually ran to completion for this call, which parseAgentToolCall's
+   * rejection path is the only way to reach today. This is the founder
+   * debug trace's (D2) data source: it and the `trace` field returned by
+   * buildDonePayload are per-turn, in-memory only, and deliberately kept
+   * separate from agent_audit_log (index.ts's own persisted execution
+   * observability) -- see AgentTurnTrace's doc comment. */
+  dispatchedTools: { name: string; args: unknown; result?: unknown }[]
 }
 
 export function newToolDispatchState(): ToolDispatchState {
@@ -789,6 +798,28 @@ export function newToolDispatchState(): ToolDispatchState {
   }
 }
 
+/** Founder/developer-only per-turn debug surface (D2) -- deliberately NOT
+ * Epic H's audit trail. agent_audit_log (index.ts's `close()`) is backend
+ * execution observability: durable, aggregate-queryable, one row per turn,
+ * covers every turn including a mid-stream failure. This is the opposite
+ * shape on purpose: transient (exists only for the lifetime of this one
+ * streamed response, never written to any table), and built from the same
+ * in-memory state a client already has to hand rather than a later read of
+ * a persisted row -- so there is no coupling to agentRunId or any other
+ * audit-log identifier, and no schema migration was needed to add this.
+ * `requestedModel`/`resolvedModel`/`latencyMs` are computed at the two
+ * donePayload() call sites in index.ts (not inside close(), which runs
+ * after this and serves the audit log instead) so both share one
+ * assembly point via buildDonePayload, the same reason dispatchedTools
+ * already did. No sensitive values pass through here: tool args/results
+ * are domain data (dates, titles, durations) with no credentials --
+ * confirmed by inspection, not asserted. */
+export type AgentTurnTrace = {
+  requestedModel: string
+  resolvedModel: string | null
+  latencyMs: number
+}
+
 /** Shape of the terminal streamed line agent-cloud-chat/index.ts sends --
  * matches iOS's AgentStreamLineDTO (ScheduleAPI.swift) field for field.
  * `proposedSchedule`'s conflict fields get folded in here since
@@ -798,7 +829,7 @@ export function newToolDispatchState(): ToolDispatchState {
  * function (a field added to ToolDispatchState can't end up wired into one
  * and silently missing from the other) and so the exact key set is
  * unit-testable against iOS's DTOs without a live HTTP call. */
-export function buildDonePayload(state: ToolDispatchState): {
+export function buildDonePayload(state: ToolDispatchState, trace: AgentTurnTrace): {
   done: true
   proposedSchedule:
     | (ProposedScheduleArgs & {
@@ -817,6 +848,7 @@ export function buildDonePayload(state: ToolDispatchState): {
   // (classifyAgentIntent, AgentIntent.swift) without needing a dynamic-JSON
   // Decodable wrapper just to read tool names out of dispatchedTools' args.
   toolNames: string[]
+  trace: AgentTurnTrace
 } {
   return {
     done: true,
@@ -833,6 +865,7 @@ export function buildDonePayload(state: ToolDispatchState): {
     proposedRoutineUpdate: state.proposedRoutineUpdate,
     proposedReviewAction: state.proposedReviewAction,
     clarificationRequest: state.clarificationRequest,
+    trace,
   }
 }
 
@@ -1020,11 +1053,16 @@ export async function dispatchToolCall(
 
   // Pushed before the handler runs -- see ToolDispatchState.dispatchedTools'
   // doc comment for why this is a tool-selection trace, not a
-  // handler-success trace.
-  state.dispatchedTools.push({ name: toolName, args: parsed.args })
+  // handler-success trace. Kept as a reference (not re-looked-up by index)
+  // so `result` below always lands on this exact call's entry even if
+  // something else mutates the array shape in between.
+  const entry: ToolDispatchState['dispatchedTools'][number] = { name: toolName, args: parsed.args }
+  state.dispatchedTools.push(entry)
 
   const handler = toolHandlers[toolName]
-  return await handler(supabase, parsed.args, state, today)
+  const result = await handler(supabase, parsed.args, state, today)
+  entry.result = result
+  return result
 }
 
 // ── SSE stream parsing/accumulation (pure -- the actual fetch/reader loop
@@ -1051,6 +1089,12 @@ export type StreamChunk = {
   // completion (an id read from stream data, not an HTTP request-
   // correlation id).
   id?: string
+  // The actual underlying model OpenRouter routed this completion to --
+  // only meaningfully different from the requested model id for an
+  // auto-router alias (e.g. a future `openrouter/free` entry, D3). Read
+  // for the founder debug trace (D2); previously present on the wire and
+  // silently discarded.
+  model?: string
 }
 
 export type AgentUsage = {
@@ -1101,7 +1145,9 @@ export function parseStreamLine(rawLine: string): StreamChunk | null {
     }
   }
   if (typeof parsed.id === 'string' && parsed.id.length > 0) chunk.id = parsed.id
-  return chunk.content || chunk.toolCalls || chunk.finishReason || chunk.usage || chunk.id
+  if (typeof parsed.model === 'string' && parsed.model.length > 0) chunk.model = parsed.model
+  return chunk.content || chunk.toolCalls || chunk.finishReason || chunk.usage || chunk.id ||
+      chunk.model
     ? chunk
     : null
 }
@@ -1116,6 +1162,11 @@ export type StreamAccumulator = {
   // stream data, not an HTTP request-correlation id (see
   // agent_audit_log.provider_completion_id's column comment).
   providerCompletionId: string | null
+  // Last successfully observed resolved model id (StreamChunk.model's doc
+  // comment) -- read for the founder debug trace (D2), not persisted
+  // anywhere (agent_audit_log's `model` column is the *requested* model,
+  // untouched by this).
+  resolvedModel: string | null
 }
 
 export function newStreamAccumulator(): StreamAccumulator {
@@ -1124,6 +1175,7 @@ export function newStreamAccumulator(): StreamAccumulator {
     toolCalls: new Map(),
     usage: { promptTokens: 0, completionTokens: 0, costUsd: 0 },
     providerCompletionId: null,
+    resolvedModel: null,
   }
 }
 
@@ -1138,6 +1190,7 @@ export function applyStreamChunk(acc: StreamAccumulator, chunk: StreamChunk): vo
   }
   if (chunk.usage) acc.usage = chunk.usage
   if (chunk.id) acc.providerCompletionId = chunk.id
+  if (chunk.model) acc.resolvedModel = chunk.model
 }
 
 export function addAgentUsage(total: AgentUsage, usage: AgentUsage): void {
