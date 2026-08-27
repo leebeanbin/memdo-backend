@@ -34,6 +34,7 @@
 // or: npm run eval:compare
 
 import { ALLOWED_OPENROUTER_MODELS } from '../supabase/functions/_shared/agent-cloud-contract.ts'
+import { reproducibleModelIds } from '../supabase/functions/_shared/model-registry-contract.ts'
 import { runEval } from './run.ts'
 
 type RestOpts = { baseUrl: string; publishableKey: string; accessToken: string }
@@ -125,7 +126,12 @@ async function main() {
   const args = parseArgs(Deno.args)
   const fixturesDir = args.fixtures ?? '../memdo/eval/agent-v0'
 
-  const models = args.models ? args.models.split(',') : [...ALLOWED_OPENROUTER_MODELS]
+  // Default set excludes tier 'free-auto' (openrouter/free) -- it resolves
+  // to a different underlying model per request, so a routine "compare
+  // everything" run shouldn't spend requests measuring it as if it were one
+  // fixed model. Pass --models openrouter/free explicitly to try it anyway;
+  // promote-registry.ts refuses to promote its result regardless.
+  const models = args.models ? args.models.split(',') : reproducibleModelIds()
   const unknown = models.filter((m) =>
     !(ALLOWED_OPENROUTER_MODELS as readonly string[]).includes(m)
   )

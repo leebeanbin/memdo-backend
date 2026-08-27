@@ -10,6 +10,7 @@ function profile(overrides: Partial<ModelProfile>): ModelProfile {
   return {
     id: 'model-a',
     supportsTools: true,
+    tier: 'recommended',
     latencyClass: null,
     costClass: null,
     evalScore: null,
@@ -107,11 +108,23 @@ Deno.test('computeModelProfiles: complete run with pass+fail=0 is not partially 
   assert(result.profiles[0].evalScore === 0.7)
 })
 
-Deno.test('computeModelProfiles: enabled/supportsTools are never modified by promotion', () => {
-  const previous = [profile({ enabled: false, supportsTools: true })]
+Deno.test('computeModelProfiles: enabled/supportsTools/tier are never modified by promotion', () => {
+  const previous = [profile({ enabled: false, supportsTools: true, tier: 'experimental' })]
   const result = computeModelProfiles([comparison({})], previous)
   assert(result.profiles[0].enabled === false)
   assert(result.profiles[0].supportsTools === true)
+  assert(result.profiles[0].tier === 'experimental')
+})
+
+Deno.test('computeModelProfiles: tier free-auto is never promoted, regardless of a complete run', () => {
+  const previous = [profile({ tier: 'free-auto', evalScore: null })]
+  const result = computeModelProfiles([comparison({})], previous)
+  assert(result.warnings.length === 1)
+  assert(result.warnings[0].reason === 'non-deterministic-router')
+  assert(result.warnings[0].model === 'model-a')
+  assert(result.profiles[0].evalScore === null)
+  assert(result.profiles[0].latencyClass === null)
+  assert(result.profiles[0].costClass === null)
 })
 
 Deno.test('parseComparisonsFile accepts a valid { comparisons } file', () => {

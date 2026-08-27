@@ -3,6 +3,7 @@ import {
   classifyLatencyMs,
   MODEL_REGISTRY,
   type ModelProfile,
+  reproducibleModelIds,
   selectableModelIds,
 } from './model-registry-contract.ts'
 
@@ -14,6 +15,7 @@ function profile(overrides: Partial<ModelProfile>): ModelProfile {
   return {
     id: 'test/model',
     supportsTools: true,
+    tier: 'recommended',
     latencyClass: null,
     costClass: null,
     evalScore: null,
@@ -42,6 +44,34 @@ Deno.test('selectableModelIds on the real MODEL_REGISTRY returns every seeded id
   const ids = selectableModelIds(MODEL_REGISTRY)
   assert(ids.length === MODEL_REGISTRY.length)
   for (const m of MODEL_REGISTRY) assert(ids.includes(m.id))
+})
+
+Deno.test('MODEL_REGISTRY has exactly one free-auto entry: openrouter/free', () => {
+  const freeAuto = MODEL_REGISTRY.filter((m) => m.tier === 'free-auto')
+  assert(freeAuto.length === 1)
+  assert(freeAuto[0].id === 'openrouter/free')
+  assert(freeAuto[0].evalScore === null)
+})
+
+Deno.test('reproducibleModelIds excludes tier free-auto but keeps every other selectable id', () => {
+  const registry: ModelProfile[] = [
+    profile({ id: 'recommended-model', tier: 'recommended' }),
+    profile({ id: 'free-auto-model', tier: 'free-auto' }),
+    profile({ id: 'validated-free-model', tier: 'validated-free' }),
+    profile({ id: 'experimental-model', tier: 'experimental' }),
+  ]
+  const ids = reproducibleModelIds(registry)
+  assert(ids.length === 3)
+  assert(!ids.includes('free-auto-model'))
+  assert(ids.includes('recommended-model'))
+  assert(ids.includes('validated-free-model'))
+  assert(ids.includes('experimental-model'))
+})
+
+Deno.test('reproducibleModelIds on the real MODEL_REGISTRY excludes openrouter/free only', () => {
+  const ids = reproducibleModelIds(MODEL_REGISTRY)
+  assert(!ids.includes('openrouter/free'))
+  assert(ids.length === selectableModelIds(MODEL_REGISTRY).length - 1)
 })
 
 Deno.test('classifyLatencyMs boundary cases', () => {

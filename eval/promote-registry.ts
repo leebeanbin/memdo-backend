@@ -23,7 +23,7 @@ import {
 
 export type PromotionWarning = {
   model: string
-  reason: 'unknown-model' | 'incomplete-run' | 'no-graded-cases'
+  reason: 'unknown-model' | 'incomplete-run' | 'no-graded-cases' | 'non-deterministic-router'
   message: string
 }
 
@@ -52,6 +52,25 @@ export function computeModelProfiles(
         model: c.model,
         reason: 'unknown-model',
         message: `${c.model}: not present in MODEL_REGISTRY -- ignored.`,
+      })
+      continue
+    }
+
+    // 'free-auto' (openrouter/free) resolves to a different underlying
+    // model per request -- a comparison run "against" it doesn't measure
+    // one model, so promoting its result as a real evalScore would
+    // misrepresent the router as evaluated. eval/compare.ts's default run
+    // set already excludes tier 'free-auto' (reproducibleModelIds), but a
+    // human can still pass --models openrouter/free explicitly for
+    // curiosity -- this is the promotion-side guard for that case, kept
+    // independent of the compare-side exclusion rather than trusting it
+    // alone.
+    if (prior.tier === 'free-auto') {
+      warnings.push({
+        model: c.model,
+        reason: 'non-deterministic-router',
+        message: `${c.model}: tier 'free-auto' resolves to a different model per request -- ` +
+          `never promoted, keeping previous registry values.`,
       })
       continue
     }
@@ -115,8 +134,13 @@ export function computeModelProfiles(
         : classifyLatencyMs(c.avgFixtureWallMs),
       costClass: classifyCostPerRequest(c.costUsd, c.requestCount),
       evalScore: c.pass / denom,
-      // enabled/supportsTools are never touched by promotion -- those are
-      // deliberate code edits, not eval-data-driven.
+      // enabled/supportsTools/tier are never touched by promotion -- those
+      // are deliberate code edits, not eval-data-driven. In particular,
+      // bumping a fixed :free model from 'experimental' to 'validated-free'
+      // after a good promoted evalScore is a human call (no threshold is
+      // defined here to auto-decide "good enough"), made by editing
+      // MODEL_REGISTRY in the same reviewed PR that pastes in this script's
+      // output.
     })
   }
 
@@ -205,6 +229,7 @@ function formatRegistry(profiles: ModelProfile[]): string {
     const fields = [
       `id: ${JSON.stringify(p.id)}`,
       `supportsTools: ${p.supportsTools}`,
+      `tier: ${JSON.stringify(p.tier)}`,
       `latencyClass: ${p.latencyClass === null ? 'null' : JSON.stringify(p.latencyClass)}`,
       `costClass: ${p.costClass === null ? 'null' : JSON.stringify(p.costClass)}`,
       `evalScore: ${p.evalScore === null ? 'null' : p.evalScore}`,
