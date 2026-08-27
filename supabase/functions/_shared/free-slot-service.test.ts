@@ -1,5 +1,5 @@
 // Agent Domain Fixture Contract: v1
-import { freeSlotsInWindow, type TimeRange } from './free-slot-service.ts'
+import { freeExtentsInWindow, freeSlotsInWindow, type TimeRange } from './free-slot-service.ts'
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
@@ -96,4 +96,63 @@ Deno.test('freeSlotsInWindow returns [] for a non-positive duration', () => {
 Deno.test('freeSlotsInWindow returns [] for a non-positive maxResults', () => {
   const slots = freeSlotsInWindow([], at('09:00'), at('18:00'), HOUR, 0)
   assert(slots.length === 0)
+})
+
+// ── freeExtentsInWindow: the availability-query contract ("how free am I"),
+// as opposed to freeSlotsInWindow's duration-constrained candidate-slot
+// contract. Found during founder dogfooding: an empty day used to answer a
+// plain availability question with a single arbitrary duration-sized slot
+// instead of the whole open window -- these tests pin the fix. ──
+
+Deno.test('free-extent/empty-day-returns-whole-window', () => {
+  const extents = freeExtentsInWindow([], at('08:00'), at('22:00'))
+  assertSlots(extents, [['08:00', '22:00']])
+})
+
+Deno.test('free-extent/one-event-splits-the-day', () => {
+  const extents = freeExtentsInWindow([range('12:00', '13:00')], at('08:00'), at('22:00'))
+  assertSlots(extents, [['08:00', '12:00'], ['13:00', '22:00']])
+})
+
+Deno.test('free-extent/multiple-events', () => {
+  const busy = [range('09:00', '10:00'), range('13:00', '14:00'), range('17:00', '18:00')]
+  const extents = freeExtentsInWindow(busy, at('08:00'), at('22:00'))
+  assertSlots(extents, [
+    ['08:00', '09:00'],
+    ['10:00', '13:00'],
+    ['14:00', '17:00'],
+    ['18:00', '22:00'],
+  ])
+})
+
+Deno.test('free-extent/adjacent-events-produce-no-gap-between-them', () => {
+  const busy = [range('09:00', '12:00'), range('12:00', '15:00')]
+  const extents = freeExtentsInWindow(busy, at('08:00'), at('18:00'))
+  assertSlots(extents, [['08:00', '09:00'], ['15:00', '18:00']])
+})
+
+Deno.test('free-extent/overlapping-events-merge-into-one-busy-block', () => {
+  const busy = [range('09:00', '12:00'), range('11:00', '14:00')]
+  const extents = freeExtentsInWindow(busy, at('08:00'), at('18:00'))
+  assertSlots(extents, [['08:00', '09:00'], ['14:00', '18:00']])
+})
+
+Deno.test('free-extent/fully-booked-window-returns-empty', () => {
+  const extents = freeExtentsInWindow([range('08:00', '22:00')], at('08:00'), at('22:00'))
+  assert(extents.length === 0)
+})
+
+Deno.test('free-extent/invalid-window-returns-empty', () => {
+  const extents = freeExtentsInWindow([], at('18:00'), at('09:00'))
+  assert(extents.length === 0)
+})
+
+Deno.test('free-extent/busy-outside-window-is-clipped-away', () => {
+  const extents = freeExtentsInWindow([range('12:00', '13:00')], at('08:00'), at('10:00'))
+  assertSlots(extents, [['08:00', '10:00']])
+})
+
+Deno.test('free-extent/busy-straddling-window-edge-is-trimmed', () => {
+  const extents = freeExtentsInWindow([range('07:00', '09:00')], at('08:00'), at('12:00'))
+  assertSlots(extents, [['09:00', '12:00']])
 })

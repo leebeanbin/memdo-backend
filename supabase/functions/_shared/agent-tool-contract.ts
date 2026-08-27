@@ -102,9 +102,15 @@ export const proposeScheduleUpdateArgsSchema = z.discriminatedUnion('action', [
   }),
 ])
 
+// durationMinutes is optional and never defaulted downstream (see
+// agent-cloud-contract.ts's findFreeSlots) -- its absence means "how free
+// am I" (full free-window answer), not "duration unspecified, assume one."
+// Found during founder dogfooding: a required-with-implicit-default field
+// here was the actual bug behind an empty day answering a plain
+// availability question with an arbitrary duration-sized slot.
 export const findFreeSlotsArgsSchema = z.object({
   scope: z.enum(['today', 'tomorrow', 'this_week']).or(z.iso.date()),
-  durationMinutes: z.number().int().min(15).max(480),
+  durationMinutes: z.number().int().min(15).max(480).optional(),
   windowStart: timeSchema.optional(),
   windowEnd: timeSchema.optional(),
 })

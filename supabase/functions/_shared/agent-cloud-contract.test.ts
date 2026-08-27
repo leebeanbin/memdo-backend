@@ -503,6 +503,62 @@ Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correc
   assert(typeof freeSlotsResult.slots[0] === 'string')
 })
 
+Deno.test('find_free_slots with no durationMinutes answers an availability question, not a duration slice', async () => {
+  const state = newToolDispatchState()
+
+  // Empty day: the whole default 08:00-22:00 window is one free extent --
+  // this is the actual bug found during founder dogfooding (an empty day
+  // used to answer "1 hour free" instead of "the whole window is free").
+  const emptyDayResult: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(emptyDayResult.slots.length === 1)
+  assert(emptyDayResult.slots[0].includes('등록된 일정이 없어서'))
+  assert(emptyDayResult.slots[0].includes('전부 비어 있어요'))
+
+  // One event splitting the day: two distinct free extents, phrased as
+  // availability (not a single duration-sized candidate).
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: timeOn('2026-08-16', '12:00')!.toISOString(),
+    end_at: timeOn('2026-08-16', '13:00')!.toISOString(),
+    version: 1,
+  }]
+  const splitDayResult: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'find_free_slots',
+    { scope: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(splitDayResult.slots.length === 1)
+  assert(splitDayResult.slots[0].includes('비어 있어요'))
+  assert(!splitDayResult.slots[0].includes('등록된 일정이 없어서'))
+  // Both sides of the 12:00-13:00 busy block should show up, comma-joined --
+  // not just the first duration-sized slice of the first gap.
+  assert(splitDayResult.slots[0].split(',').length === 2)
+})
+
+Deno.test('find_free_slots with durationMinutes still returns a single duration-sized candidate (unchanged)', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: '2026-08-16', durationMinutes: 60 },
+    state,
+    dispatchToday,
+  )
+  assert(result.slots.length === 1)
+  assert(!result.slots[0].includes('등록된 일정이 없어서'))
+  assert(result.slots[0].split(',').length === 1)
+})
+
 Deno.test('dispatchToolCall reports an unknown tool name instead of throwing', async () => {
   const state = newToolDispatchState()
   const result: any = await dispatchToolCall(
