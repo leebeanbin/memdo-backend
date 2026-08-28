@@ -124,7 +124,7 @@ export const cloudAgentTools = [
     function: {
       name: AGENT_TOOL_NAMES.findFreeSlots,
       description:
-        "Find open time in the user's calendar. Two modes based on whether durationMinutes is given: a plain availability question ('언제 비어 있어?') with no named duration returns the full free window; a duration/activity-specific request ('1시간 찾아줘') returns one candidate slot of that length.",
+        "Find open time in the user's calendar. Two modes based on whether durationMinutes is given: a plain availability question ('언제 비어 있어?') with no explicit numeric duration returns the full free window; a request with an explicit numeric duration ('1시간 찾아줘') returns one candidate slot of that length. An activity name ALONE ('운동할 시간 찾아줘') is NOT a duration -- if the user names an activity but never states how long, call request_clarification and ask how much time they need instead of guessing or calling this tool with a made-up value.",
       parameters: {
         type: 'object',
         properties: {
@@ -135,7 +135,7 @@ export const cloudAgentTools = [
           durationMinutes: {
             type: 'integer',
             description:
-              'Free-slot length in minutes (e.g. 30, 60, 90), ONLY when the user names a specific duration/activity to fit in. Omit entirely for a plain availability question -- omitting returns the full free window, not a guessed duration.',
+              'Free-slot length in minutes (e.g. 30, 60, 90), ONLY when the user states an explicit numeric duration. Omit entirely for a plain availability question -- omitting returns the full free window, never a guessed duration. An activity name by itself (e.g. "운동") is NOT evidence for any particular number here -- if a duration is genuinely needed but never stated, call request_clarification instead of inventing one.',
           },
           windowStart: {
             type: 'string',
@@ -307,7 +307,7 @@ export function systemPrompt(today: string): string {
     "You are Memdo's personal schedule assistant. Be concise, warm, and practical.",
     `Today's date is ${today}.`,
     'When the user wants to create, add, or make a new schedule or task, call propose_schedule -- do not just describe it in text, and do not claim you created it.',
-    'When the user asks to find free time or where to fit something, call find_free_slots. Only pass durationMinutes when the user names a specific length/activity to fit in ("1시간 찾아줘"); omit it entirely for a plain availability question ("언제 비어 있어?") -- never guess a duration the user did not ask for.',
+    'When the user asks to find free time or where to fit something, call find_free_slots. Only pass durationMinutes when the user states an explicit numeric length ("1시간 찾아줘"); omit it entirely for a plain availability question ("언제 비어 있어?"). An activity name alone ("운동할 시간 찾아줘") is NOT a duration -- if the user names an activity but never says how long, call request_clarification and ask how much time they need instead of guessing.',
     'When the user asks about existing plans, or before proposing something new, call search_schedules to check first rather than guessing.',
     'When the user wants to complete, move, or delete an EXISTING schedule or task, first call search_schedules to find its real id, then call propose_schedule_update -- do not guess an id, and do not claim the change happened.',
     'When the user asks how a specific day went (not just what was on it), call get_day_context instead of search_schedules.',
@@ -576,9 +576,13 @@ async function findFreeSlots(
         extents[0].start.getTime() === windowStart.getTime() &&
         extents[0].end.getTime() === windowEnd.getTime()
       ) {
-        lines.push(
-          `${date}: 등록된 일정이 없어서 ${formatSlot(windowStart, windowEnd)} 전부 비어 있어요.`,
-        )
+        // Deliberately no "등록된 일정이 없어서" causal claim -- `busy` (above)
+        // only looks at timed rows, so an untimed task can still exist on
+        // this date even when the whole timed window is free. Stating only
+        // the computed fact (the window itself) stays true regardless of
+        // untimed items, without needing to separately track their
+        // existence just to phrase this one sentence.
+        lines.push(`${date}: ${formatSlot(windowStart, windowEnd)} 전체가 비어 있어요.`)
       } else {
         lines.push(
           `${date}: ${extents.map((e) => formatSlot(e.start, e.end)).join(', ')} 비어 있어요.`,

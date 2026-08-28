@@ -517,8 +517,12 @@ Deno.test('find_free_slots with no durationMinutes answers an availability quest
     dispatchToday,
   )
   assert(emptyDayResult.slots.length === 1)
-  assert(emptyDayResult.slots[0].includes('등록된 일정이 없어서'))
-  assert(emptyDayResult.slots[0].includes('전부 비어 있어요'))
+  // No "등록된 일정이 없어서" causal claim -- `busy` only looks at timed
+  // rows, so this wording must stay true even when an untimed task exists
+  // (see the dedicated untimed-task test below). Only the computed window
+  // itself is asserted.
+  assert(!emptyDayResult.slots[0].includes('등록된 일정이 없어서'))
+  assert(emptyDayResult.slots[0].includes('전체가 비어 있어요'))
 
   // One event splitting the day: two distinct free extents, phrased as
   // availability (not a single duration-sized candidate).
@@ -543,6 +547,32 @@ Deno.test('find_free_slots with no durationMinutes answers an availability quest
   // Both sides of the 12:00-13:00 busy block should show up, comma-joined --
   // not just the first duration-sized slice of the first gap.
   assert(splitDayResult.slots[0].split(',').length === 2)
+})
+
+Deno.test('find_free_slots availability wording stays truthful when an untimed task exists that day (D1-2)', async () => {
+  const state = newToolDispatchState()
+  // An untimed task (no start_at/end_at) -- invisible to `busy`, which only
+  // looks at timed rows, so the timed calendar really is fully free. The
+  // wording must not falsely claim "등록된 일정이 없어서" (no schedules
+  // registered) when this row genuinely IS a registered schedule.
+  const untimedTask: ExistingScheduleRow[] = [{
+    id: 't1',
+    title: '장보기',
+    scheduled_date: '2026-08-16',
+    start_at: null,
+    end_at: null,
+    version: 1,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(untimedTask),
+    'find_free_slots',
+    { scope: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(result.slots.length === 1)
+  assert(!result.slots[0].includes('등록된 일정이 없어서'))
+  assert(result.slots[0].includes('전체가 비어 있어요'))
 })
 
 Deno.test('find_free_slots with durationMinutes still returns a single duration-sized candidate (unchanged)', async () => {
