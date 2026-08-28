@@ -356,6 +356,15 @@ export default {
                 dispatchState,
                 today,
               )
+              // Sent immediately after the handler resolves -- second-pass
+              // review finding: toolCallStarted alone left the client's
+              // hint showing "tool is executing" for the whole gap between
+              // the handler actually finishing and the model's next visible
+              // token, which is a fake progress state, not a truthful one.
+              // Client clears its hint on this event; a following
+              // toolCallStarted (another call in the same turn) replaces it
+              // again, same as before.
+              send({ toolCallFinished: call.function.name })
               messages.push({
                 role: 'tool',
                 tool_call_id: call.id,
