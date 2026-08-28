@@ -24,7 +24,12 @@ export type CostClass = 'low' | 'medium' | 'high'
 //   users as free-tier-validated. iOS gates these behind a developer-only
 //   surface (see CloudAgentSettings.swift) rather than showing them in the
 //   normal picker -- "selectable for developer testing" is not the same as
-//   "recommended to every user."
+//   "recommended to every user." The UI hiding this tier `enabled` was
+//   never enough on its own (second-pass review finding): a client that
+//   knew or guessed an experimental model's id could still select it
+//   directly via the request body, since chatRequestSchema only ever
+//   gated on enabled/supportsTools. isExperimentalModelSelectable (below)
+//   is the actual server-side enforcement boundary for this tier.
 export type ModelTier = 'recommended' | 'free-auto' | 'validated-free' | 'experimental'
 
 export type ModelProfile = {
@@ -187,6 +192,31 @@ export function selectableModelIds(registry: ModelProfile[] = MODEL_REGISTRY): s
 // the wasted requests in the first place.
 export function reproducibleModelIds(registry: ModelProfile[] = MODEL_REGISTRY): string[] {
   return selectableModelIds(registry.filter((m) => m.tier !== 'free-auto'))
+}
+
+// Second-pass D3 review finding: tier 'experimental' was UI-hidden (iOS
+// picker) but still fully backend-selectable, since chatRequestSchema's
+// z.enum(ALLOWED_OPENROUTER_MODELS) only ever gates on enabled/
+// supportsTools, not tier. Every model NOT in tier 'experimental' is
+// unaffected by this function regardless of env -- it only ever narrows
+// experimental-tier eligibility, never widens anything else.
+//
+// Deliberately the same minimal env-var-allowlist idiom
+// resolveRateLimitPerHour already uses for the eval account (one named
+// account, not a general role/auth system) -- MEMDO_EXPERIMENTAL_MODELS_USER_ID
+// is kept as its own separate env var rather than reusing
+// MEMDO_EVAL_ACCOUNT_USER_ID, since "may run eval" and "may pick an
+// unvalidated free model" are different permissions that happen to often
+// belong to the same founder/dev account today, not the same permission.
+export function isExperimentalModelSelectable(
+  userId: string,
+  modelId: string,
+  registry: ModelProfile[] = MODEL_REGISTRY,
+  env: { experimentalModelsUserId?: string } = {},
+): boolean {
+  const profile = registry.find((m) => m.id === modelId)
+  if (!profile || profile.tier !== 'experimental') return true
+  return env.experimentalModelsUserId !== undefined && userId === env.experimentalModelsUserId
 }
 
 // Fixed absolute thresholds (not relative to other models) so a model's

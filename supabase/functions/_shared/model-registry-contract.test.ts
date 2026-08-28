@@ -1,6 +1,7 @@
 import {
   classifyCostPerRequest,
   classifyLatencyMs,
+  isExperimentalModelSelectable,
   MODEL_REGISTRY,
   type ModelProfile,
   reproducibleModelIds,
@@ -72,6 +73,49 @@ Deno.test('reproducibleModelIds on the real MODEL_REGISTRY excludes openrouter/f
   const ids = reproducibleModelIds(MODEL_REGISTRY)
   assert(!ids.includes('openrouter/free'))
   assert(ids.length === selectableModelIds(MODEL_REGISTRY).length - 1)
+})
+
+Deno.test('isExperimentalModelSelectable: non-experimental tiers are always selectable, env or not', () => {
+  const registry: ModelProfile[] = [
+    profile({ id: 'recommended-model', tier: 'recommended' }),
+    profile({ id: 'free-auto-model', tier: 'free-auto' }),
+    profile({ id: 'validated-free-model', tier: 'validated-free' }),
+  ]
+  for (const id of ['recommended-model', 'free-auto-model', 'validated-free-model']) {
+    assert(isExperimentalModelSelectable('any-user', id, registry) === true)
+    assert(
+      isExperimentalModelSelectable('any-user', id, registry, {
+        experimentalModelsUserId: 'someone-else',
+      }) === true,
+    )
+  }
+})
+
+Deno.test('isExperimentalModelSelectable: experimental tier is rejected without a matching allowlisted user', () => {
+  const registry: ModelProfile[] = [profile({ id: 'experimental-model', tier: 'experimental' })]
+  assert(isExperimentalModelSelectable('user-a', 'experimental-model', registry) === false)
+  assert(
+    isExperimentalModelSelectable('user-a', 'experimental-model', registry, {
+      experimentalModelsUserId: 'user-b',
+    }) === false,
+  )
+})
+
+Deno.test('isExperimentalModelSelectable: experimental tier is allowed only for the exact allowlisted user', () => {
+  const registry: ModelProfile[] = [profile({ id: 'experimental-model', tier: 'experimental' })]
+  assert(
+    isExperimentalModelSelectable('user-a', 'experimental-model', registry, {
+      experimentalModelsUserId: 'user-a',
+    }) === true,
+  )
+})
+
+Deno.test('isExperimentalModelSelectable: an unknown model id is not treated as experimental-tier-restricted', () => {
+  // Not this function's job to validate the model exists at all --
+  // chatRequestSchema's z.enum already rejects an unknown id before this
+  // ever runs. An id with no matching profile falls through as selectable
+  // here rather than being silently treated as forbidden.
+  assert(isExperimentalModelSelectable('any-user', 'not-a-real-model', []) === true)
 })
 
 Deno.test('classifyLatencyMs boundary cases', () => {
