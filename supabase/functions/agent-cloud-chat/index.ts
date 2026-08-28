@@ -343,10 +343,10 @@ export default {
               // Sent BEFORE the (possibly slow) handler runs -- the one real
               // signal a client can use for a truthful, live "tool is
               // executing" hint (D4), as opposed to inferring it from the
-              // terminal done payload's dispatchedTools after everything
-              // already happened. Carries only the tool name, no
-              // args/results -- those stay in the founder debug trace (D2),
-              // not this user-facing surface.
+              // terminal done payload's toolNames after everything already
+              // happened. Carries only the tool name, no args/results --
+              // those stay in the founder debug trace (D2), not this
+              // user-facing surface.
               send({ toolCallStarted: call.function.name })
               const args = JSON.parse(call.function.arguments || '{}')
               const result = await dispatchToolCall(
