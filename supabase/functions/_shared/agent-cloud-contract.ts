@@ -1,7 +1,11 @@
 import { z } from 'zod'
 import { AGENT_TOOL_NAMES, parseAgentToolCall } from './agent-tool-contract.ts'
 import { type ConflictCandidate, findConflict as findIntervalConflict } from './conflict-service.ts'
-import { buildFounderDebugTrace, type FounderDebugTrace } from './founder-debug-trace.ts'
+import {
+  type AgentTurnTrace,
+  buildFounderDebugTrace,
+  type FounderDebugTrace,
+} from './founder-debug-trace.ts'
 import { freeExtentsInWindow, freeSlotsInWindow } from './free-slot-service.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
@@ -806,40 +810,6 @@ export function newToolDispatchState(): ToolDispatchState {
     clarificationRequest: null,
     dispatchedTools: [],
   }
-}
-
-/** Founder/developer-only per-turn debug surface (D2) -- deliberately NOT
- * Epic H's audit trail. agent_audit_log (index.ts's `close()`) is backend
- * execution observability: durable, aggregate-queryable, one row per turn,
- * covers every turn including a mid-stream failure. This is the opposite
- * shape on purpose: transient (exists only for the lifetime of this one
- * streamed response, never written to any table), and built from the same
- * in-memory state a client already has to hand rather than a later read of
- * a persisted row -- so there is no coupling to agentRunId or any other
- * audit-log identifier, and no schema migration was needed to add this.
- * `requestedModel`/`resolvedModel`/`latencyMs` are computed at the two
- * donePayload() call sites in index.ts (not inside close(), which runs
- * after this and serves the audit log instead) so both share one
- * assembly point via buildDonePayload, the same reason dispatchedTools
- * already did.
- *
- * Correction (second-pass review): an earlier version of this comment
- * claimed tool args/results were safe to expose as-is because they're
- * "domain data (dates, titles, durations) with no credentials." That is
- * true for credentials but was never the right bar -- titles, notes,
- * written reflections, and clarification questions are user-authored
- * private content, not secrets, and both matter. AgentTurnTrace itself
- * (this type) carries no tool data at all, only model/timing metadata, so
- * it has nothing to redact. The actual tool args/results sanitization
- * boundary is buildFounderDebugTrace (founder-debug-trace.ts) -- see that
- * module's doc comment for the real contract. This type is only ever sent
- * to a client wrapped in a FounderDebugTrace, and only when the client
- * opted in (chatRequestSchema's `debug` field) -- see buildDonePayload's
- * `includeDebugTrace` parameter. */
-export type AgentTurnTrace = {
-  requestedModel: string
-  resolvedModel: string | null
-  latencyMs: number
 }
 
 /** Shape of the terminal streamed line agent-cloud-chat/index.ts sends --

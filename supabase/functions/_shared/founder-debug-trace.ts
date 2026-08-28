@@ -1,5 +1,4 @@
 import { AGENT_TOOL_NAMES } from './agent-tool-contract.ts'
-import type { AgentTurnTrace, ToolDispatchState } from './agent-cloud-contract.ts'
 
 // Founder/developer-only per-turn debug surface (D2) -- the explicit
 // sanitization boundary between ToolDispatchState's raw internal
@@ -24,6 +23,53 @@ import type { AgentTurnTrace, ToolDispatchState } from './agent-cloud-contract.t
 // object rather than falling back to "just pass it through," so adding a
 // new tool without also deciding its safe projection here fails safe
 // (empty), not open (raw).
+
+// Owned here, not in agent-cloud-contract.ts (second-pass review: this
+// module must not import back from the file it was extracted out of --
+// see the module doc comment above and buildFounderDebugTrace's own doc
+// comment below for the full reasoning). agent-cloud-contract.ts imports
+// this type FROM here instead, so the dependency is genuinely one-way:
+// agent-cloud-contract.ts -> founder-debug-trace.ts, never the reverse.
+//
+// Deliberately NOT Epic H's audit trail. agent_audit_log
+// (agent-cloud-chat/index.ts's `close()`) is backend execution
+// observability: durable, aggregate-queryable, one row per turn, covers
+// every turn including a mid-stream failure. This is the opposite shape
+// on purpose: transient (exists only for the lifetime of this one
+// streamed response, never written to any table), and built from the
+// same in-memory state a client already has to hand rather than a later
+// read of a persisted row -- so there is no coupling to agentRunId or any
+// other audit-log identifier, and no schema migration was needed to add
+// this. `requestedModel`/`resolvedModel`/`latencyMs` are computed at the
+// two donePayload() call sites in agent-cloud-chat/index.ts (not inside
+// close(), which runs after and serves the audit log instead) so both
+// share one assembly point via buildDonePayload.
+//
+// This type itself carries no tool data at all, only model/timing
+// metadata, so it has nothing to redact -- the actual tool args/results
+// sanitization boundary is buildFounderDebugTrace below. Only ever sent
+// to a client wrapped in a FounderDebugTrace, and only when the client
+// opted in (chatRequestSchema's `debug` field) -- see
+// agent-cloud-contract.ts's buildDonePayload `includeDebugTrace` param.
+export type AgentTurnTrace = {
+  requestedModel: string
+  resolvedModel: string | null
+  latencyMs: number
+}
+
+/** The minimal shape this module actually needs from one dispatched tool
+ * call -- structurally compatible with (a subset of)
+ * ToolDispatchState.dispatchedTools' entries (agent-cloud-contract.ts),
+ * but declared independently so this module never needs to import that
+ * type (or anything else from agent-cloud-contract.ts) just to describe
+ * its own input. `result` optional/absent (not merely `{}`) mirrors
+ * ToolDispatchState.dispatchedTools' own semantics: absent means the
+ * handler never actually ran to completion for this call. */
+export type FounderDebugInputToolCall = {
+  name: string
+  args: unknown
+  result?: unknown
+}
 
 export type FounderDebugToolCall = {
   name: string
@@ -198,13 +244,44 @@ function sanitizeResult(toolName: string, result: unknown): Record<string, unkno
     }
 
     case AGENT_TOOL_NAMES.getRoutinePreferences: {
-      // Structural settings (times/booleans/counts), not narrative content
-      // -- safe to pass through directly rather than an allow-list of
-      // every individual preference key, since preferencesDto's shape is
-      // owned by preferences-contract.ts and this would otherwise need to
-      // track every field it ever adds.
+      // Second-pass review fix: this used to pass preferencesDto(row)
+      // through raw, which is exactly the "no raw object passthrough"
+      // rule this module exists to enforce -- it doesn't matter that
+      // today's fields are all structural, because this sanitizer's
+      // safety would then silently depend on every FUTURE field
+      // preferences-contract.ts ever adds, with no signal here that a new
+      // one needs a decision. Explicit allow-list instead: real shape is
+      // { configured: false } or { configured: true, ...preferencesDto(row) }.
+      // calendarFilter (raw strings the user typed to filter calendars by)
+      // is reduced to a count -- the one field here that's plausibly
+      // free-ish text, everything else is a fixed enum/boolean/HH:mm time.
       const r = isRecord(result) ? result : {}
-      return typeof r.error === 'string' ? { error: true } : r
+      if (typeof r.error === 'string') return { error: true }
+      if (r.configured !== true) return { configured: false }
+      const dailyReview = isRecord(r.dailyReview) ? r.dailyReview : {}
+      const newsBriefing = isRecord(r.newsBriefing) ? r.newsBriefing : {}
+      return {
+        configured: true,
+        ...pick(r, [
+          'timezone',
+          'widgetStyle',
+          'defaultMood',
+          'hideWidgetContent',
+          'notificationsEnabled',
+          'planningPromptTime',
+          'quietHoursStart',
+          'quietHoursEnd',
+        ]),
+        calendarFilterCount: arrayCount(r.calendarFilter),
+        dailyReview: {
+          ...pick(dailyReview, ['enabled', 'time', 'includeReflection']),
+          dayCount: arrayCount(dailyReview.days),
+        },
+        newsBriefing: {
+          ...pick(newsBriefing, ['enabled', 'localTime']),
+          dayCount: arrayCount(newsBriefing.days),
+        },
+      }
     }
 
     case AGENT_TOOL_NAMES.getReviewHistory: {
@@ -236,13 +313,16 @@ function sanitizeResult(toolName: string, result: unknown): Record<string, unkno
 }
 
 /** The sanitization boundary itself: raw ToolDispatchState.dispatchedTools
- * -> a client-safe FounderDebugTrace. This is the ONLY function that should
+ * (agent-cloud-contract.ts; accepted here as the structurally-compatible
+ * FounderDebugInputToolCall[] rather than that type by name, so this
+ * module never imports back from agent-cloud-contract.ts) -> a
+ * client-safe FounderDebugTrace. This is the ONLY function that should
  * ever turn `dispatchedTools` into something sent over the wire -- nothing
  * else in agent-cloud-chat/index.ts or agent-cloud-contract.ts should
  * forward dispatchedTools' raw args/result to a client directly. */
 export function buildFounderDebugTrace(
   trace: AgentTurnTrace,
-  dispatchedTools: ToolDispatchState['dispatchedTools'],
+  dispatchedTools: FounderDebugInputToolCall[],
 ): FounderDebugTrace {
   return {
     ...trace,

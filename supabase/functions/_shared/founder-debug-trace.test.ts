@@ -1,5 +1,8 @@
-import { buildFounderDebugTrace } from './founder-debug-trace.ts'
-import type { AgentTurnTrace, ToolDispatchState } from './agent-cloud-contract.ts'
+import {
+  type AgentTurnTrace,
+  buildFounderDebugTrace,
+  type FounderDebugInputToolCall,
+} from './founder-debug-trace.ts'
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
@@ -11,9 +14,7 @@ const trace: AgentTurnTrace = {
   latencyMs: 100,
 }
 
-function dispatched(
-  entries: ToolDispatchState['dispatchedTools'],
-): ToolDispatchState['dispatchedTools'] {
+function dispatched(entries: FounderDebugInputToolCall[]): FounderDebugInputToolCall[] {
   return entries
 }
 
@@ -138,6 +139,71 @@ Deno.test('buildFounderDebugTrace never emits full titles from search_schedules/
   assert(!JSON.stringify(dayContextCall.result).includes('민감한'))
   assert(dayContextCall.result!.completedCount === 1)
   assert(dayContextCall.result!.incompleteCount === 1)
+})
+
+// D2-1 (second-pass review): get_routine_preferences used to pass
+// preferencesDto(row) through raw, which made this sanitizer's safety
+// depend on every FUTURE field preferences-contract.ts might ever add --
+// a real violation of the module's own default-deny invariant, not just a
+// hypothetical one. This injects a deliberately sensitive/unexpected
+// field a future preferencesDto() change might plausibly add, and proves
+// it can never reach the serialized trace regardless of what the real
+// handler actually returns.
+Deno.test('buildFounderDebugTrace get_routine_preferences never passes an unexpected/sensitive field through', () => {
+  const built = buildFounderDebugTrace(
+    trace,
+    dispatched([{
+      name: 'get_routine_preferences',
+      args: {},
+      result: {
+        configured: true,
+        timezone: 'Asia/Seoul',
+        widgetStyle: 'nextTodo',
+        defaultMood: 'focus',
+        hideWidgetContent: false,
+        notificationsEnabled: true,
+        planningPromptTime: '08:00',
+        quietHoursStart: null,
+        quietHoursEnd: null,
+        calendarFilter: ['업무용 캘린더', '개인 일정 - 민감함'],
+        dailyReview: { enabled: true, time: '21:00', days: ['MO', 'TU'], includeReflection: true },
+        newsBriefing: { enabled: false, localTime: null, days: [] },
+        // Not a real preferencesDto() field today -- stands in for
+        // whatever narrative/private field a future change might add.
+        internalDebugNote: '이건 절대 노출되면 안 되는 내부 메모',
+      },
+    }]),
+  )
+  const call = built.toolCalls[0]
+  const serialized = JSON.stringify(call.result)
+  assert(!serialized.includes('internalDebugNote'))
+  assert(!serialized.includes('절대 노출되면'))
+  // calendarFilter: raw filter strings must never appear -- count-only.
+  assert(!serialized.includes('calendarFilter"'))
+  assert(!serialized.includes('업무용 캘린더'))
+  assert(!serialized.includes('개인 일정'))
+  assert(call.result!.calendarFilterCount === 2)
+  // The deliberately-kept structural fields are still present.
+  assert(call.result!.configured === true)
+  assert(call.result!.timezone === 'Asia/Seoul')
+  assert(call.result!.notificationsEnabled === true)
+  const dailyReview = call.result!.dailyReview as Record<string, unknown>
+  assert(dailyReview.enabled === true)
+  assert(dailyReview.time === '21:00')
+  assert(dailyReview.includeReflection === true)
+  assert(dailyReview.dayCount === 2)
+  assert(!('days' in dailyReview))
+  const newsBriefing = call.result!.newsBriefing as Record<string, unknown>
+  assert(newsBriefing.enabled === false)
+  assert(newsBriefing.dayCount === 0)
+})
+
+Deno.test('buildFounderDebugTrace get_routine_preferences reports configured:false as-is (no row exists)', () => {
+  const built = buildFounderDebugTrace(
+    trace,
+    dispatched([{ name: 'get_routine_preferences', args: {}, result: { configured: false } }]),
+  )
+  assert(JSON.stringify(built.toolCalls[0].result) === JSON.stringify({ configured: false }))
 })
 
 Deno.test('buildFounderDebugTrace never emits a raw clarification question/reason, only lengths', () => {

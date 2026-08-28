@@ -1,6 +1,5 @@
 import {
   AGENT_TOOL_NAMES,
-  type AgentTurnTrace,
   ALLOWED_OPENROUTER_MODELS,
   buildDonePayload,
   cloudAgentTools,
@@ -15,6 +14,11 @@ import {
   resolveRateLimitPerHour,
   timeOn,
 } from './agent-cloud-contract.ts'
+// AgentTurnTrace is owned by founder-debug-trace.ts (second-pass review:
+// agent-cloud-contract.ts only re-imports it, never defines it) --
+// imported from its actual owner here too, not through
+// agent-cloud-contract.ts's re-import.
+import type { AgentTurnTrace } from './founder-debug-trace.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 
 function assert(condition: unknown): asserts condition {
