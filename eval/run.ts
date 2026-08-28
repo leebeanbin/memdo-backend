@@ -31,6 +31,36 @@ type CaseResult = {
  * other error still propagates and fails the run outright. */
 export class RateLimitedError extends Error {}
 
+/** Thrown whenever the stream doesn't produce a trustworthy tool-call trace:
+ * a `done` line missing `debugTrace.toolCalls` entirely, `toolCalls` not an
+ * array, an entry in it that isn't a valid `{name: string, args}` shape, or
+ * the stream reaching EOF without any valid `done` line at all -- i.e. the
+ * backend didn't honor `debug: true`, its shape changed underneath this
+ * runner, or the response was truncated. This must never be papered over
+ * with a silent `?? []` fallback: that previously made every fixture grade
+ * as "no tool called" (regression: dispatchedTools was removed from the
+ * wire payload but run.ts kept reading it), which computed a false
+ * evalScore of 0 for every model rather than failing the run. An
+ * *explicitly present* `toolCalls: []` is a legitimate "no tool was
+ * called" result and does not throw -- only absence/malformation does.
+ * Not caught anywhere in this file, so it propagates through runEval() the
+ * same as any other non-RateLimitedError and aborts the run outright. */
+export class MissingDebugTraceError extends Error {}
+
+/** Minimal shape check for one debugTrace.toolCalls entry -- deliberately
+ * not a duplicate of the backend sanitizer's contract (founder-debug-trace.ts
+ * owns what `args` actually contains per tool). This only guards what
+ * grade.ts itself dereferences (`name`, `args`), so a malformed entry fails
+ * the run instead of silently becoming a bogus DispatchedTool. */
+function isValidDebugToolCallEntry(entry: unknown): entry is DispatchedTool {
+  return (
+    typeof entry === 'object' &&
+    entry !== null &&
+    typeof (entry as Record<string, unknown>).name === 'string' &&
+    'args' in (entry as Record<string, unknown>)
+  )
+}
+
 export type EvalReport = {
   model: string
   fixtureCount: number
@@ -87,8 +117,15 @@ async function loadFixtures(dir: string): Promise<EvalFixture[]> {
  * parses its NDJSON response into dispatchedTools + the concatenated
  * assistant text. No history -- every fixture is evaluated as a fresh
  * conversation, matching the corpus README's "paste each input in, one at a
- * time, in a fresh conversation" manual-run instructions. */
-async function runFixture(
+ * time, in a fresh conversation" manual-run instructions.
+ *
+ * Sends `debug: true` and reads dispatchedTools from the resulting
+ * `debugTrace.toolCalls` (D2's founder debug trace) rather than a
+ * dedicated eval field -- debugTrace's sanitized `{name, args}` shape is
+ * already exactly what grade.ts needs (it never reads `.result` or any
+ * raw/narrative field), so this reuses the one reviewed, already-shipped
+ * sanitization boundary instead of adding a second one. */
+export async function runFixture(
   fixture: EvalFixture,
   opts: { baseUrl: string; publishableKey: string; accessToken: string; model: string },
 ): Promise<{ dispatchedTools: DispatchedTool[]; assistantText: string }> {
@@ -99,7 +136,7 @@ async function runFixture(
       apikey: opts.publishableKey,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ message: fixture.input, history: [], model: opts.model }),
+    body: JSON.stringify({ message: fixture.input, history: [], model: opts.model, debug: true }),
   })
   if (response.status === 429) {
     throw new RateLimitedError(`agent-cloud-chat 429: ${await response.text().catch(() => '')}`)
@@ -110,6 +147,7 @@ async function runFixture(
 
   let assistantText = ''
   let dispatchedTools: DispatchedTool[] = []
+  let sawValidDone = false
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -122,9 +160,32 @@ async function runFixture(
     for (const line of lines) {
       if (!line.trim()) continue
       const parsed = JSON.parse(line)
+      if (typeof parsed.error === 'string') {
+        throw new Error(
+          `agent-cloud-chat streamed an error for fixture "${fixture.id}": ${parsed.error}`,
+        )
+      }
       if (typeof parsed.delta === 'string') assistantText += parsed.delta
-      if (parsed.done) dispatchedTools = parsed.dispatchedTools ?? []
+      if (parsed.done) {
+        const toolCalls = parsed.debugTrace?.toolCalls
+        if (!Array.isArray(toolCalls) || !toolCalls.every(isValidDebugToolCallEntry)) {
+          throw new MissingDebugTraceError(
+            `agent-cloud-chat done payload for fixture "${fixture.id}" is missing a valid ` +
+              `debugTrace.toolCalls (debug: true was sent but the response didn't honor it, ` +
+              `its shape changed, or an entry is malformed) -- refusing to grade this as ` +
+              `"no tool called".`,
+          )
+        }
+        dispatchedTools = toolCalls
+        sawValidDone = true
+      }
     }
+  }
+  if (!sawValidDone) {
+    throw new MissingDebugTraceError(
+      `agent-cloud-chat stream for fixture "${fixture.id}" ended without a valid done payload ` +
+        `(no debugTrace.toolCalls observed) -- refusing to grade this as "no tool called".`,
+    )
   }
   return { dispatchedTools, assistantText }
 }
