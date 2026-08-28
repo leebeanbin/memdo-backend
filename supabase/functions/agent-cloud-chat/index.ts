@@ -1,25 +1,27 @@
 import { AGENT_WORKFLOW_NAME, type AgentAuditResultKind } from '../_shared/agent-audit-contract.ts'
 import {
-  accumulatedToolCallsArray,
-  addAgentUsage,
-  type AgentUsage,
-  applyStreamChunk,
   buildDonePayload,
   chatRequestSchema,
   cloudAgentTools,
   DEFAULT_OPENROUTER_MODEL,
   dispatchToolCall,
   MAX_TOOL_ITERATIONS,
-  newStreamAccumulator,
   newToolDispatchState,
   OPENROUTER_CHAT_URL,
-  parseStreamLine,
   resolveDate,
   resolveRateLimitPerHour,
-  type StreamAccumulator,
   systemPrompt,
 } from '../_shared/agent-cloud-contract.ts'
 import { OPENROUTER_PROVIDER } from '../_shared/agent-key-contract.ts'
+import {
+  accumulatedToolCallsArray,
+  addAgentUsage,
+  type AgentUsage,
+  applyStreamChunk,
+  newStreamAccumulator,
+  parseStreamLine,
+  type StreamAccumulator,
+} from '../_shared/agent-stream-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
 import { apiError, withApi } from '../_shared/http.ts'
 
@@ -228,11 +230,15 @@ export default {
         // agent_audit_log instead) so the founder trace (D2, AgentTurnTrace)
         // reflects this turn's own duration, not observability overhead.
         const donePayload = () =>
-          buildDonePayload(dispatchState, {
-            requestedModel: model,
-            resolvedModel: lastResolvedModel,
-            latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-          })
+          buildDonePayload(
+            dispatchState,
+            {
+              requestedModel: model,
+              resolvedModel: lastResolvedModel,
+              latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+            },
+            parsed.data.debug === true,
+          )
 
         const close = async (resultKind: AgentAuditResultKind) => {
           // Snapshotted before either DB write below runs, so it measures

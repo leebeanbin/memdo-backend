@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { AGENT_TOOL_NAMES, parseAgentToolCall } from './agent-tool-contract.ts'
 import { type ConflictCandidate, findConflict as findIntervalConflict } from './conflict-service.ts'
+import { buildFounderDebugTrace, type FounderDebugTrace } from './founder-debug-trace.ts'
 import { freeExtentsInWindow, freeSlotsInWindow } from './free-slot-service.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
@@ -86,6 +87,15 @@ export const chatRequestSchema = z.object({
     content: z.string().max(4000),
   })).max(40).default([]),
   model: z.enum(ALLOWED_OPENROUTER_MODELS).nullable().optional(),
+  // Founder/developer opt-in for the sanitized per-turn debug trace (D2) --
+  // false/absent (a Release client that doesn't know this field exists)
+  // gets no trace at all. Self-declared, not identity-gated: unlike D3's
+  // experimental-model eligibility (a real product-policy/cost boundary),
+  // the trace this unlocks is already sanitized (founder-debug-trace.ts)
+  // and scoped to the requesting user's own turn -- there is nothing a
+  // dishonest client gains by setting this beyond seeing its own
+  // already-non-sensitive request's own model/timing/tool-shape summary.
+  debug: z.boolean().optional(),
 })
 
 export type CloudAgentTurn = z.infer<typeof chatRequestSchema>['history'][number]
@@ -811,9 +821,21 @@ export function newToolDispatchState(): ToolDispatchState {
  * donePayload() call sites in index.ts (not inside close(), which runs
  * after this and serves the audit log instead) so both share one
  * assembly point via buildDonePayload, the same reason dispatchedTools
- * already did. No sensitive values pass through here: tool args/results
- * are domain data (dates, titles, durations) with no credentials --
- * confirmed by inspection, not asserted. */
+ * already did.
+ *
+ * Correction (second-pass review): an earlier version of this comment
+ * claimed tool args/results were safe to expose as-is because they're
+ * "domain data (dates, titles, durations) with no credentials." That is
+ * true for credentials but was never the right bar -- titles, notes,
+ * written reflections, and clarification questions are user-authored
+ * private content, not secrets, and both matter. AgentTurnTrace itself
+ * (this type) carries no tool data at all, only model/timing metadata, so
+ * it has nothing to redact. The actual tool args/results sanitization
+ * boundary is buildFounderDebugTrace (founder-debug-trace.ts) -- see that
+ * module's doc comment for the real contract. This type is only ever sent
+ * to a client wrapped in a FounderDebugTrace, and only when the client
+ * opted in (chatRequestSchema's `debug` field) -- see buildDonePayload's
+ * `includeDebugTrace` parameter. */
 export type AgentTurnTrace = {
   requestedModel: string
   resolvedModel: string | null
@@ -829,7 +851,16 @@ export type AgentTurnTrace = {
  * function (a field added to ToolDispatchState can't end up wired into one
  * and silently missing from the other) and so the exact key set is
  * unit-testable against iOS's DTOs without a live HTTP call. */
-export function buildDonePayload(state: ToolDispatchState, trace: AgentTurnTrace): {
+export function buildDonePayload(
+  state: ToolDispatchState,
+  trace: AgentTurnTrace,
+  // false by default (a Release client that doesn't know this flag exists
+  // gets no trace at all, not an accidental raw one) -- true only for a
+  // client that explicitly opted in via chatRequestSchema's `debug` field.
+  // See founder-debug-trace.ts's module doc comment for why this can never
+  // be raw ToolDispatchState.dispatchedTools, debug opt-in or not.
+  includeDebugTrace: boolean = false,
+): {
   done: true
   proposedSchedule:
     | (ProposedScheduleArgs & {
@@ -842,18 +873,24 @@ export function buildDonePayload(state: ToolDispatchState, trace: AgentTurnTrace
   proposedRoutineUpdate: ToolDispatchState['proposedRoutineUpdate']
   proposedReviewAction: ToolDispatchState['proposedReviewAction']
   clarificationRequest: ToolDispatchState['clarificationRequest']
-  dispatchedTools: ToolDispatchState['dispatchedTools']
   // Projection of dispatchedTools' names, not a separately tracked list --
   // lets iOS tell FIND_FREE_SLOTS/SEARCH_SCHEDULES apart from ANSWER
   // (classifyAgentIntent, AgentIntent.swift) without needing a dynamic-JSON
   // Decodable wrapper just to read tool names out of dispatchedTools' args.
+  // Names only, never args/results -- always safe, always present,
+  // unrelated to the debug opt-in below.
   toolNames: string[]
-  trace: AgentTurnTrace
+  // Founder/developer-only, sanitized (founder-debug-trace.ts), and only
+  // present at all when the client opted in -- never raw
+  // ToolDispatchState.dispatchedTools.
+  debugTrace?: FounderDebugTrace
 } {
   return {
     done: true,
-    dispatchedTools: state.dispatchedTools,
     toolNames: state.dispatchedTools.map((t) => t.name),
+    ...(includeDebugTrace
+      ? { debugTrace: buildFounderDebugTrace(trace, state.dispatchedTools) }
+      : {}),
     proposedSchedule: state.proposedSchedule
       ? {
         ...state.proposedSchedule,
@@ -865,7 +902,6 @@ export function buildDonePayload(state: ToolDispatchState, trace: AgentTurnTrace
     proposedRoutineUpdate: state.proposedRoutineUpdate,
     proposedReviewAction: state.proposedReviewAction,
     clarificationRequest: state.clarificationRequest,
-    trace,
   }
 }
 
@@ -1063,149 +1099,4 @@ export async function dispatchToolCall(
   const result = await handler(supabase, parsed.args, state, today)
   entry.result = result
   return result
-}
-
-// ── SSE stream parsing/accumulation (pure -- the actual fetch/reader loop
-// lives in index.ts, this is just the part worth unit-testing in isolation)
-//
-// OpenRouter proxies OpenAI's streaming format regardless of the underlying
-// model: content and tool_calls never appear in the same turn, and
-// tool_calls arrive as index-keyed deltas (id/name/arguments arrive
-// separately and must be concatenated) rather than one complete object.
-
-export type StreamToolCallDelta = {
-  index: number
-  id?: string
-  name?: string
-  argumentsChunk?: string
-}
-
-export type StreamChunk = {
-  content?: string
-  toolCalls?: StreamToolCallDelta[]
-  finishReason?: string | null
-  usage?: AgentUsage
-  // OpenRouter's chatcmpl-... completion id, present on every chunk of one
-  // completion (an id read from stream data, not an HTTP request-
-  // correlation id).
-  id?: string
-  // The actual underlying model OpenRouter routed this completion to --
-  // only meaningfully different from the requested model id for an
-  // auto-router alias (e.g. a future `openrouter/free` entry, D3). Read
-  // for the founder debug trace (D2); previously present on the wire and
-  // silently discarded.
-  model?: string
-}
-
-export type AgentUsage = {
-  promptTokens: number
-  completionTokens: number
-  costUsd: number
-}
-
-/** Parses one raw SSE line ("data: {...}") into a normalized chunk. Returns
- * null for the "[DONE]" terminator, blank lines, or anything with no content,
- * tool call, finish reason, or final usage worth acting on. */
-export function parseStreamLine(rawLine: string): StreamChunk | null {
-  const trimmed = rawLine.trim()
-  if (!trimmed.startsWith('data:')) return null
-  const payload = trimmed.slice(5).trim()
-  if (payload === '' || payload === '[DONE]') return null
-
-  let parsed: any
-  try {
-    parsed = JSON.parse(payload)
-  } catch {
-    return null
-  }
-  const chunk: StreamChunk = {}
-  const delta = parsed?.choices?.[0]?.delta
-  if (typeof delta?.content === 'string' && delta.content.length > 0) {
-    chunk.content = delta.content
-  }
-  if (Array.isArray(delta?.tool_calls)) {
-    chunk.toolCalls = delta.tool_calls.map((tc: any) => ({
-      index: tc.index ?? 0,
-      id: tc.id,
-      name: tc.function?.name,
-      argumentsChunk: tc.function?.arguments,
-    }))
-  }
-  const finishReason = parsed.choices?.[0]?.finish_reason
-  if (finishReason) chunk.finishReason = finishReason
-  const usage = parsed?.usage
-  if (
-    usage && Number.isFinite(usage.prompt_tokens) &&
-    Number.isFinite(usage.completion_tokens) && Number.isFinite(usage.cost)
-  ) {
-    chunk.usage = {
-      promptTokens: Math.max(0, usage.prompt_tokens),
-      completionTokens: Math.max(0, usage.completion_tokens),
-      costUsd: Math.max(0, usage.cost),
-    }
-  }
-  if (typeof parsed.id === 'string' && parsed.id.length > 0) chunk.id = parsed.id
-  if (typeof parsed.model === 'string' && parsed.model.length > 0) chunk.model = parsed.model
-  return chunk.content || chunk.toolCalls || chunk.finishReason || chunk.usage || chunk.id ||
-      chunk.model
-    ? chunk
-    : null
-}
-
-export type AccumulatedToolCall = { id: string; name: string; arguments: string }
-
-export type StreamAccumulator = {
-  content: string
-  toolCalls: Map<number, AccumulatedToolCall>
-  usage: AgentUsage
-  // Last successfully observed OpenRouter completion id -- an id read from
-  // stream data, not an HTTP request-correlation id (see
-  // agent_audit_log.provider_completion_id's column comment).
-  providerCompletionId: string | null
-  // Last successfully observed resolved model id (StreamChunk.model's doc
-  // comment) -- read for the founder debug trace (D2), not persisted
-  // anywhere (agent_audit_log's `model` column is the *requested* model,
-  // untouched by this).
-  resolvedModel: string | null
-}
-
-export function newStreamAccumulator(): StreamAccumulator {
-  return {
-    content: '',
-    toolCalls: new Map(),
-    usage: { promptTokens: 0, completionTokens: 0, costUsd: 0 },
-    providerCompletionId: null,
-    resolvedModel: null,
-  }
-}
-
-export function applyStreamChunk(acc: StreamAccumulator, chunk: StreamChunk): void {
-  if (chunk.content) acc.content += chunk.content
-  for (const delta of chunk.toolCalls ?? []) {
-    const existing = acc.toolCalls.get(delta.index) ?? { id: '', name: '', arguments: '' }
-    if (delta.id) existing.id = delta.id
-    if (delta.name) existing.name = delta.name
-    if (delta.argumentsChunk) existing.arguments += delta.argumentsChunk
-    acc.toolCalls.set(delta.index, existing)
-  }
-  if (chunk.usage) acc.usage = chunk.usage
-  if (chunk.id) acc.providerCompletionId = chunk.id
-  if (chunk.model) acc.resolvedModel = chunk.model
-}
-
-export function addAgentUsage(total: AgentUsage, usage: AgentUsage): void {
-  total.promptTokens += usage.promptTokens
-  total.completionTokens += usage.completionTokens
-  total.costUsd += usage.costUsd
-}
-
-/** Reconstructs the tool_calls array shape the OpenAI/OpenRouter messages
- * format expects, so the accumulated turn can be pushed back into the
- * conversation the same way a non-streamed response's `choice` would be. */
-export function accumulatedToolCallsArray(
-  acc: StreamAccumulator,
-): Array<{ id: string; function: { name: string; arguments: string } }> {
-  return Array.from(acc.toolCalls.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([, tc]) => ({ id: tc.id, function: { name: tc.name, arguments: tc.arguments } }))
 }

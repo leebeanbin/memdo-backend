@@ -1,10 +1,7 @@
 import {
-  accumulatedToolCallsArray,
-  addAgentUsage,
   AGENT_TOOL_NAMES,
   type AgentTurnTrace,
   ALLOWED_OPENROUTER_MODELS,
-  applyStreamChunk,
   buildDonePayload,
   cloudAgentTools,
   DEFAULT_OPENROUTER_MODEL,
@@ -12,9 +9,7 @@ import {
   type ExistingScheduleRow,
   expandScope,
   findConflict,
-  newStreamAccumulator,
   newToolDispatchState,
-  parseStreamLine,
   resolveDate,
   resolveProposedInterval,
   resolveRateLimitPerHour,
@@ -165,121 +160,6 @@ Deno.test('findConflict excludes the item being updated from its own conflict ch
     today,
   )
   assert(conflict === null)
-})
-
-Deno.test('parseStreamLine ignores [DONE] and non-data lines', () => {
-  assert(parseStreamLine('data: [DONE]') === null)
-  assert(parseStreamLine('') === null)
-  assert(parseStreamLine(': keep-alive') === null)
-})
-
-Deno.test('parseStreamLine extracts a content delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"choices":[{"delta":{"content":"안녕"},"finish_reason":null}]}',
-  )
-  assert(chunk?.content === '안녕')
-  assert(chunk?.toolCalls === undefined)
-})
-
-Deno.test('parseStreamLine extracts a tool_call delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"propose_schedule","arguments":"{\\"tit"}}]},"finish_reason":null}]}',
-  )
-  assert(chunk?.toolCalls?.length === 1)
-  assert(chunk?.toolCalls?.[0].id === 'call_1')
-  assert(chunk?.toolCalls?.[0].name === 'propose_schedule')
-  assert(chunk?.toolCalls?.[0].argumentsChunk === '{"tit')
-})
-
-Deno.test('parseStreamLine extracts usage from the final chunk without a delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"choices":[],"usage":{"prompt_tokens":194,"completion_tokens":2,"total_tokens":196,"cost":0.00095}}',
-  )
-  assert(chunk?.usage?.promptTokens === 194)
-  assert(chunk?.usage?.completionTokens === 2)
-  assert(chunk?.usage?.costUsd === 0.00095)
-})
-
-Deno.test('parseStreamLine extracts id alongside a content delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"id":"chatcmpl-abc123","choices":[{"delta":{"content":"안녕"},"finish_reason":null}]}',
-  )
-  assert(chunk?.content === '안녕')
-  assert(chunk?.id === 'chatcmpl-abc123')
-})
-
-Deno.test('parseStreamLine extracts the resolved model (D2 founder trace)', () => {
-  const chunk = parseStreamLine(
-    'data: {"model":"nvidia/nemotron-3-super-120b-a12b:free","choices":[{"delta":{"content":"안녕"},"finish_reason":null}]}',
-  )
-  assert(chunk?.model === 'nvidia/nemotron-3-super-120b-a12b:free')
-})
-
-Deno.test('parseStreamLine returns a chunk for model alone, even with no content/tool_calls', () => {
-  const chunk = parseStreamLine('data: {"model":"openai/gpt-5.4-mini","choices":[]}')
-  assert(chunk?.model === 'openai/gpt-5.4-mini')
-})
-
-Deno.test('applyStreamChunk concatenates content across chunks', () => {
-  const acc = newStreamAccumulator()
-  applyStreamChunk(acc, { content: '안' })
-  applyStreamChunk(acc, { content: '녕' })
-  assert(acc.content === '안녕')
-})
-
-Deno.test('applyStreamChunk sets providerCompletionId and a later chunk without id does not clear it', () => {
-  const acc = newStreamAccumulator()
-  assert(acc.providerCompletionId === null)
-  applyStreamChunk(acc, { id: 'chatcmpl-abc123', content: '안' })
-  assert(acc.providerCompletionId === 'chatcmpl-abc123')
-  applyStreamChunk(acc, { content: '녕' })
-  assert(acc.providerCompletionId === 'chatcmpl-abc123')
-})
-
-Deno.test('applyStreamChunk sets resolvedModel and a later chunk without model does not clear it (D2)', () => {
-  const acc = newStreamAccumulator()
-  assert(acc.resolvedModel === null)
-  applyStreamChunk(acc, { model: 'nvidia/nemotron-3-super-120b-a12b:free', content: '안' })
-  assert(acc.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
-  applyStreamChunk(acc, { content: '녕' })
-  assert(acc.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
-})
-
-Deno.test('addAgentUsage totals every tool-loop request', () => {
-  const total = newStreamAccumulator().usage
-  addAgentUsage(total, { promptTokens: 10, completionTokens: 2, costUsd: 0.001 })
-  addAgentUsage(total, { promptTokens: 20, completionTokens: 3, costUsd: 0.002 })
-  assert(total.promptTokens === 30)
-  assert(total.completionTokens === 5)
-  assert(total.costUsd === 0.003)
-})
-
-Deno.test('applyStreamChunk accumulates a tool call split across many deltas', () => {
-  const acc = newStreamAccumulator()
-  applyStreamChunk(acc, { toolCalls: [{ index: 0, id: 'call_1', name: 'propose_schedule' }] })
-  applyStreamChunk(acc, { toolCalls: [{ index: 0, argumentsChunk: '{"title":' }] })
-  applyStreamChunk(acc, { toolCalls: [{ index: 0, argumentsChunk: '"점심"}' }] })
-
-  const calls = accumulatedToolCallsArray(acc)
-  assert(calls.length === 1)
-  assert(calls[0].id === 'call_1')
-  assert(calls[0].function.name === 'propose_schedule')
-  assert(calls[0].function.arguments === '{"title":"점심"}')
-  assert(JSON.parse(calls[0].function.arguments).title === '점심')
-})
-
-Deno.test('applyStreamChunk keeps multiple concurrent tool calls separate by index', () => {
-  const acc = newStreamAccumulator()
-  applyStreamChunk(acc, {
-    toolCalls: [
-      { index: 0, id: 'call_1', name: 'search_schedules' },
-      { index: 1, id: 'call_2', name: 'find_free_slots' },
-    ],
-  })
-  const calls = accumulatedToolCallsArray(acc)
-  assert(calls.length === 2)
-  assert(calls[0].function.name === 'search_schedules')
-  assert(calls[1].function.name === 'find_free_slots')
 })
 
 // ── dispatchToolCall: fake Supabase port covering the exact chain shapes
@@ -946,13 +826,15 @@ const IOS_STREAM_LINE_KEYS = [
   'clarificationRequest',
   'toolNames',
   'error',
-  // D2 founder trace additions:
-  'dispatchedTools',
-  'trace',
+  // D2 founder trace: a single opt-in-only field, never raw dispatchedTools
+  // (see founder-debug-trace.ts's module doc comment).
+  'debugTrace',
 ]
-// AgentTurnTraceDTO (ScheduleAPI.swift) -- same drift-check purpose as
-// IOS_STREAM_LINE_KEYS above.
-const IOS_TRACE_KEYS = ['requestedModel', 'resolvedModel', 'latencyMs']
+// AgentDebugTraceDTO (ScheduleAPI.swift) -- same drift-check purpose as
+// IOS_STREAM_LINE_KEYS above. requestedModel/resolvedModel/latencyMs mirror
+// AgentTurnTrace; toolCalls is FounderDebugTrace's own addition.
+const IOS_DEBUG_TRACE_KEYS = ['requestedModel', 'resolvedModel', 'latencyMs', 'toolCalls']
+const IOS_DEBUG_TOOL_CALL_KEYS = ['name', 'args', 'result']
 const IOS_PROPOSED_SCHEDULE_KEYS = [
   'title',
   'date',
@@ -996,7 +878,7 @@ const IOS_CLARIFICATION_REQUEST_KEYS = [
   'reason',
 ]
 
-Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares', () => {
+Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares (no debug trace by default)', () => {
   const state = newToolDispatchState()
   const payload = buildDonePayload(state, fakeTrace)
   // Superset is fine (Swift Decodable ignores unknown keys by default) --
@@ -1011,17 +893,44 @@ Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineD
       'proposedReviewAction',
       'clarificationRequest',
       'toolNames',
-      'dispatchedTools',
-      'trace',
     ]
   ) {
     assert(key in payload)
     assert(IOS_STREAM_LINE_KEYS.includes(key))
   }
-  for (const key of ['requestedModel', 'resolvedModel', 'latencyMs']) {
-    assert(key in payload.trace)
-    assert(IOS_TRACE_KEYS.includes(key))
+  // includeDebugTrace defaults to false -- a Release client (or any caller
+  // not explicitly opting in) must never receive this key at all.
+  assert(!('debugTrace' in payload))
+})
+
+Deno.test('buildDonePayload includes a sanitized debugTrace only when includeDebugTrace is true', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: '2026-08-16', durationMinutes: 60 },
+    state,
+    dispatchToday,
+  )
+  const trace: AgentTurnTrace = {
+    requestedModel: 'openai/gpt-5.4-mini',
+    resolvedModel: null,
+    latencyMs: 42,
   }
+
+  const withoutDebug = buildDonePayload(state, trace, false)
+  assert(!('debugTrace' in withoutDebug))
+
+  const withDebug = buildDonePayload(state, trace, true)
+  assert('debugTrace' in withDebug)
+  const debugTrace = withDebug.debugTrace!
+  assert(IOS_DEBUG_TRACE_KEYS.every((key) => key in debugTrace))
+  assert(debugTrace.requestedModel === 'openai/gpt-5.4-mini')
+  assert(debugTrace.latencyMs === 42)
+  assert(debugTrace.toolCalls.length === 1)
+  assert(
+    IOS_DEBUG_TOOL_CALL_KEYS.every((key) => key in debugTrace.toolCalls[0] || key === 'result'),
+  )
 })
 
 Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO field for field', async () => {
@@ -1229,7 +1138,7 @@ Deno.test('dispatchToolCall still records the call when the handler itself retur
   assert(state.dispatchedTools[0].name === AGENT_TOOL_NAMES.proposeScheduleUpdate)
 })
 
-Deno.test('buildDonePayload includes dispatchedTools', async () => {
+Deno.test("buildDonePayload's debugTrace.toolCalls carries a sanitized (not raw) projection", async () => {
   const state = newToolDispatchState()
   await dispatchToolCall(
     fakeSupabase([]),
@@ -1238,25 +1147,32 @@ Deno.test('buildDonePayload includes dispatchedTools', async () => {
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state, fakeTrace)
-  assert(payload.dispatchedTools.length === 1)
-  assert(payload.dispatchedTools[0].name === AGENT_TOOL_NAMES.searchSchedules)
+  const payload = buildDonePayload(state, fakeTrace, true)
+  const toolCalls = payload.debugTrace!.toolCalls
+  assert(toolCalls.length === 1)
+  assert(toolCalls[0].name === AGENT_TOOL_NAMES.searchSchedules)
+  // Sanitized args projection: from/to survive (structural, safe).
+  assert(toolCalls[0].args.from === '2026-08-16')
+  assert(toolCalls[0].args.to === '2026-08-16')
   // D2: result is populated by the time it reaches the payload (dispatchToolCall
-  // awaits the handler before returning, so buildDonePayload always sees it).
-  assert('result' in payload.dispatchedTools[0])
+  // awaits the handler before returning, so buildDonePayload always sees it) --
+  // sanitized to a count, never the raw items array with real titles.
+  assert('result' in toolCalls[0])
+  assert(toolCalls[0].result!.count === 0)
+  assert(!('items' in toolCalls[0].result!))
 })
 
-Deno.test('buildDonePayload includes the founder trace (D2), separate from dispatchedTools', async () => {
+Deno.test('buildDonePayload includes the founder trace (D2) inside debugTrace when opted in', async () => {
   const state = newToolDispatchState()
   const trace: AgentTurnTrace = {
     requestedModel: 'openrouter/free',
     resolvedModel: 'nvidia/nemotron-3-super-120b-a12b:free',
     latencyMs: 842,
   }
-  const payload = buildDonePayload(state, trace)
-  assert(payload.trace.requestedModel === 'openrouter/free')
-  assert(payload.trace.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
-  assert(payload.trace.latencyMs === 842)
+  const payload = buildDonePayload(state, trace, true)
+  assert(payload.debugTrace!.requestedModel === 'openrouter/free')
+  assert(payload.debugTrace!.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
+  assert(payload.debugTrace!.latencyMs === 842)
 })
 
 Deno.test('buildDonePayload.toolNames is a name-only projection of dispatchedTools, in order', async () => {
