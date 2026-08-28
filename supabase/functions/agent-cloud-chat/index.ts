@@ -340,6 +340,14 @@ export default {
             })
 
             for (const call of toolCalls) {
+              // Sent BEFORE the (possibly slow) handler runs -- the one real
+              // signal a client can use for a truthful, live "tool is
+              // executing" hint (D4), as opposed to inferring it from the
+              // terminal done payload's dispatchedTools after everything
+              // already happened. Carries only the tool name, no
+              // args/results -- those stay in the founder debug trace (D2),
+              // not this user-facing surface.
+              send({ toolCallStarted: call.function.name })
               const args = JSON.parse(call.function.arguments || '{}')
               const result = await dispatchToolCall(
                 context.supabase,
@@ -348,6 +356,15 @@ export default {
                 dispatchState,
                 today,
               )
+              // Sent immediately after the handler resolves -- second-pass
+              // review finding: toolCallStarted alone left the client's
+              // hint showing "tool is executing" for the whole gap between
+              // the handler actually finishing and the model's next visible
+              // token, which is a fake progress state, not a truthful one.
+              // Client clears its hint on this event; a following
+              // toolCallStarted (another call in the same turn) replaces it
+              // again, same as before.
+              send({ toolCallFinished: call.function.name })
               messages.push({
                 role: 'tool',
                 tool_call_id: call.id,
