@@ -1,6 +1,11 @@
 import { z } from 'zod'
 import { AGENT_TOOL_NAMES, parseAgentToolCall } from './agent-tool-contract.ts'
 import { type ConflictCandidate, findConflict as findIntervalConflict } from './conflict-service.ts'
+import {
+  type AgentTurnTrace,
+  buildFounderDebugTrace,
+  type FounderDebugTrace,
+} from './founder-debug-trace.ts'
 import { freeExtentsInWindow, freeSlotsInWindow } from './free-slot-service.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
@@ -86,6 +91,15 @@ export const chatRequestSchema = z.object({
     content: z.string().max(4000),
   })).max(40).default([]),
   model: z.enum(ALLOWED_OPENROUTER_MODELS).nullable().optional(),
+  // Founder/developer opt-in for the sanitized per-turn debug trace (D2) --
+  // false/absent (a Release client that doesn't know this field exists)
+  // gets no trace at all. Self-declared, not identity-gated: unlike D3's
+  // experimental-model eligibility (a real product-policy/cost boundary),
+  // the trace this unlocks is already sanitized (founder-debug-trace.ts)
+  // and scoped to the requesting user's own turn -- there is nothing a
+  // dishonest client gains by setting this beyond seeing its own
+  // already-non-sensitive request's own model/timing/tool-shape summary.
+  debug: z.boolean().optional(),
 })
 
 export type CloudAgentTurn = z.infer<typeof chatRequestSchema>['history'][number]
@@ -772,8 +786,17 @@ export type ToolDispatchState = {
    * which happens to be the same underlying data. Named `dispatchedTools`
    * rather than `toolCalls` to avoid colliding with the unrelated
    * `toolCalls` concept in agent-cloud-chat/index.ts's own stream-delta
-   * accumulator (AccumulatedToolCall). */
-  dispatchedTools: { name: string; args: unknown }[]
+   * accumulator (AccumulatedToolCall).
+   *
+   * `result` is set after the handler resolves (dispatchToolCall mutates
+   * the same pushed entry in place) -- absent means the handler never
+   * actually ran to completion for this call, which parseAgentToolCall's
+   * rejection path is the only way to reach today. This is the founder
+   * debug trace's (D2) data source: it and the `trace` field returned by
+   * buildDonePayload are per-turn, in-memory only, and deliberately kept
+   * separate from agent_audit_log (index.ts's own persisted execution
+   * observability) -- see AgentTurnTrace's doc comment. */
+  dispatchedTools: { name: string; args: unknown; result?: unknown }[]
 }
 
 export function newToolDispatchState(): ToolDispatchState {
@@ -798,7 +821,16 @@ export function newToolDispatchState(): ToolDispatchState {
  * function (a field added to ToolDispatchState can't end up wired into one
  * and silently missing from the other) and so the exact key set is
  * unit-testable against iOS's DTOs without a live HTTP call. */
-export function buildDonePayload(state: ToolDispatchState): {
+export function buildDonePayload(
+  state: ToolDispatchState,
+  trace: AgentTurnTrace,
+  // false by default (a Release client that doesn't know this flag exists
+  // gets no trace at all, not an accidental raw one) -- true only for a
+  // client that explicitly opted in via chatRequestSchema's `debug` field.
+  // See founder-debug-trace.ts's module doc comment for why this can never
+  // be raw ToolDispatchState.dispatchedTools, debug opt-in or not.
+  includeDebugTrace: boolean = false,
+): {
   done: true
   proposedSchedule:
     | (ProposedScheduleArgs & {
@@ -811,17 +843,24 @@ export function buildDonePayload(state: ToolDispatchState): {
   proposedRoutineUpdate: ToolDispatchState['proposedRoutineUpdate']
   proposedReviewAction: ToolDispatchState['proposedReviewAction']
   clarificationRequest: ToolDispatchState['clarificationRequest']
-  dispatchedTools: ToolDispatchState['dispatchedTools']
   // Projection of dispatchedTools' names, not a separately tracked list --
   // lets iOS tell FIND_FREE_SLOTS/SEARCH_SCHEDULES apart from ANSWER
   // (classifyAgentIntent, AgentIntent.swift) without needing a dynamic-JSON
   // Decodable wrapper just to read tool names out of dispatchedTools' args.
+  // Names only, never args/results -- always safe, always present,
+  // unrelated to the debug opt-in below.
   toolNames: string[]
+  // Founder/developer-only, sanitized (founder-debug-trace.ts), and only
+  // present at all when the client opted in -- never raw
+  // ToolDispatchState.dispatchedTools.
+  debugTrace?: FounderDebugTrace
 } {
   return {
     done: true,
-    dispatchedTools: state.dispatchedTools,
     toolNames: state.dispatchedTools.map((t) => t.name),
+    ...(includeDebugTrace
+      ? { debugTrace: buildFounderDebugTrace(trace, state.dispatchedTools) }
+      : {}),
     proposedSchedule: state.proposedSchedule
       ? {
         ...state.proposedSchedule,
@@ -1020,139 +1059,14 @@ export async function dispatchToolCall(
 
   // Pushed before the handler runs -- see ToolDispatchState.dispatchedTools'
   // doc comment for why this is a tool-selection trace, not a
-  // handler-success trace.
-  state.dispatchedTools.push({ name: toolName, args: parsed.args })
+  // handler-success trace. Kept as a reference (not re-looked-up by index)
+  // so `result` below always lands on this exact call's entry even if
+  // something else mutates the array shape in between.
+  const entry: ToolDispatchState['dispatchedTools'][number] = { name: toolName, args: parsed.args }
+  state.dispatchedTools.push(entry)
 
   const handler = toolHandlers[toolName]
-  return await handler(supabase, parsed.args, state, today)
-}
-
-// ── SSE stream parsing/accumulation (pure -- the actual fetch/reader loop
-// lives in index.ts, this is just the part worth unit-testing in isolation)
-//
-// OpenRouter proxies OpenAI's streaming format regardless of the underlying
-// model: content and tool_calls never appear in the same turn, and
-// tool_calls arrive as index-keyed deltas (id/name/arguments arrive
-// separately and must be concatenated) rather than one complete object.
-
-export type StreamToolCallDelta = {
-  index: number
-  id?: string
-  name?: string
-  argumentsChunk?: string
-}
-
-export type StreamChunk = {
-  content?: string
-  toolCalls?: StreamToolCallDelta[]
-  finishReason?: string | null
-  usage?: AgentUsage
-  // OpenRouter's chatcmpl-... completion id, present on every chunk of one
-  // completion (an id read from stream data, not an HTTP request-
-  // correlation id).
-  id?: string
-}
-
-export type AgentUsage = {
-  promptTokens: number
-  completionTokens: number
-  costUsd: number
-}
-
-/** Parses one raw SSE line ("data: {...}") into a normalized chunk. Returns
- * null for the "[DONE]" terminator, blank lines, or anything with no content,
- * tool call, finish reason, or final usage worth acting on. */
-export function parseStreamLine(rawLine: string): StreamChunk | null {
-  const trimmed = rawLine.trim()
-  if (!trimmed.startsWith('data:')) return null
-  const payload = trimmed.slice(5).trim()
-  if (payload === '' || payload === '[DONE]') return null
-
-  let parsed: any
-  try {
-    parsed = JSON.parse(payload)
-  } catch {
-    return null
-  }
-  const chunk: StreamChunk = {}
-  const delta = parsed?.choices?.[0]?.delta
-  if (typeof delta?.content === 'string' && delta.content.length > 0) {
-    chunk.content = delta.content
-  }
-  if (Array.isArray(delta?.tool_calls)) {
-    chunk.toolCalls = delta.tool_calls.map((tc: any) => ({
-      index: tc.index ?? 0,
-      id: tc.id,
-      name: tc.function?.name,
-      argumentsChunk: tc.function?.arguments,
-    }))
-  }
-  const finishReason = parsed.choices?.[0]?.finish_reason
-  if (finishReason) chunk.finishReason = finishReason
-  const usage = parsed?.usage
-  if (
-    usage && Number.isFinite(usage.prompt_tokens) &&
-    Number.isFinite(usage.completion_tokens) && Number.isFinite(usage.cost)
-  ) {
-    chunk.usage = {
-      promptTokens: Math.max(0, usage.prompt_tokens),
-      completionTokens: Math.max(0, usage.completion_tokens),
-      costUsd: Math.max(0, usage.cost),
-    }
-  }
-  if (typeof parsed.id === 'string' && parsed.id.length > 0) chunk.id = parsed.id
-  return chunk.content || chunk.toolCalls || chunk.finishReason || chunk.usage || chunk.id
-    ? chunk
-    : null
-}
-
-export type AccumulatedToolCall = { id: string; name: string; arguments: string }
-
-export type StreamAccumulator = {
-  content: string
-  toolCalls: Map<number, AccumulatedToolCall>
-  usage: AgentUsage
-  // Last successfully observed OpenRouter completion id -- an id read from
-  // stream data, not an HTTP request-correlation id (see
-  // agent_audit_log.provider_completion_id's column comment).
-  providerCompletionId: string | null
-}
-
-export function newStreamAccumulator(): StreamAccumulator {
-  return {
-    content: '',
-    toolCalls: new Map(),
-    usage: { promptTokens: 0, completionTokens: 0, costUsd: 0 },
-    providerCompletionId: null,
-  }
-}
-
-export function applyStreamChunk(acc: StreamAccumulator, chunk: StreamChunk): void {
-  if (chunk.content) acc.content += chunk.content
-  for (const delta of chunk.toolCalls ?? []) {
-    const existing = acc.toolCalls.get(delta.index) ?? { id: '', name: '', arguments: '' }
-    if (delta.id) existing.id = delta.id
-    if (delta.name) existing.name = delta.name
-    if (delta.argumentsChunk) existing.arguments += delta.argumentsChunk
-    acc.toolCalls.set(delta.index, existing)
-  }
-  if (chunk.usage) acc.usage = chunk.usage
-  if (chunk.id) acc.providerCompletionId = chunk.id
-}
-
-export function addAgentUsage(total: AgentUsage, usage: AgentUsage): void {
-  total.promptTokens += usage.promptTokens
-  total.completionTokens += usage.completionTokens
-  total.costUsd += usage.costUsd
-}
-
-/** Reconstructs the tool_calls array shape the OpenAI/OpenRouter messages
- * format expects, so the accumulated turn can be pushed back into the
- * conversation the same way a non-streamed response's `choice` would be. */
-export function accumulatedToolCallsArray(
-  acc: StreamAccumulator,
-): Array<{ id: string; function: { name: string; arguments: string } }> {
-  return Array.from(acc.toolCalls.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([, tc]) => ({ id: tc.id, function: { name: tc.name, arguments: tc.arguments } }))
+  const result = await handler(supabase, parsed.args, state, today)
+  entry.result = result
+  return result
 }

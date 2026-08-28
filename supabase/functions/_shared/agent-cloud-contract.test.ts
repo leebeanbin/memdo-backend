@@ -1,9 +1,6 @@
 import {
-  accumulatedToolCallsArray,
-  addAgentUsage,
   AGENT_TOOL_NAMES,
   ALLOWED_OPENROUTER_MODELS,
-  applyStreamChunk,
   buildDonePayload,
   cloudAgentTools,
   DEFAULT_OPENROUTER_MODEL,
@@ -11,14 +8,17 @@ import {
   type ExistingScheduleRow,
   expandScope,
   findConflict,
-  newStreamAccumulator,
   newToolDispatchState,
-  parseStreamLine,
   resolveDate,
   resolveProposedInterval,
   resolveRateLimitPerHour,
   timeOn,
 } from './agent-cloud-contract.ts'
+// AgentTurnTrace is owned by founder-debug-trace.ts (second-pass review:
+// agent-cloud-contract.ts only re-imports it, never defines it) --
+// imported from its actual owner here too, not through
+// agent-cloud-contract.ts's re-import.
+import type { AgentTurnTrace } from './founder-debug-trace.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 
 function assert(condition: unknown): asserts condition {
@@ -36,6 +36,15 @@ function localAt(hhmm: string): string {
 
 // Fixed reference point so date-relative tests don't depend on when they run.
 const today = new Date('2026-08-16T00:00:00Z')
+
+// Placeholder trace for buildDonePayload() calls that aren't testing the
+// trace fields themselves (see the dedicated 'buildDonePayload includes a
+// founder trace' tests below for those).
+const fakeTrace: AgentTurnTrace = {
+  requestedModel: 'test-model',
+  resolvedModel: null,
+  latencyMs: 0,
+}
 
 Deno.test('resolveDate handles today/tomorrow/explicit', () => {
   assert(resolveDate('today', today) === '2026-08-16')
@@ -155,100 +164,6 @@ Deno.test('findConflict excludes the item being updated from its own conflict ch
     today,
   )
   assert(conflict === null)
-})
-
-Deno.test('parseStreamLine ignores [DONE] and non-data lines', () => {
-  assert(parseStreamLine('data: [DONE]') === null)
-  assert(parseStreamLine('') === null)
-  assert(parseStreamLine(': keep-alive') === null)
-})
-
-Deno.test('parseStreamLine extracts a content delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"choices":[{"delta":{"content":"안녕"},"finish_reason":null}]}',
-  )
-  assert(chunk?.content === '안녕')
-  assert(chunk?.toolCalls === undefined)
-})
-
-Deno.test('parseStreamLine extracts a tool_call delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"propose_schedule","arguments":"{\\"tit"}}]},"finish_reason":null}]}',
-  )
-  assert(chunk?.toolCalls?.length === 1)
-  assert(chunk?.toolCalls?.[0].id === 'call_1')
-  assert(chunk?.toolCalls?.[0].name === 'propose_schedule')
-  assert(chunk?.toolCalls?.[0].argumentsChunk === '{"tit')
-})
-
-Deno.test('parseStreamLine extracts usage from the final chunk without a delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"choices":[],"usage":{"prompt_tokens":194,"completion_tokens":2,"total_tokens":196,"cost":0.00095}}',
-  )
-  assert(chunk?.usage?.promptTokens === 194)
-  assert(chunk?.usage?.completionTokens === 2)
-  assert(chunk?.usage?.costUsd === 0.00095)
-})
-
-Deno.test('parseStreamLine extracts id alongside a content delta', () => {
-  const chunk = parseStreamLine(
-    'data: {"id":"chatcmpl-abc123","choices":[{"delta":{"content":"안녕"},"finish_reason":null}]}',
-  )
-  assert(chunk?.content === '안녕')
-  assert(chunk?.id === 'chatcmpl-abc123')
-})
-
-Deno.test('applyStreamChunk concatenates content across chunks', () => {
-  const acc = newStreamAccumulator()
-  applyStreamChunk(acc, { content: '안' })
-  applyStreamChunk(acc, { content: '녕' })
-  assert(acc.content === '안녕')
-})
-
-Deno.test('applyStreamChunk sets providerCompletionId and a later chunk without id does not clear it', () => {
-  const acc = newStreamAccumulator()
-  assert(acc.providerCompletionId === null)
-  applyStreamChunk(acc, { id: 'chatcmpl-abc123', content: '안' })
-  assert(acc.providerCompletionId === 'chatcmpl-abc123')
-  applyStreamChunk(acc, { content: '녕' })
-  assert(acc.providerCompletionId === 'chatcmpl-abc123')
-})
-
-Deno.test('addAgentUsage totals every tool-loop request', () => {
-  const total = newStreamAccumulator().usage
-  addAgentUsage(total, { promptTokens: 10, completionTokens: 2, costUsd: 0.001 })
-  addAgentUsage(total, { promptTokens: 20, completionTokens: 3, costUsd: 0.002 })
-  assert(total.promptTokens === 30)
-  assert(total.completionTokens === 5)
-  assert(total.costUsd === 0.003)
-})
-
-Deno.test('applyStreamChunk accumulates a tool call split across many deltas', () => {
-  const acc = newStreamAccumulator()
-  applyStreamChunk(acc, { toolCalls: [{ index: 0, id: 'call_1', name: 'propose_schedule' }] })
-  applyStreamChunk(acc, { toolCalls: [{ index: 0, argumentsChunk: '{"title":' }] })
-  applyStreamChunk(acc, { toolCalls: [{ index: 0, argumentsChunk: '"점심"}' }] })
-
-  const calls = accumulatedToolCallsArray(acc)
-  assert(calls.length === 1)
-  assert(calls[0].id === 'call_1')
-  assert(calls[0].function.name === 'propose_schedule')
-  assert(calls[0].function.arguments === '{"title":"점심"}')
-  assert(JSON.parse(calls[0].function.arguments).title === '점심')
-})
-
-Deno.test('applyStreamChunk keeps multiple concurrent tool calls separate by index', () => {
-  const acc = newStreamAccumulator()
-  applyStreamChunk(acc, {
-    toolCalls: [
-      { index: 0, id: 'call_1', name: 'search_schedules' },
-      { index: 1, id: 'call_2', name: 'find_free_slots' },
-    ],
-  })
-  const calls = accumulatedToolCallsArray(acc)
-  assert(calls.length === 2)
-  assert(calls[0].function.name === 'search_schedules')
-  assert(calls[1].function.name === 'find_free_slots')
 })
 
 // ── dispatchToolCall: fake Supabase port covering the exact chain shapes
@@ -501,6 +416,15 @@ Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correc
     dispatchToday,
   )
   assert(typeof freeSlotsResult.slots[0] === 'string')
+
+  // D2: dispatchedTools' entries carry `result` after the handler resolves
+  // (mutated onto the same pushed entry, not looked up separately) -- the
+  // founder trace's data source.
+  assert(state.dispatchedTools.length === 2)
+  assert(state.dispatchedTools[0].name === 'search_schedules')
+  assert(state.dispatchedTools[0].result === searchResult)
+  assert(state.dispatchedTools[1].name === 'find_free_slots')
+  assert(state.dispatchedTools[1].result === freeSlotsResult)
 })
 
 Deno.test('find_free_slots with no durationMinutes answers an availability question, not a duration slice', async () => {
@@ -906,7 +830,15 @@ const IOS_STREAM_LINE_KEYS = [
   'clarificationRequest',
   'toolNames',
   'error',
+  // D2 founder trace: a single opt-in-only field, never raw dispatchedTools
+  // (see founder-debug-trace.ts's module doc comment).
+  'debugTrace',
 ]
+// AgentDebugTraceDTO (ScheduleAPI.swift) -- same drift-check purpose as
+// IOS_STREAM_LINE_KEYS above. requestedModel/resolvedModel/latencyMs mirror
+// AgentTurnTrace; toolCalls is FounderDebugTrace's own addition.
+const IOS_DEBUG_TRACE_KEYS = ['requestedModel', 'resolvedModel', 'latencyMs', 'toolCalls']
+const IOS_DEBUG_TOOL_CALL_KEYS = ['name', 'args', 'result']
 const IOS_PROPOSED_SCHEDULE_KEYS = [
   'title',
   'date',
@@ -950,9 +882,9 @@ const IOS_CLARIFICATION_REQUEST_KEYS = [
   'reason',
 ]
 
-Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares', () => {
+Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineDTO declares (no debug trace by default)', () => {
   const state = newToolDispatchState()
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   // Superset is fine (Swift Decodable ignores unknown keys by default) --
   // a key iOS DOES try to decode that's missing here would break the
   // client, so that direction must hold.
@@ -970,6 +902,39 @@ Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineD
     assert(key in payload)
     assert(IOS_STREAM_LINE_KEYS.includes(key))
   }
+  // includeDebugTrace defaults to false -- a Release client (or any caller
+  // not explicitly opting in) must never receive this key at all.
+  assert(!('debugTrace' in payload))
+})
+
+Deno.test('buildDonePayload includes a sanitized debugTrace only when includeDebugTrace is true', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: '2026-08-16', durationMinutes: 60 },
+    state,
+    dispatchToday,
+  )
+  const trace: AgentTurnTrace = {
+    requestedModel: 'openai/gpt-5.4-mini',
+    resolvedModel: null,
+    latencyMs: 42,
+  }
+
+  const withoutDebug = buildDonePayload(state, trace, false)
+  assert(!('debugTrace' in withoutDebug))
+
+  const withDebug = buildDonePayload(state, trace, true)
+  assert('debugTrace' in withDebug)
+  const debugTrace = withDebug.debugTrace!
+  assert(IOS_DEBUG_TRACE_KEYS.every((key) => key in debugTrace))
+  assert(debugTrace.requestedModel === 'openai/gpt-5.4-mini')
+  assert(debugTrace.latencyMs === 42)
+  assert(debugTrace.toolCalls.length === 1)
+  assert(
+    IOS_DEBUG_TOOL_CALL_KEYS.every((key) => key in debugTrace.toolCalls[0] || key === 'result'),
+  )
 })
 
 Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO field for field', async () => {
@@ -981,7 +946,7 @@ Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO fi
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedSchedule !== null)
   const actualKeys = Object.keys(payload.proposedSchedule!).sort()
   const expectedKeys = [...IOS_PROPOSED_SCHEDULE_KEYS].filter((k) => k !== 'note').sort()
@@ -1016,7 +981,7 @@ Deno.test('buildDonePayload.proposedScheduleUpdate matches CloudProposedSchedule
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedScheduleUpdate !== null)
   const actualKeys = Object.keys(payload.proposedScheduleUpdate!).sort()
   const expectedKeys = [...IOS_PROPOSED_SCHEDULE_UPDATE_KEYS].filter((k) =>
@@ -1049,7 +1014,7 @@ Deno.test('buildDonePayload.proposedRoutineUpdate matches CloudProposedRoutineUp
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedRoutineUpdate !== null)
   const actualKeys = Object.keys(payload.proposedRoutineUpdate!).sort()
   const expectedKeys = [...IOS_PROPOSED_ROUTINE_UPDATE_KEYS].sort()
@@ -1072,7 +1037,7 @@ Deno.test('buildDonePayload.proposedReviewAction matches CloudProposedReviewActi
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedReviewAction !== null)
   const actualKeys = Object.keys(payload.proposedReviewAction!).sort()
   const expectedKeys = [...IOS_PROPOSED_REVIEW_ACTION_KEYS].sort()
@@ -1095,7 +1060,7 @@ Deno.test('buildDonePayload.clarificationRequest matches CloudClarificationReque
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.clarificationRequest !== null)
   const actualKeys = Object.keys(payload.clarificationRequest!).sort()
   const expectedKeys = [...IOS_CLARIFICATION_REQUEST_KEYS].sort()
@@ -1177,7 +1142,7 @@ Deno.test('dispatchToolCall still records the call when the handler itself retur
   assert(state.dispatchedTools[0].name === AGENT_TOOL_NAMES.proposeScheduleUpdate)
 })
 
-Deno.test('buildDonePayload includes dispatchedTools', async () => {
+Deno.test("buildDonePayload's debugTrace.toolCalls carries a sanitized (not raw) projection", async () => {
   const state = newToolDispatchState()
   await dispatchToolCall(
     fakeSupabase([]),
@@ -1186,9 +1151,32 @@ Deno.test('buildDonePayload includes dispatchedTools', async () => {
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
-  assert(payload.dispatchedTools.length === 1)
-  assert(payload.dispatchedTools[0].name === AGENT_TOOL_NAMES.searchSchedules)
+  const payload = buildDonePayload(state, fakeTrace, true)
+  const toolCalls = payload.debugTrace!.toolCalls
+  assert(toolCalls.length === 1)
+  assert(toolCalls[0].name === AGENT_TOOL_NAMES.searchSchedules)
+  // Sanitized args projection: from/to survive (structural, safe).
+  assert(toolCalls[0].args.from === '2026-08-16')
+  assert(toolCalls[0].args.to === '2026-08-16')
+  // D2: result is populated by the time it reaches the payload (dispatchToolCall
+  // awaits the handler before returning, so buildDonePayload always sees it) --
+  // sanitized to a count, never the raw items array with real titles.
+  assert('result' in toolCalls[0])
+  assert(toolCalls[0].result!.count === 0)
+  assert(!('items' in toolCalls[0].result!))
+})
+
+Deno.test('buildDonePayload includes the founder trace (D2) inside debugTrace when opted in', async () => {
+  const state = newToolDispatchState()
+  const trace: AgentTurnTrace = {
+    requestedModel: 'openrouter/free',
+    resolvedModel: 'nvidia/nemotron-3-super-120b-a12b:free',
+    latencyMs: 842,
+  }
+  const payload = buildDonePayload(state, trace, true)
+  assert(payload.debugTrace!.requestedModel === 'openrouter/free')
+  assert(payload.debugTrace!.resolvedModel === 'nvidia/nemotron-3-super-120b-a12b:free')
+  assert(payload.debugTrace!.latencyMs === 842)
 })
 
 Deno.test('buildDonePayload.toolNames is a name-only projection of dispatchedTools, in order', async () => {
@@ -1207,7 +1195,7 @@ Deno.test('buildDonePayload.toolNames is a name-only projection of dispatchedToo
     state,
     dispatchToday,
   )
-  const payload = buildDonePayload(state)
+  const payload = buildDonePayload(state, fakeTrace)
   assert(payload.toolNames.length === 2)
   assert(payload.toolNames[0] === AGENT_TOOL_NAMES.searchSchedules)
   assert(payload.toolNames[1] === AGENT_TOOL_NAMES.findFreeSlots)
