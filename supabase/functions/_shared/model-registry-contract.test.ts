@@ -1,8 +1,10 @@
 import {
   classifyCostPerRequest,
   classifyLatencyMs,
+  isExperimentalModelSelectable,
   MODEL_REGISTRY,
   type ModelProfile,
+  reproducibleModelIds,
   selectableModelIds,
 } from './model-registry-contract.ts'
 
@@ -14,6 +16,7 @@ function profile(overrides: Partial<ModelProfile>): ModelProfile {
   return {
     id: 'test/model',
     supportsTools: true,
+    tier: 'recommended',
     latencyClass: null,
     costClass: null,
     evalScore: null,
@@ -42,6 +45,77 @@ Deno.test('selectableModelIds on the real MODEL_REGISTRY returns every seeded id
   const ids = selectableModelIds(MODEL_REGISTRY)
   assert(ids.length === MODEL_REGISTRY.length)
   for (const m of MODEL_REGISTRY) assert(ids.includes(m.id))
+})
+
+Deno.test('MODEL_REGISTRY has exactly one free-auto entry: openrouter/free', () => {
+  const freeAuto = MODEL_REGISTRY.filter((m) => m.tier === 'free-auto')
+  assert(freeAuto.length === 1)
+  assert(freeAuto[0].id === 'openrouter/free')
+  assert(freeAuto[0].evalScore === null)
+})
+
+Deno.test('reproducibleModelIds excludes tier free-auto but keeps every other selectable id', () => {
+  const registry: ModelProfile[] = [
+    profile({ id: 'recommended-model', tier: 'recommended' }),
+    profile({ id: 'free-auto-model', tier: 'free-auto' }),
+    profile({ id: 'validated-free-model', tier: 'validated-free' }),
+    profile({ id: 'experimental-model', tier: 'experimental' }),
+  ]
+  const ids = reproducibleModelIds(registry)
+  assert(ids.length === 3)
+  assert(!ids.includes('free-auto-model'))
+  assert(ids.includes('recommended-model'))
+  assert(ids.includes('validated-free-model'))
+  assert(ids.includes('experimental-model'))
+})
+
+Deno.test('reproducibleModelIds on the real MODEL_REGISTRY excludes openrouter/free only', () => {
+  const ids = reproducibleModelIds(MODEL_REGISTRY)
+  assert(!ids.includes('openrouter/free'))
+  assert(ids.length === selectableModelIds(MODEL_REGISTRY).length - 1)
+})
+
+Deno.test('isExperimentalModelSelectable: non-experimental tiers are always selectable, env or not', () => {
+  const registry: ModelProfile[] = [
+    profile({ id: 'recommended-model', tier: 'recommended' }),
+    profile({ id: 'free-auto-model', tier: 'free-auto' }),
+    profile({ id: 'validated-free-model', tier: 'validated-free' }),
+  ]
+  for (const id of ['recommended-model', 'free-auto-model', 'validated-free-model']) {
+    assert(isExperimentalModelSelectable('any-user', id, registry) === true)
+    assert(
+      isExperimentalModelSelectable('any-user', id, registry, {
+        experimentalModelsUserId: 'someone-else',
+      }) === true,
+    )
+  }
+})
+
+Deno.test('isExperimentalModelSelectable: experimental tier is rejected without a matching allowlisted user', () => {
+  const registry: ModelProfile[] = [profile({ id: 'experimental-model', tier: 'experimental' })]
+  assert(isExperimentalModelSelectable('user-a', 'experimental-model', registry) === false)
+  assert(
+    isExperimentalModelSelectable('user-a', 'experimental-model', registry, {
+      experimentalModelsUserId: 'user-b',
+    }) === false,
+  )
+})
+
+Deno.test('isExperimentalModelSelectable: experimental tier is allowed only for the exact allowlisted user', () => {
+  const registry: ModelProfile[] = [profile({ id: 'experimental-model', tier: 'experimental' })]
+  assert(
+    isExperimentalModelSelectable('user-a', 'experimental-model', registry, {
+      experimentalModelsUserId: 'user-a',
+    }) === true,
+  )
+})
+
+Deno.test('isExperimentalModelSelectable: an unknown model id is not treated as experimental-tier-restricted', () => {
+  // Not this function's job to validate the model exists at all --
+  // chatRequestSchema's z.enum already rejects an unknown id before this
+  // ever runs. An id with no matching profile falls through as selectable
+  // here rather than being silently treated as forbidden.
+  assert(isExperimentalModelSelectable('any-user', 'not-a-real-model', []) === true)
 })
 
 Deno.test('classifyLatencyMs boundary cases', () => {

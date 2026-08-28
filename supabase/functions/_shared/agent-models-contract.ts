@@ -3,6 +3,7 @@ import {
   type LatencyClass,
   MODEL_REGISTRY,
   type ModelProfile,
+  type ModelTier,
   selectableModelIds,
 } from './model-registry-contract.ts'
 
@@ -15,6 +16,7 @@ export type AgentModel = {
   promptPricePerM: number
   completionPricePerM: number
   contextLength: number
+  tier: ModelTier
   latencyClass: LatencyClass | null
   costClass: CostClass | null
   evalScore: number | null
@@ -64,6 +66,7 @@ export function agentModelsFromOpenRouter(
       promptPricePerM: prompt * 1_000_000,
       completionPricePerM: completion * 1_000_000,
       contextLength: row.context_length,
+      tier: profile.tier,
       latencyClass: profile.latencyClass,
       costClass: profile.costClass,
       evalScore: profile.evalScore,

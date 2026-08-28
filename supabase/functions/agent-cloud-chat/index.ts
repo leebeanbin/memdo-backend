@@ -24,6 +24,7 @@ import {
 } from '../_shared/agent-stream-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
 import { apiError, withApi } from '../_shared/http.ts'
+import { isExperimentalModelSelectable } from '../_shared/model-registry-contract.ts'
 
 type ChatMessage = {
   role: string
@@ -199,6 +200,17 @@ export default {
       { role: 'user', content: parsed.data.message },
     ]
     const model = parsed.data.model || Deno.env.get('OPENROUTER_MODEL') || DEFAULT_OPENROUTER_MODEL
+
+    // D3 second-pass review: tier 'experimental' models were UI-hidden but
+    // still backend-selectable (chatRequestSchema only gates on enabled/
+    // supportsTools). Every non-experimental model passes this unchanged.
+    if (
+      !isExperimentalModelSelectable(userId, model, undefined, {
+        experimentalModelsUserId: Deno.env.get('MEMDO_EXPERIMENTAL_MODELS_USER_ID'),
+      })
+    ) {
+      return apiError('INVALID_REQUEST', '아직 사용할 수 없는 모델이에요.', 400, currentRequestId)
+    }
 
     // Generated only after every preflight check above has passed --
     // everything before this point (method/body validation, rate limit,

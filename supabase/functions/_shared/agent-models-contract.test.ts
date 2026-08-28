@@ -9,6 +9,7 @@ function profile(overrides: Partial<ModelProfile>): ModelProfile {
   return {
     id: 'test/model',
     supportsTools: true,
+    tier: 'recommended',
     latencyClass: null,
     costClass: null,
     evalScore: null,
@@ -56,6 +57,30 @@ Deno.test('agentModelsFromOpenRouter filters unsupported models and converts per
   // stay null rather than some fabricated default.
   assert(models[0].latencyClass === null)
   assert(models[0].costClass === null)
+  assert(models[0].evalScore === null)
+  assert(models[0].tier === 'recommended')
+})
+
+Deno.test('agentModelsFromOpenRouter carries the free-auto tier through and never fabricates an evalScore for it', () => {
+  const registry: ModelProfile[] = [
+    profile({ id: 'openrouter/free', tier: 'free-auto' }),
+  ]
+  const models = agentModelsFromOpenRouter({
+    data: [
+      {
+        id: 'openrouter/free',
+        name: 'Free Models Router',
+        pricing: { prompt: '0', completion: '0' },
+        context_length: 200_000,
+        architecture: { input_modalities: ['text'], output_modalities: ['text'] },
+        supported_parameters: ['tools'],
+      },
+    ],
+  }, registry)
+
+  assert(models.length === 1)
+  assert(models[0].tier === 'free-auto')
+  assert(models[0].promptPricePerM === 0)
   assert(models[0].evalScore === null)
 })
 
