@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { AGENT_TOOL_NAMES, parseAgentToolCall } from './agent-tool-contract.ts'
 import { type ConflictCandidate, findConflict as findIntervalConflict } from './conflict-service.ts'
-import { freeSlotsInWindow } from './free-slot-service.ts'
+import { freeExtentsInWindow, freeSlotsInWindow } from './free-slot-service.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
 
@@ -123,7 +123,8 @@ export const cloudAgentTools = [
     type: 'function',
     function: {
       name: AGENT_TOOL_NAMES.findFreeSlots,
-      description: "Find open time blocks in the user's calendar.",
+      description:
+        "Find open time in the user's calendar. Two modes based on whether durationMinutes is given: a plain availability question ('언제 비어 있어?') with no explicit numeric duration returns the full free window; a request with an explicit numeric duration ('1시간 찾아줘') returns one candidate slot of that length. An activity name ALONE ('운동할 시간 찾아줘') is NOT a duration -- if the user names an activity but never states how long, call request_clarification and ask how much time they need instead of guessing or calling this tool with a made-up value.",
       parameters: {
         type: 'object',
         properties: {
@@ -131,14 +132,18 @@ export const cloudAgentTools = [
             type: 'string',
             description: "'today', 'tomorrow', 'this_week', or a specific yyyy-MM-dd",
           },
-          durationMinutes: { type: 'integer', description: 'Required free-slot length in minutes' },
+          durationMinutes: {
+            type: 'integer',
+            description:
+              'Free-slot length in minutes (e.g. 30, 60, 90), ONLY when the user states an explicit numeric duration. Omit entirely for a plain availability question -- omitting returns the full free window, never a guessed duration. An activity name by itself (e.g. "운동") is NOT evidence for any particular number here -- if a duration is genuinely needed but never stated, call request_clarification instead of inventing one.',
+          },
           windowStart: {
             type: 'string',
             description: 'Earliest start HH:mm, omit for no preference',
           },
           windowEnd: { type: 'string', description: 'Latest end HH:mm, omit for no preference' },
         },
-        required: ['scope', 'durationMinutes'],
+        required: ['scope'],
       },
     },
   },
@@ -302,7 +307,7 @@ export function systemPrompt(today: string): string {
     "You are Memdo's personal schedule assistant. Be concise, warm, and practical.",
     `Today's date is ${today}.`,
     'When the user wants to create, add, or make a new schedule or task, call propose_schedule -- do not just describe it in text, and do not claim you created it.',
-    'When the user asks to find free time or where to fit something, call find_free_slots.',
+    'When the user asks to find free time or where to fit something, call find_free_slots. Only pass durationMinutes when the user states an explicit numeric length ("1시간 찾아줘"); omit it entirely for a plain availability question ("언제 비어 있어?"). An activity name alone ("운동할 시간 찾아줘") is NOT a duration -- if the user names an activity but never says how long, call request_clarification and ask how much time they need instead of guessing.',
     'When the user asks about existing plans, or before proposing something new, call search_schedules to check first rather than guessing.',
     'When the user wants to complete, move, or delete an EXISTING schedule or task, first call search_schedules to find its real id, then call propose_schedule_update -- do not guess an id, and do not claim the change happened.',
     'When the user asks how a specific day went (not just what was on it), call get_day_context instead of search_schedules.',
@@ -539,7 +544,6 @@ async function findFreeSlots(
   args: { scope?: string; durationMinutes?: number; windowStart?: string; windowEnd?: string },
 ): Promise<unknown> {
   const dates = expandScope(args.scope ?? 'today')
-  const duration = Math.max(15, args.durationMinutes ?? 30) * 60_000
   const from = dates[0]
   const to = dates.at(-1) ?? dates[0]
 
@@ -551,16 +555,50 @@ async function findFreeSlots(
   }
   const busy = rows.filter((row) => row.start_at && row.end_at)
 
-  const lines: string[] = []
-  for (const date of dates) {
-    const dayBusy = busy
+  const dayBusyFor = (date: string) =>
+    busy
       .filter((row) => row.scheduled_date === date)
       .map((row) => ({ start: new Date(row.start_at!), end: new Date(row.end_at!) }))
 
+  // args.durationMinutes absent means "how free am I" (availability query),
+  // not "duration unspecified, guess one" -- never defaulted to 15/30/60
+  // here. See freeExtentsInWindow's doc comment for why this needs its own
+  // contract instead of overloading freeSlotsInWindow with e.g. duration=0.
+  if (args.durationMinutes === undefined) {
+    const lines: string[] = []
+    for (const date of dates) {
+      const windowStart = timeOn(date, args.windowStart) ?? timeOn(date, '08:00')!
+      const windowEnd = timeOn(date, args.windowEnd) ?? timeOn(date, '22:00')!
+      const extents = freeExtentsInWindow(dayBusyFor(date), windowStart, windowEnd)
+      if (extents.length === 0) continue
+      if (
+        extents.length === 1 &&
+        extents[0].start.getTime() === windowStart.getTime() &&
+        extents[0].end.getTime() === windowEnd.getTime()
+      ) {
+        // Deliberately no "등록된 일정이 없어서" causal claim -- `busy` (above)
+        // only looks at timed rows, so an untimed task can still exist on
+        // this date even when the whole timed window is free. Stating only
+        // the computed fact (the window itself) stays true regardless of
+        // untimed items, without needing to separately track their
+        // existence just to phrase this one sentence.
+        lines.push(`${date}: ${formatSlot(windowStart, windowEnd)} 전체가 비어 있어요.`)
+      } else {
+        lines.push(
+          `${date}: ${extents.map((e) => formatSlot(e.start, e.end)).join(', ')} 비어 있어요.`,
+        )
+      }
+    }
+    return { slots: lines }
+  }
+
+  const duration = Math.max(15, args.durationMinutes) * 60_000
+  const lines: string[] = []
+  for (const date of dates) {
     const windowStart = timeOn(date, args.windowStart) ?? timeOn(date, '08:00')!
     const windowEnd = timeOn(date, args.windowEnd) ?? timeOn(date, '22:00')!
 
-    const candidates = freeSlotsInWindow(dayBusy, windowStart, windowEnd, duration)
+    const candidates = freeSlotsInWindow(dayBusyFor(date), windowStart, windowEnd, duration)
     if (candidates.length > 0) {
       lines.push(`${date}: ${candidates.map((c) => formatSlot(c.start, c.end)).join(', ')}`)
     }

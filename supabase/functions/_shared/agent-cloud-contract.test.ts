@@ -503,6 +503,92 @@ Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correc
   assert(typeof freeSlotsResult.slots[0] === 'string')
 })
 
+Deno.test('find_free_slots with no durationMinutes answers an availability question, not a duration slice', async () => {
+  const state = newToolDispatchState()
+
+  // Empty day: the whole default 08:00-22:00 window is one free extent --
+  // this is the actual bug found during founder dogfooding (an empty day
+  // used to answer "1 hour free" instead of "the whole window is free").
+  const emptyDayResult: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(emptyDayResult.slots.length === 1)
+  // No "등록된 일정이 없어서" causal claim -- `busy` only looks at timed
+  // rows, so this wording must stay true even when an untimed task exists
+  // (see the dedicated untimed-task test below). Only the computed window
+  // itself is asserted.
+  assert(!emptyDayResult.slots[0].includes('등록된 일정이 없어서'))
+  assert(emptyDayResult.slots[0].includes('전체가 비어 있어요'))
+
+  // One event splitting the day: two distinct free extents, phrased as
+  // availability (not a single duration-sized candidate).
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: timeOn('2026-08-16', '12:00')!.toISOString(),
+    end_at: timeOn('2026-08-16', '13:00')!.toISOString(),
+    version: 1,
+  }]
+  const splitDayResult: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'find_free_slots',
+    { scope: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(splitDayResult.slots.length === 1)
+  assert(splitDayResult.slots[0].includes('비어 있어요'))
+  assert(!splitDayResult.slots[0].includes('등록된 일정이 없어서'))
+  // Both sides of the 12:00-13:00 busy block should show up, comma-joined --
+  // not just the first duration-sized slice of the first gap.
+  assert(splitDayResult.slots[0].split(',').length === 2)
+})
+
+Deno.test('find_free_slots availability wording stays truthful when an untimed task exists that day (D1-2)', async () => {
+  const state = newToolDispatchState()
+  // An untimed task (no start_at/end_at) -- invisible to `busy`, which only
+  // looks at timed rows, so the timed calendar really is fully free. The
+  // wording must not falsely claim "등록된 일정이 없어서" (no schedules
+  // registered) when this row genuinely IS a registered schedule.
+  const untimedTask: ExistingScheduleRow[] = [{
+    id: 't1',
+    title: '장보기',
+    scheduled_date: '2026-08-16',
+    start_at: null,
+    end_at: null,
+    version: 1,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(untimedTask),
+    'find_free_slots',
+    { scope: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(result.slots.length === 1)
+  assert(!result.slots[0].includes('등록된 일정이 없어서'))
+  assert(result.slots[0].includes('전체가 비어 있어요'))
+})
+
+Deno.test('find_free_slots with durationMinutes still returns a single duration-sized candidate (unchanged)', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'find_free_slots',
+    { scope: '2026-08-16', durationMinutes: 60 },
+    state,
+    dispatchToday,
+  )
+  assert(result.slots.length === 1)
+  assert(!result.slots[0].includes('등록된 일정이 없어서'))
+  assert(result.slots[0].split(',').length === 1)
+})
+
 Deno.test('dispatchToolCall reports an unknown tool name instead of throwing', async () => {
   const state = newToolDispatchState()
   const result: any = await dispatchToolCall(
