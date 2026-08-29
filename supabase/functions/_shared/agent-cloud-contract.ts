@@ -499,6 +499,22 @@ export function findConflict(
 
 type SupabasePort = { from: (table: string) => any }
 
+/** A DB read failing inside a tool handler used to return `error.message`
+ * (or bare `error`, which stringifies to `"[object Object]"` for a
+ * supabase-js `PostgrestError` -- it isn't an `Error` instance) straight
+ * into the model conversation -- leaking raw Postgres/PostgREST error text
+ * (column/constraint/relation names) to a third party (OpenRouter) on the
+ * `Error` path, and giving the model nothing usable at all on the
+ * `PostgrestError` path. Every DB-backed tool handler below returns this
+ * fixed, opaque result to the model instead and logs the real error
+ * server-side. Found via founder-dogfooding code review. */
+function toolQueryFailed(operation: string, error: unknown): { error: string } {
+  console.error(
+    JSON.stringify({ operation: `agent_cloud_chat.${operation}`, error: String(error) }),
+  )
+  return { error: 'TOOL_QUERY_FAILED' }
+}
+
 // Mirrors ScheduleDetail.isActive (ScheduleModel.swift) exactly: a
 // 'rescheduled' row is the original left behind by reschedule_todo (it never
 // gets deleted_at set -- only the replacement row is "live"), 'cancelled'/
@@ -569,7 +585,7 @@ async function searchSchedules(
       })),
     }
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
+    return toolQueryFailed('search_schedules', error)
   }
 }
 
@@ -585,7 +601,7 @@ async function findFreeSlots(
   try {
     rows = await fetchSchedules(supabase, from, to)
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
+    return toolQueryFailed('find_free_slots', error)
   }
   const busy = rows.filter((row) => row.start_at && row.end_at)
 
@@ -670,7 +686,7 @@ async function getDayContext(
   try {
     items = await fetchDayItems(supabase, date)
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
+    return toolQueryFailed('get_day_context', error)
   }
   const completed = items.filter((row) => row.status === 'completed')
   const incomplete = items.filter((row) => row.status !== 'completed')
@@ -709,7 +725,7 @@ async function getDayContext(
 
 async function getRoutinePreferences(supabase: SupabasePort): Promise<unknown> {
   const { data, error } = await supabase.from('user_preferences').select('*').maybeSingle()
-  if (error) return { error: error instanceof Error ? error.message : String(error) }
+  if (error) return toolQueryFailed('get_routine_preferences', error)
   if (!data) return { configured: false }
   return { configured: true, ...preferencesDto(data) }
 }
@@ -736,7 +752,7 @@ async function getReviewHistory(
     .select('review_date,reflection')
     .order('review_date', { ascending: false })
     .limit(limit)
-  if (error) return { error: error instanceof Error ? error.message : String(error) }
+  if (error) return toolQueryFailed('get_review_history', error)
   return { reviews: (data as Record<string, unknown>[]).map(reviewHistoryDto) }
 }
 

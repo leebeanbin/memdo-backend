@@ -285,6 +285,33 @@ Deno.test('conflict/no-time (boundary fixture): rows with no start_at/end_at nev
   assert(state.conflictTitle === null)
 })
 
+Deno.test('search_schedules on a DB failure returns an opaque error, not the raw DB message', async () => {
+  // Founder-dogfooding fix: this used to return error.message (or
+  // "[object Object]" for a non-Error throw) straight into the model
+  // conversation, sent on to a third party (OpenRouter).
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabaseError(),
+    'search_schedules',
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(result.error === 'TOOL_QUERY_FAILED')
+})
+
+Deno.test('get_routine_preferences on a DB failure returns an opaque error, not the raw DB message', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabaseError(),
+    'get_routine_preferences',
+    {},
+    state,
+    dispatchToday,
+  )
+  assert(result.error === 'TOOL_QUERY_FAILED')
+})
+
 Deno.test('dispatchToolCall propose_schedule fails closed when the conflict check itself errors', async () => {
   const state = newToolDispatchState()
   const result: any = await dispatchToolCall(
