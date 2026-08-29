@@ -134,7 +134,7 @@ export type TodoInput = z.infer<typeof todoInputSchema>
 export type TodoUpdateInput = z.infer<typeof todoUpdateSchema>
 
 export const todoSelect =
-  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at'
+  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at,sync_seq'
 
 export function todoInsert(input: TodoInput, userId: string, id: string, requestHash: string) {
   return {
