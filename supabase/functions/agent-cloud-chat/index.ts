@@ -325,7 +325,17 @@ export default {
             completedCalls++
             lastProviderCompletionId = acc.providerCompletionId ?? lastProviderCompletionId
             lastResolvedModel = acc.resolvedModel ?? lastResolvedModel
-            const toolCalls = accumulatedToolCallsArray(acc)
+            // A call with no id/name (streamed deltas that never carried
+            // them) can't be pushed into the assistant message below --
+            // OpenRouter 400s the *next* request over a malformed
+            // tool_calls entry, which would kill the turn just as hard as
+            // the JSON.parse failure this same fix targets. Drop them here,
+            // before they ever become part of the conversation, rather than
+            // trying to respond to something the model never coherently
+            // asked for.
+            const toolCalls = accumulatedToolCallsArray(acc).filter((call) =>
+              call.id && call.function.name
+            )
 
             if (toolCalls.length === 0) {
               send(donePayload())
@@ -348,14 +358,37 @@ export default {
               // those stay in the founder debug trace (D2), not this
               // user-facing surface.
               send({ toolCallStarted: call.function.name })
-              const args = JSON.parse(call.function.arguments || '{}')
-              const result = await dispatchToolCall(
-                context.supabase,
-                call.function.name,
-                args,
-                dispatchState,
-                today,
-              )
+              // Streamed argument deltas can arrive truncated or slightly
+              // malformed (routine with the `:free` experimental models) --
+              // JSON.parse throwing here used to escape the whole turn, even
+              // though parseAgentToolCall/dispatchToolCall already have a
+              // graceful, model-recoverable INVALID_AGENT_ARGUMENT path for
+              // "valid JSON, wrong shape." Give a bad-JSON call that exact
+              // same shape instead of a hard failure.
+              let result: unknown
+              try {
+                const args = JSON.parse(call.function.arguments || '{}')
+                result = await dispatchToolCall(
+                  context.supabase,
+                  call.function.name,
+                  args,
+                  dispatchState,
+                  today,
+                )
+              } catch (parseError) {
+                if (!(parseError instanceof SyntaxError)) throw parseError
+                console.error(
+                  JSON.stringify({
+                    requestId: currentRequestId,
+                    operation: 'agent_cloud_chat.malformed_tool_arguments',
+                    toolName: call.function.name,
+                  }),
+                )
+                result = {
+                  error: 'INVALID_AGENT_ARGUMENT',
+                  issues: [{ field: '(root)', reason: 'arguments were not valid JSON' }],
+                }
+              }
               // Sent immediately after the handler resolves -- second-pass
               // review finding: toolCallStarted alone left the client's
               // hint showing "tool is executing" for the whole gap between
