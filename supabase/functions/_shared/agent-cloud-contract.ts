@@ -166,7 +166,7 @@ export const cloudAgentTools = [
     function: {
       name: AGENT_TOOL_NAMES.proposeSchedule,
       description:
-        'Propose a new schedule or task for the user to confirm. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim something was created without the user approving a proposal.',
+        'Propose a new schedule or task for the user to confirm. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim something was created without the user approving a proposal. Only one proposal can be staged at a time -- if the user is asking for multiple new items, propose just the first one and mention the rest still need their own turn once this one is confirmed or declined.',
       parameters: {
         type: 'object',
         properties: {
@@ -186,7 +186,7 @@ export const cloudAgentTools = [
     function: {
       name: AGENT_TOOL_NAMES.proposeScheduleUpdate,
       description:
-        'Propose completing, moving, or deleting an EXISTING schedule or task. This does NOT change anything -- it only stages a proposal the user must explicitly approve. You must have a real `id` from a prior search_schedules call; never invent one or guess. Never claim an item was completed, moved, or deleted without the user approving a proposal.',
+        'Propose completing, moving, or deleting an EXISTING schedule or task. This does NOT change anything -- it only stages a proposal the user must explicitly approve. You must have a real `id` from a prior search_schedules call; never invent one or guess. Never claim an item was completed, moved, or deleted without the user approving a proposal. Only one proposal can be staged at a time -- if the user is asking to complete/move/delete multiple items, propose just the first one and mention the rest still need their own turn once this one is confirmed or declined; do not call this more than once per turn.',
       parameters: {
         type: 'object',
         properties: {
@@ -895,6 +895,22 @@ async function handleProposeSchedule(
   state: ToolDispatchState,
   today: Date,
 ): Promise<unknown> {
+  // state.proposedSchedule is a single slot, not a list -- a second call
+  // this turn would silently overwrite the first before it ever reaches the
+  // client (founder dogfooding: a batch "delete these two" produced two
+  // {ok:true} tool results and a message describing both, but only the
+  // last-called one was ever actually staged/confirmable, so the other
+  // silently never happened despite the model's own text claiming it did).
+  // Failing the second call closed lets the grounding rule in
+  // systemPrompt() do its job: a failed tool result is never authoritative,
+  // so the model won't claim the second item was staged.
+  if (state.proposedSchedule) {
+    return {
+      ok: false,
+      error:
+        'Only one new schedule can be proposed per turn -- one is already staged for the user to confirm. Describe just that one and wait for the user to confirm or decline before proposing another.',
+    }
+  }
   state.proposedSchedule = args
   // Reflection: guaranteed, not dependent on the model having called
   // search_schedules first (the system prompt asks it to, but nothing
@@ -936,6 +952,17 @@ async function handleProposeScheduleUpdate(
   state: ToolDispatchState,
   today: Date,
 ): Promise<unknown> {
+  // Same single-slot-overwrite guard as handleProposeSchedule above -- see
+  // its comment. This is the handler the actual founder-dogfooding incident
+  // hit: two propose_schedule_update(action: 'delete') calls in one turn,
+  // second silently clobbering the first's staged proposal.
+  if (state.proposedScheduleUpdate) {
+    return {
+      ok: false,
+      error:
+        'Only one schedule change can be proposed per turn -- one is already staged for the user to confirm. Describe just that one and wait for the user to confirm or decline before proposing another.',
+    }
+  }
   const updateArgs = args as ProposedScheduleUpdateArgs
   try {
     const target = await fetchScheduleById(supabase, updateArgs.id)
