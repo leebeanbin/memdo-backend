@@ -9,6 +9,7 @@ import {
 import { freeExtentsInWindow, freeSlotsInWindow } from './free-slot-service.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
+import { DEAD_STATUSES } from './todo-contract.ts'
 
 export { AGENT_TOOL_NAMES }
 
@@ -514,18 +515,6 @@ function toolQueryFailed(operation: string, error: unknown): { error: string } {
   )
   return { error: 'TOOL_QUERY_FAILED' }
 }
-
-// Mirrors ScheduleDetail.isActive (ScheduleModel.swift) exactly: a
-// 'rescheduled' row is the original left behind by reschedule_todo (it never
-// gets deleted_at set -- only the replacement row is "live"), 'cancelled'/
-// 'skipped' are similarly dead-but-not-deleted. GET /todos leaves this
-// filtering to the client (isActive), but these DB-backed tools hand rows
-// straight to the model with no equivalent -- without this, search_schedules/
-// find_free_slots/propose_schedule's conflict check could all report a dead
-// row (invisible in the calendar) as if it were a live item. Found via live
-// founder dogfooding: search_schedules kept reporting an item that wasn't in
-// the calendar at all.
-const DEAD_STATUSES = ['rescheduled', 'cancelled', 'skipped']
 
 async function fetchSchedules(
   supabase: SupabasePort,

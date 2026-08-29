@@ -1,5 +1,19 @@
 import { z } from 'zod'
 
+// Mirrors ScheduleDetail.isActive (ScheduleModel.swift) exactly. A
+// 'rescheduled' row in particular is the original left behind by
+// reschedule_todo -- it never gets deleted_at set, only its status changes
+// (the replacement row is the live one); 'cancelled'/'skipped' are
+// similarly dead-but-not-deleted. `deleted_at is null` alone is not the
+// same predicate as "active." The single owner of this list -- every
+// reader that means "what the user would see as their active schedule"
+// (GET /todos, GET /days/{date}, and the Agent's DB-backed tools in
+// agent-cloud-contract.ts) filters on it, so the definition can't drift
+// between them again the way it did before (founder-dogfooding fix: GET
+// /todos and GET /days used to return different item sets for the same
+// day than search_schedules/find_free_slots did).
+export const DEAD_STATUSES = ['rescheduled', 'cancelled', 'skipped']
+
 const nullableText = (maximum: number) => z.string().max(maximum).nullable().optional()
 
 const locationSchema = z.object({

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { dayViewDto } from '../_shared/day-contract.ts'
 import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
-import { todoDto, todoSelect } from '../_shared/todo-contract.ts'
+import { DEAD_STATUSES, todoDto, todoSelect } from '../_shared/todo-contract.ts'
 
 const dateSchema = z.iso.date()
 
@@ -36,6 +36,11 @@ export default {
         .select(todoSelect)
         .eq('scheduled_date', parsedDate.data)
         .is('deleted_at', null)
+        // Founder-dogfooding fix: without this, a rescheduled/cancelled/
+        // skipped row (deleted_at stays null -- only status changes) showed
+        // up here even though the same day's GET /todos (client-filtered
+        // via isActive) and the Agent's search_schedules both hid it.
+        .not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
         .order('start_at', { ascending: true, nullsFirst: false })
         .order('sort_order')
         .order('id')
