@@ -10,6 +10,7 @@ import {
 } from '../_shared/http.ts'
 import { materializeRow, nextOccurrenceAfter, ruleSelect } from '../_shared/rule-contract.ts'
 import {
+  DEAD_STATUSES,
   decodeTodoCursor,
   encodeTodoCursor,
   todoDeleteSchema,
@@ -88,7 +89,18 @@ export default {
 
         if (parsed.data.from) query = query.gte('scheduled_date', parsed.data.from)
         if (parsed.data.to) query = query.lte('scheduled_date', parsed.data.to)
-        if (parsed.data.status?.length) query = query.in('status', parsed.data.status)
+        // Default view excludes dead statuses (matching ScheduleDetail.isActive
+        // and the Agent's own DB reads -- founder-dogfooding fix, this used to
+        // be the one reader of `todos` that left the filtering to the client,
+        // so it disagreed with GET /days and search_schedules for the same
+        // day). An explicit ?status= filter is a deliberate ask for exactly
+        // those statuses (e.g. a future "rescheduled/cancelled history" view)
+        // and overrides the default rather than being ANDed with it.
+        if (parsed.data.status?.length) {
+          query = query.in('status', parsed.data.status)
+        } else {
+          query = query.not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
+        }
         if (cursor) {
           query = query.or(
             `scheduled_date.gt.${cursor.scheduledDate},and(scheduled_date.eq.${cursor.scheduledDate},sort_order.gt.${cursor.sortOrder}),and(scheduled_date.eq.${cursor.scheduledDate},sort_order.eq.${cursor.sortOrder},id.gt.${cursor.id})`,
