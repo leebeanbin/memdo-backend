@@ -1,9 +1,17 @@
 import { z } from 'zod'
 import { todoDto } from './todo-contract.ts'
 
+// A (updated_at, id) cursor used to be able to permanently skip a row:
+// set_updated_at() writes now() (transaction *start* time, not commit
+// time), so two concurrent writes -- exactly what an offline outbox flush
+// produces -- can commit out of timestamp order, and a client syncing in
+// between advances its cursor past a row whose transaction hadn't
+// committed yet. todos.sync_seq (20260829083831_todos_sync_seq.sql) is
+// assigned by nextval() inside its own trigger, so it's only ever handed
+// out once, in true commit order -- a single monotonic column, no
+// secondary tie-breaker needed. Found via founder-dogfooding code review.
 const syncCursorSchema = z.object({
-  updatedAt: z.iso.datetime({ offset: true }),
-  id: z.uuid(),
+  syncSeq: z.number().int(),
 })
 
 export const syncQuerySchema = z.object({
@@ -23,7 +31,7 @@ export function decodeSyncCursor(cursor: string): SyncCursor | null {
 }
 
 export function encodeSyncCursor(row: Record<string, unknown>): string {
-  return btoa(JSON.stringify({ updatedAt: row.updated_at, id: row.id }))
+  return btoa(JSON.stringify({ syncSeq: row.sync_seq }))
     .replaceAll('+', '-')
     .replaceAll('/', '_')
     .replaceAll('=', '')

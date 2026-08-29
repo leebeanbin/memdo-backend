@@ -39,16 +39,18 @@ export default {
         return apiError('INVALID_REQUEST', '동기화 커서를 확인해 주세요.', 400, currentRequestId)
       }
 
+      // sync_seq (20260829083831_todos_sync_seq.sql) is a single monotonic
+      // column assigned by nextval() in true commit order -- no
+      // (updated_at, id) tie-breaker needed, and no window for a
+      // concurrently-committing row to end up permanently behind a cursor
+      // already handed out (founder-dogfooding fix).
       let query = context.supabase
         .from('todos')
         .select(todoSelect)
-        .order('updated_at')
-        .order('id')
+        .order('sync_seq')
         .limit(parsed.data.limit + 1)
       if (cursor) {
-        query = query.or(
-          `updated_at.gt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.gt.${cursor.id})`,
-        )
+        query = query.gt('sync_seq', cursor.syncSeq)
       }
 
       const { data, error } = await query
