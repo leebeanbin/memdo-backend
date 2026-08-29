@@ -499,6 +499,18 @@ export function findConflict(
 
 type SupabasePort = { from: (table: string) => any }
 
+// Mirrors ScheduleDetail.isActive (ScheduleModel.swift) exactly: a
+// 'rescheduled' row is the original left behind by reschedule_todo (it never
+// gets deleted_at set -- only the replacement row is "live"), 'cancelled'/
+// 'skipped' are similarly dead-but-not-deleted. GET /todos leaves this
+// filtering to the client (isActive), but these DB-backed tools hand rows
+// straight to the model with no equivalent -- without this, search_schedules/
+// find_free_slots/propose_schedule's conflict check could all report a dead
+// row (invisible in the calendar) as if it were a live item. Found via live
+// founder dogfooding: search_schedules kept reporting an item that wasn't in
+// the calendar at all.
+const DEAD_STATUSES = ['rescheduled', 'cancelled', 'skipped']
+
 async function fetchSchedules(
   supabase: SupabasePort,
   from: string,
@@ -508,6 +520,7 @@ async function fetchSchedules(
     .from('todos')
     .select('id,title,scheduled_date,start_at,end_at,version')
     .is('deleted_at', null)
+    .not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
     .gte('scheduled_date', from)
     .lte('scheduled_date', to)
     .limit(200)
@@ -519,8 +532,11 @@ async function fetchSchedules(
  * has an id from a prior search_schedules result, never a full row, so this
  * is how it (and Reflection's conflict check) learns the item's current
  * title/version. Returns null rather than throwing on a missing/deleted/
- * foreign row so the caller can fail closed with a clear tool result instead
- * of a generic 500. */
+ * foreign/dead-status row so the caller can fail closed with a clear tool
+ * result instead of a generic 500 (a stale id from earlier in the
+ * conversation pointing at a since-rescheduled/cancelled/skipped row should
+ * behave the same as one pointing at a deleted row -- none of complete/
+ * reschedule/delete make sense against it either way). */
 async function fetchScheduleById(
   supabase: SupabasePort,
   id: string,
@@ -530,6 +546,7 @@ async function fetchScheduleById(
     .select('id,title,scheduled_date,start_at,end_at,version')
     .eq('id', id)
     .is('deleted_at', null)
+    .not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
     .maybeSingle()
   if (error) throw error
   return (data as ExistingScheduleRow | null) ?? null
