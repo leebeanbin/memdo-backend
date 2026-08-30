@@ -9,6 +9,34 @@ export const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
 export const MIRROR_SYNC_WINDOW_PAST_DAYS = 60
 export const MIRROR_SYNC_WINDOW_FUTURE_DAYS = 366
 
+// be12: google-calendar-status previously returned `last_error` verbatim --
+// raw upstream Google API/OAuth response text (see the `throw new Error`
+// call sites below and in google-calendar-sync/index.ts) leaked straight to
+// the client with no contract on its shape. Classified into a closed enum
+// instead; `status` (connections table) already distinguishes 'revoked'
+// from 'error' at a coarser level, this narrows the 'error' case only.
+export type GoogleCalendarErrorReason =
+  | 'auth_expired'
+  | 'rate_limited'
+  | 'calendar_not_found'
+  | 'unknown'
+
+const GOOGLE_ERROR_STATUS_PATTERN = /failed: (\d{3})/
+
+export function classifyGoogleCalendarErrorReason(
+  message: string | null,
+): GoogleCalendarErrorReason {
+  if (!message) return 'unknown'
+  if (message.includes('invalid_grant') || message.includes('missing refresh token secret')) {
+    return 'auth_expired'
+  }
+  const status = Number(message.match(GOOGLE_ERROR_STATUS_PATTERN)?.[1])
+  if (status === 401) return 'auth_expired'
+  if (status === 429) return 'rate_limited'
+  if (status === 404) return 'calendar_not_found'
+  return 'unknown'
+}
+
 export function serviceClient(): SupabaseClient {
   return createClient(
     Deno.env.get('SUPABASE_URL')!,

@@ -66,3 +66,23 @@ Deno.test('withCrudErrors catches a thrown error and returns INTERNAL_ERROR inst
   assert(body.error.code === 'INTERNAL_ERROR')
   assert(body.error.requestId === 'req-1')
 })
+
+Deno.test('apiError marks RATE_LIMITED as retryable even though its status is 4xx', async () => {
+  // bd8: retryable used to be derived from `status >= 500` -- RATE_LIMITED
+  // is the single most retryable error this API produces (back off, try
+  // again) and was reported as retryable:false purely because 429 < 500.
+  const body = await apiError('RATE_LIMITED', 'too many', 429, 'req-1').json()
+  assert(body.error.retryable === true)
+})
+
+Deno.test('apiError marks INTERNAL_ERROR as retryable', async () => {
+  const body = await apiError('INTERNAL_ERROR', 'oops', 500, 'req-1').json()
+  assert(body.error.retryable === true)
+})
+
+Deno.test('apiError marks a real 4xx client error as not retryable', async () => {
+  const versionConflict = await apiError('VERSION_CONFLICT', 'stale', 409, 'req-1').json()
+  const invalidRequest = await apiError('INVALID_REQUEST', 'bad', 400, 'req-1').json()
+  assert(versionConflict.error.retryable === false)
+  assert(invalidRequest.error.retryable === false)
+})

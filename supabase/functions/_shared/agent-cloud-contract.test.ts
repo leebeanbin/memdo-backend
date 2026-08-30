@@ -10,6 +10,7 @@ import {
   findConflict,
   newToolDispatchState,
   resolveDate,
+  resolveOpenRouterModel,
   resolveProposedInterval,
   resolveRateLimitPerHour,
   timeOn,
@@ -1306,4 +1307,43 @@ Deno.test('ALLOWED_OPENROUTER_MODELS is exactly selectableModelIds(MODEL_REGISTR
 
 Deno.test('DEFAULT_OPENROUTER_MODEL is a selectable registry id', () => {
   assert(ALLOWED_OPENROUTER_MODELS.includes(DEFAULT_OPENROUTER_MODEL))
+})
+
+Deno.test('resolveOpenRouterModel prefers the client-supplied model, never touching env', () => {
+  assert(
+    resolveOpenRouterModel('anthropic/claude-sonnet-5', () => {
+      throw new Error('getEnv should not be called when clientModel is set')
+    }) === 'anthropic/claude-sonnet-5',
+  )
+})
+
+Deno.test('resolveOpenRouterModel falls back to DEFAULT_OPENROUTER_MODEL when neither client nor env set a model', () => {
+  assert(resolveOpenRouterModel(null, () => undefined) === DEFAULT_OPENROUTER_MODEL)
+  assert(resolveOpenRouterModel(undefined, () => undefined) === DEFAULT_OPENROUTER_MODEL)
+})
+
+Deno.test('resolveOpenRouterModel accepts a valid OPENROUTER_MODEL env override', () => {
+  assert(
+    resolveOpenRouterModel(
+      null,
+      (key) => key === 'OPENROUTER_MODEL' ? 'anthropic/claude-sonnet-5' : undefined,
+    ) ===
+      'anthropic/claude-sonnet-5',
+  )
+})
+
+Deno.test('resolveOpenRouterModel throws on an OPENROUTER_MODEL env override that is not a selectable model (be14)', () => {
+  // A typo'd or disabled model id in this env var used to silently reach
+  // OpenRouter as every request's model, unvalidated -- this pins that it
+  // now fails closed instead.
+  let threw = false
+  try {
+    resolveOpenRouterModel(
+      null,
+      (key) => key === 'OPENROUTER_MODEL' ? 'not-a-real-model' : undefined,
+    )
+  } catch {
+    threw = true
+  }
+  assert(threw)
 })
