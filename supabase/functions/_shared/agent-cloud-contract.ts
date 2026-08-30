@@ -47,6 +47,39 @@ if (!ALLOWED_OPENROUTER_MODELS.includes(DEFAULT_OPENROUTER_MODEL)) {
   )
 }
 
+// be14: OPENROUTER_MODEL is an emergency env-var override for the default
+// model (e.g. rolling back a bad model rollout without a code deploy) --
+// unlike client-supplied `model` (validated by chatRequestSchema's
+// z.enum(ALLOWED_OPENROUTER_MODELS)) and DEFAULT_OPENROUTER_MODEL (checked
+// above), this value used to reach agent-cloud-chat's request handler by
+// simply falling through `||`, with no allowlist check at all: a typo'd or
+// disabled/unknown model id would still be sent to OpenRouter as every
+// request's model (isExperimentalModelSelectable only rejects a
+// *registered* experimental model -- an id absent from the registry
+// entirely passes it, since `!profile` short-circuits to selectable).
+// Centralized here and validated on every call rather than read directly
+// at the call site, the same fail-fast intent as the DEFAULT_OPENROUTER_MODEL
+// check above minus the bare top-level `Deno.env.get` -- every other env
+// read in _shared/*.ts is function-scoped (matches apple-auth-contract.ts,
+// google-calendar-contract.ts) precisely so unit tests importing these
+// modules don't need --allow-env; a bare top-level read here broke that.
+// `getEnv` defaults to the real Deno.env.get and is only ever overridden by
+// tests -- same injected-real-thing-by-default shape as this file's
+// SupabasePort params -- so exercising the env-fallback branch doesn't
+// require the test runner to hold the OPENROUTER_MODEL env permission.
+export function resolveOpenRouterModel(
+  clientModel: string | null | undefined,
+  getEnv: (key: string) => string | undefined = (key) => Deno.env.get(key),
+): string {
+  if (clientModel) return clientModel
+  const envModel = getEnv('OPENROUTER_MODEL')
+  if (envModel === undefined) return DEFAULT_OPENROUTER_MODEL
+  if (!ALLOWED_OPENROUTER_MODELS.includes(envModel)) {
+    throw new Error(`OPENROUTER_MODEL env override (${envModel}) is not a selectable model`)
+  }
+  return envModel
+}
+
 // A rolling-hour cap per user -- BYOK means a runaway loop or bug burns the
 // *user's own* balance, not this backend's, but that's still worth guarding
 // against by default rather than assuming good behavior.

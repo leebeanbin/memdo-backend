@@ -3,12 +3,12 @@ import {
   buildDonePayload,
   chatRequestSchema,
   cloudAgentTools,
-  DEFAULT_OPENROUTER_MODEL,
   dispatchToolCall,
   MAX_TOOL_ITERATIONS,
   newToolDispatchState,
   OPENROUTER_CHAT_URL,
   resolveDate,
+  resolveOpenRouterModel,
   resolveRateLimitPerHour,
   systemPrompt,
 } from '../_shared/agent-cloud-contract.ts'
@@ -199,7 +199,7 @@ export default {
       ...parsed.data.history.map((turn) => ({ role: turn.role, content: turn.content })),
       { role: 'user', content: parsed.data.message },
     ]
-    const model = parsed.data.model || Deno.env.get('OPENROUTER_MODEL') || DEFAULT_OPENROUTER_MODEL
+    const model = resolveOpenRouterModel(parsed.data.model)
 
     // D3 second-pass review: tier 'experimental' models were UI-hidden but
     // still backend-selectable (chatRequestSchema only gates on enabled/
@@ -226,8 +226,20 @@ export default {
     const encoder = new TextEncoder()
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
-        const send = (obj: unknown) =>
-          controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
+        const send = (obj: unknown) => {
+          try {
+            controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
+          } catch {
+            // be11: the client disconnected mid-stream -- enqueueing on a
+            // closed/errored controller throws. Previously this propagated
+            // out of send(): the main try block's catch (below) called
+            // send() again to report the error, which threw the exact same
+            // way, becoming an unhandled rejection that skipped close()
+            // entirely -- so a disconnected client's turn never got its
+            // agent_audit_log row. Swallowed here instead; there's no
+            // client left to deliver this chunk to either way.
+          }
+        }
 
         const dispatchState = newToolDispatchState()
         const totalUsage: AgentUsage = { promptTokens: 0, completionTokens: 0, costUsd: 0 }
@@ -310,7 +322,12 @@ export default {
             )
           }
 
-          controller.close()
+          try {
+            controller.close()
+          } catch {
+            // be11: already closed -- e.g. the platform closed it after a
+            // client disconnect. Nothing left to do.
+          }
         }
 
         try {

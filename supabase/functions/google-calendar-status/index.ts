@@ -1,5 +1,8 @@
 import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
-import { serviceClient } from '../_shared/google-calendar-contract.ts'
+import {
+  classifyGoogleCalendarErrorReason,
+  serviceClient,
+} from '../_shared/google-calendar-contract.ts'
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -31,7 +34,9 @@ export default {
         status: data.status,
         calendarId: data.google_calendar_id,
         lastSyncedAt: data.last_synced_at,
-        lastError: data.status === 'error' ? data.last_error : null,
+        lastError: data.status === 'error'
+          ? classifyGoogleCalendarErrorReason(data.last_error)
+          : null,
       }
       : {
         connected: false,

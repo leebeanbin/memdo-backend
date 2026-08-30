@@ -30,6 +30,15 @@ export function json(body: unknown, status: number, requestId: string): Response
   })
 }
 
+// RATE_LIMITED (429) is the single most retryable error this API produces --
+// it was reported as retryable:false purely because `retryable` was derived
+// from `status >= 500`, not from what the error actually means (bd8, found
+// via founder-dogfooding code review). Derived from the code instead: a
+// client backing off and retrying INTERNAL_ERROR/RATE_LIMITED can succeed;
+// retrying INVALID_REQUEST/VERSION_CONFLICT/etc. with the same request
+// never will.
+const RETRYABLE_ERROR_CODES: ReadonlySet<ErrorCode> = new Set(['RATE_LIMITED', 'INTERNAL_ERROR'])
+
 export function apiError(
   code: ErrorCode,
   message: string,
@@ -38,7 +47,7 @@ export function apiError(
   details: Record<string, unknown> = {},
 ): Response {
   return json(
-    { error: { code, message, retryable: status >= 500, requestId, details } },
+    { error: { code, message, retryable: RETRYABLE_ERROR_CODES.has(code), requestId, details } },
     status,
     requestId,
   )
