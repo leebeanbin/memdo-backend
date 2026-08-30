@@ -44,7 +44,7 @@ const dailyEventRule = {
   anchor_date: '2026-08-01',
   until_date: null,
   occurrence_count: null,
-  timezone_offset_minutes: 540,
+  timezone: 'Asia/Seoul',
 }
 
 Deno.test('virtualOccurrencesInRange generates one occurrence per day for a daily rule', async () => {

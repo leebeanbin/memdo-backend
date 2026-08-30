@@ -9,7 +9,10 @@ import {
 import { freeExtentsInWindow, freeSlotsInWindow } from './free-slot-service.ts'
 import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts'
 import { preferencesDto } from './preferences-contract.ts'
+import { ianaOffsetMinutes } from './rule-contract.ts'
 import { DEAD_STATUSES } from './todo-contract.ts'
+
+export { ianaOffsetMinutes }
 
 export { AGENT_TOOL_NAMES }
 
@@ -757,37 +760,6 @@ async function getRoutinePreferences(supabase: SupabasePort): Promise<unknown> {
   if (error) return toolQueryFailed('get_routine_preferences', error)
   if (!data) return { configured: false }
   return { configured: true, ...preferencesDto(data) }
-}
-
-/** Converts an IANA timezone name to its UTC offset in minutes at `at`
- * (positive east of UTC, the same sign convention every other
- * offsetMinutes value in this file uses) -- computed for the specific
- * instant rather than a fixed constant, so it's correct across a DST
- * transition for timezones that observe one (Asia/Seoul doesn't, but this
- * helper isn't KST-specific). */
-export function ianaOffsetMinutes(timeZone: string, at: Date): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(at).reduce((acc, part) => {
-    if (part.type !== 'literal') acc[part.type] = part.value
-    return acc
-  }, {} as Record<string, string>)
-  const asIfUTC = Date.UTC(
-    Number(parts.year),
-    Number(parts.month) - 1,
-    Number(parts.day),
-    Number(parts.hour),
-    Number(parts.minute),
-    Number(parts.second),
-  )
-  return Math.round((asIfUTC - at.getTime()) / 60_000)
 }
 
 /** The requesting user's own timezone offset (user_preferences.timezone),

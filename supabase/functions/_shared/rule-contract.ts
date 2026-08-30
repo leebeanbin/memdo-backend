@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { stableUuid } from './deterministic-id.ts'
 
 export const ruleSelect =
-  'id,calendar_id,title,entry_kind,is_all_day,note,start_time,end_time,time_bucket,reminder_offset_minutes,frequency,step_interval,anchor_date,until_date,occurrence_count,timezone_offset_minutes,created_at,updated_at'
+  'id,calendar_id,title,entry_kind,is_all_day,note,start_time,end_time,time_bucket,reminder_offset_minutes,frequency,step_interval,anchor_date,until_date,occurrence_count,timezone,created_at,updated_at'
 
 const localTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 
@@ -21,7 +21,12 @@ export const scheduleRuleInputSchema = z.object({
   anchorDate: z.iso.date(),
   untilDate: z.iso.date().nullable().optional(),
   count: z.number().int().min(1).max(730).nullable().optional(),
-  timezoneOffsetMinutes: z.number().int().min(-720).max(840),
+  // bd16: replaces the old timezoneOffsetMinutes (a frozen integer,
+  // wrong at a DST transition for any timezone that observes one) --
+  // an IANA name, matching preferences-contract.ts's timezone field
+  // exactly, from which each occurrence's own offset is computed at
+  // materialization time (see offsetMinutesOnDate below).
+  timezone: z.string().min(1).max(100),
 }).superRefine((value, context) => {
   if (value.entryKind === 'event' && (!value.startTime || !value.endTime)) {
     context.addIssue({ code: 'custom', message: 'Event requires startTime and endTime' })
@@ -100,6 +105,48 @@ export function localInstant(day: string, time: string, timezoneOffsetMinutes: n
   const [hour, minute] = time.split(':').map(Number)
   return new Date(Date.UTC(year, month - 1, date, hour, minute) - timezoneOffsetMinutes * 60_000)
     .toISOString()
+}
+
+/** Converts an IANA timezone name to its UTC offset in minutes at `at`
+ * (positive east of UTC) -- computed for the specific instant rather than a
+ * fixed constant, so it's correct across a DST transition for a timezone
+ * that observes one (bd16: schedule_rules used to persist one offset,
+ * frozen at rule-creation time, and reuse it for every future occurrence
+ * regardless of season). Also used by agent-cloud-contract.ts for
+ * user_preferences.timezone (bd5) -- this is that function's single owner. */
+export function ianaOffsetMinutes(timeZone: string, at: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(at).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value
+    return acc
+  }, {} as Record<string, string>)
+  const asIfUTC = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
+  )
+  return Math.round((asIfUTC - at.getTime()) / 60_000)
+}
+
+/** `timezone`'s offset on `date` specifically (noon UTC as the reference
+ * instant -- same "avoids DST edge cases on day math" reasoning as
+ * dayNumber/fromDayNumber above), not "now" -- a rule materializing a
+ * January occurrence needs January's offset even if the rule itself was
+ * created in August. */
+function offsetMinutesOnDate(timezone: string, date: string): number {
+  const [year, month, day] = ymd(date)
+  return ianaOffsetMinutes(timezone, new Date(Date.UTC(year, month - 1, day, 12)))
 }
 
 export type RecurrenceFields = {
@@ -215,7 +262,7 @@ export async function materializeRow(
 ): Promise<Record<string, unknown>> {
   const startTime = rule.start_time as string | null
   const endTime = rule.end_time as string | null
-  const timezoneOffsetMinutes = rule.timezone_offset_minutes as number
+  const timezoneOffsetMinutes = offsetMinutesOnDate(rule.timezone as string, date)
   return {
     id: await occurrenceId(rule.id as string, date),
     user_id: userId,
@@ -251,7 +298,7 @@ export async function virtualOccurrenceDto(
 ): Promise<Record<string, unknown>> {
   const startTime = rule.start_time as string | null
   const endTime = rule.end_time as string | null
-  const timezoneOffsetMinutes = rule.timezone_offset_minutes as number
+  const timezoneOffsetMinutes = offsetMinutesOnDate(rule.timezone as string, date)
   return {
     id: await occurrenceId(rule.id as string, date),
     scheduledDate: date,
