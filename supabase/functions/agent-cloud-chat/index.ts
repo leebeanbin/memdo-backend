@@ -106,13 +106,28 @@ export default {
 
     const service = serviceClient()
 
+    // Atomic count+insert via RPC (20260830033440_agent_rate_limit_atomic.sql)
+    // -- the old check-then-insert (separate SELECT count, then a later
+    // INSERT after the Vault read) let concurrent requests all read the same
+    // count and all pass, and fail-open on insert error meant the limit
+    // could silently stop counting entirely. This call fails *closed*: an
+    // RPC error rejects the request rather than letting it through
+    // unmetered. Found via founder-dogfooding code review (be4).
     const hourAgo = new Date(Date.now() - 60 * 60_000).toISOString()
-    const { count: recentCount, error: rateError } = await service
-      .from('agent_chat_requests')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .gte('created_at', hourAgo)
-    if (rateError) {
+    const effectiveLimit = resolveRateLimitPerHour(userId, {
+      evalAccountUserId: Deno.env.get('MEMDO_EVAL_ACCOUNT_USER_ID'),
+      evalRateLimitEnabled: Deno.env.get('MEMDO_EVAL_RATE_LIMIT_ENABLED'),
+      evalRateLimitPerHour: Deno.env.get('MEMDO_EVAL_RATE_LIMIT_PER_HOUR'),
+    })
+    const { data: rateData, error: rateError } = await service
+      .rpc('agent_rate_limit_check_and_log', {
+        p_user_id: userId,
+        p_window_start: hourAgo,
+        p_limit: effectiveLimit,
+      })
+      .single()
+    const rateResult = rateData as { allowed: boolean; current_count: number } | null
+    if (rateError || !rateResult) {
       console.error(
         JSON.stringify({
           requestId: currentRequestId,
@@ -122,12 +137,7 @@ export default {
       )
       return apiError('INTERNAL_ERROR', '잠시 후 다시 시도해 주세요.', 500, currentRequestId)
     }
-    const effectiveLimit = resolveRateLimitPerHour(userId, {
-      evalAccountUserId: Deno.env.get('MEMDO_EVAL_ACCOUNT_USER_ID'),
-      evalRateLimitEnabled: Deno.env.get('MEMDO_EVAL_RATE_LIMIT_ENABLED'),
-      evalRateLimitPerHour: Deno.env.get('MEMDO_EVAL_RATE_LIMIT_PER_HOUR'),
-    })
-    if ((recentCount ?? 0) >= effectiveLimit) {
+    if (!rateResult.allowed) {
       return apiError(
         'RATE_LIMITED',
         '시간당 요청 한도를 넘었어요. 잠시 후 다시 시도해 주세요.',
@@ -173,19 +183,9 @@ export default {
       return apiError('INTERNAL_ERROR', 'API 키를 불러오지 못했습니다.', 500, currentRequestId)
     }
 
-    // Logged now (not after) so a request that errors out or times out mid-
-    // flight still counts against the window -- otherwise a slow/failing
-    // loop would be invisible to the rate limit that exists to catch it.
-    const logged = await service.from('agent_chat_requests').insert({ user_id: userId })
-    if (logged.error) {
-      console.error(
-        JSON.stringify({
-          requestId: currentRequestId,
-          operation: 'agent_cloud_chat.rate_log',
-          error: logged.error,
-        }),
-      )
-    }
+    // Request already logged against the rate-limit window by
+    // agent_rate_limit_check_and_log above (atomic with the check itself) --
+    // no separate insert needed here anymore.
 
     const today = new Date()
     // resolveDate('today', ...) applies DEFAULT_TIMEZONE_OFFSET_MINUTES the
