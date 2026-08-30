@@ -154,14 +154,29 @@ export function todoInsert(input: TodoInput, userId: string, id: string, request
   }
 }
 
-export function todoUpdate(input: TodoUpdateInput) {
-  return {
+// bd14: completed_at previously ran unconditionally on every PATCH where
+// status is 'completed' -- fixing a typo on an already-completed item
+// silently rewrote its completion timestamp and corrupted summary/review
+// history, which reads completed_at to decide what happened "today." Now
+// only stamped on the actual not-completed -> completed transition;
+// `previousStatus` must be the row's status as it was *before* this update
+// (the caller fetches it first). When the item was already completed,
+// completed_at is omitted from the returned object entirely (not set to
+// `null`) so PostgREST's PATCH leaves the existing column value untouched
+// rather than overwriting it with anything at all.
+export function todoUpdate(input: TodoUpdateInput, previousStatus: string | null) {
+  const values: Record<string, unknown> = {
     ...todoValues(input),
     status: input.status,
     progress: input.status === 'completed' ? 100 : 0,
-    completed_at: input.status === 'completed' ? new Date().toISOString() : null,
     version: input.version + 1,
   }
+  if (input.status === 'completed') {
+    if (previousStatus !== 'completed') values.completed_at = new Date().toISOString()
+  } else {
+    values.completed_at = null
+  }
+  return values
 }
 
 function todoValues(input: TodoInput) {

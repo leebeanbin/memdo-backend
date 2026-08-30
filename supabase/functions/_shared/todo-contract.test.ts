@@ -78,11 +78,61 @@ Deno.test('completed update advances version and progress together', () => {
     version: 2,
     status: 'completed',
   })
-  const update = todoUpdate(input)
+  const update = todoUpdate(input, 'planned')
 
   assert(update.version === 3)
   assert(update.progress === 100)
   assert(typeof update.completed_at === 'string')
+})
+
+Deno.test('todoUpdate omits completed_at when the item was already completed (bd14)', () => {
+  // Previously completed_at was stamped with `new Date()` unconditionally
+  // whenever status is 'completed', so fixing a typo on an already-
+  // completed item rewrote its completion timestamp. Omitted here (not
+  // set to null) so the PATCH's SET clause never touches the column at
+  // all when this isn't a genuine not-completed -> completed transition.
+  const input = todoUpdateSchema.parse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토 (오타 수정)',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    version: 5,
+    status: 'completed',
+  })
+  const update = todoUpdate(input, 'completed')
+
+  assert(!('completed_at' in update))
+})
+
+Deno.test('todoUpdate stamps completed_at on a genuine not-completed -> completed transition', () => {
+  const input = todoUpdateSchema.parse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    version: 2,
+    status: 'completed',
+  })
+  assert(typeof todoUpdate(input, 'in_progress').completed_at === 'string')
+  assert(typeof todoUpdate(input, null).completed_at === 'string')
+})
+
+Deno.test('todoUpdate clears completed_at when status leaves completed', () => {
+  const input = todoUpdateSchema.parse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    version: 4,
+    status: 'in_progress',
+  })
+  assert(todoUpdate(input, 'completed').completed_at === null)
 })
 
 Deno.test('reschedule requires paired timing', () => {
