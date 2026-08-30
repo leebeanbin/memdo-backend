@@ -119,7 +119,7 @@ export default {
             anchor_date: input.anchorDate,
             until_date: input.untilDate ?? null,
             occurrence_count: input.count ?? null,
-            timezone_offset_minutes: input.timezoneOffsetMinutes,
+            timezone: input.timezone,
           })
           .select(ruleSelect)
           .single()
