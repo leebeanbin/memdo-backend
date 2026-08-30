@@ -7,6 +7,10 @@ import {
   withCrudErrors,
 } from '../_shared/http.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
+import {
+  workoutLogCreateSchema,
+  workoutLogUpdateDetailsSchema,
+} from '../_shared/workout-log-contract.ts'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
@@ -125,6 +129,12 @@ async function handleCreate(
   const body = await req.json().catch(() => null)
   if (!body) return apiError('INVALID_REQUEST', 'JSON 본문이 필요합니다.', 400, currentRequestId)
 
+  const parsed = workoutLogCreateSchema.safeParse(body)
+  if (!parsed.success) {
+    return apiError('INVALID_REQUEST', '요청을 확인해 주세요.', 400, currentRequestId, {
+      issues: parsed.error.issues,
+    })
+  }
   const {
     hkUuid,
     source,
@@ -141,11 +151,7 @@ async function handleCreate(
     locationName,
     notes,
     exercises,
-  } = body
-
-  if (!activityType || !startedAt || !endedAt || !durationSec || !scheduledDate) {
-    return apiError('INVALID_REQUEST', '필수 항목을 확인해 주세요.', 400, currentRequestId)
-  }
+  } = parsed.data
 
   // Idempotency via hk_uuid (HealthKit's own stable id, not the
   // Idempotency-Key header every other POST endpoint uses) -- a workout can
@@ -166,7 +172,7 @@ async function handleCreate(
     .insert({
       user_id: userId,
       hk_uuid: hkUuid ?? null,
-      source: source ?? 'manual',
+      source,
       activity_type: activityType,
       started_at: startedAt,
       ended_at: endedAt,
@@ -246,7 +252,13 @@ async function handleUpdateDetails(
   const body = await req.json().catch(() => null)
   if (!body) return apiError('INVALID_REQUEST', 'JSON 본문이 필요합니다.', 400, currentRequestId)
 
-  const { locationName, notes, exercises } = body
+  const parsedDetails = workoutLogUpdateDetailsSchema.safeParse(body)
+  if (!parsedDetails.success) {
+    return apiError('INVALID_REQUEST', '요청을 확인해 주세요.', 400, currentRequestId, {
+      issues: parsedDetails.error.issues,
+    })
+  }
+  const { locationName, notes, exercises } = parsedDetails.data
 
   const { error: upsertError } = await supabase
     .from('workout_log_details')
