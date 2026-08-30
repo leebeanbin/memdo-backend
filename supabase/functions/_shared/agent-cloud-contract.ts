@@ -759,6 +759,66 @@ async function getRoutinePreferences(supabase: SupabasePort): Promise<unknown> {
   return { configured: true, ...preferencesDto(data) }
 }
 
+/** Converts an IANA timezone name to its UTC offset in minutes at `at`
+ * (positive east of UTC, the same sign convention every other
+ * offsetMinutes value in this file uses) -- computed for the specific
+ * instant rather than a fixed constant, so it's correct across a DST
+ * transition for timezones that observe one (Asia/Seoul doesn't, but this
+ * helper isn't KST-specific). */
+export function ianaOffsetMinutes(timeZone: string, at: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(at).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value
+    return acc
+  }, {} as Record<string, string>)
+  const asIfUTC = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
+  )
+  return Math.round((asIfUTC - at.getTime()) / 60_000)
+}
+
+/** The requesting user's own timezone offset (user_preferences.timezone),
+ * falling back to DEFAULT_TIMEZONE_OFFSET_MINUTES if the row/timezone is
+ * missing or the query fails -- staging a proposal shouldn't hard-fail over
+ * a preferences lookup, unlike the conflict check's own fail-closed
+ * behavior (a missing timezone falling back to a reasonable default is not
+ * the same risk as silently claiming "no conflict").
+ *
+ * bd5: propose_schedule/propose_schedule_update used to resolve
+ * 'today'/'tomorrow' against this fixed KST default regardless of the
+ * actual user, then ship the *unresolved* token back to the client, which
+ * re-resolved it a second time against the device's own local timezone --
+ * for a user outside KST the two resolutions could disagree on which
+ * calendar date "today" even is, so the conflict check and the
+ * eventually-saved date could silently be for different days. Fixed by
+ * resolving once, here, and shipping the resolved date. */
+async function resolveUserTimezoneOffsetMinutes(
+  supabase: SupabasePort,
+  today: Date,
+): Promise<number> {
+  try {
+    const { data, error } = await supabase.from('user_preferences').select('timezone')
+      .maybeSingle()
+    if (error || !data?.timezone) return DEFAULT_TIMEZONE_OFFSET_MINUTES
+    return ianaOffsetMinutes(data.timezone as string, today)
+  } catch {
+    return DEFAULT_TIMEZONE_OFFSET_MINUTES
+  }
+}
+
 /** Mirrors reviews/index.ts's private reviewDto() -- duplicated rather than
  * imported since that function isn't exported (kept function-local there).
  * Phase 10 (#5 in the responsibility-separation plan) moves reviewDto into
@@ -973,7 +1033,26 @@ async function handleProposeSchedule(
         'Only one new schedule can be proposed per turn -- one is already staged for the user to confirm. Describe just that one and wait for the user to confirm or decline before proposing another.',
     }
   }
-  state.proposedSchedule = args
+  // bd5: resolve 'today'/'tomorrow' once, here, against the requesting
+  // user's own timezone -- and ship the *resolved* date, not the raw
+  // token. Previously state.proposedSchedule carried args.date unresolved
+  // ("today"), the client then re-resolved that same token a second time
+  // against the device's own local timezone (AgentDateExpression), and for
+  // a user outside KST the two resolutions could silently disagree on
+  // which calendar date "today" even was -- the conflict check below would
+  // examine one day while the client ends up saving to another. A resolved
+  // "yyyy-MM-dd" is exactly the `.explicit(Date)` case
+  // AgentDateExpression(token:) already parses, so this needs no client
+  // change: it stops applying today/tomorrow semantics client-side at all
+  // instead of getting them wrong for a second time.
+  // args.date is required by proposeScheduleArgsSchema (parseAgentToolCall
+  // already validated it before this handler ran) -- no fallback needed.
+  const offsetMinutes = await resolveUserTimezoneOffsetMinutes(supabase, today)
+  const resolvedArgs: ProposedScheduleArgs = {
+    ...(args as ProposedScheduleArgs),
+    date: resolveDate(args.date, today, offsetMinutes),
+  }
+  state.proposedSchedule = resolvedArgs
   // Reflection: guaranteed, not dependent on the model having called
   // search_schedules first (the system prompt asks it to, but nothing
   // enforces that).
@@ -986,9 +1065,7 @@ async function handleProposeSchedule(
   // into conflictTitle (a real conflict has a real event title; "we
   // couldn't check" doesn't, and the client renders conflictTitle inside a
   // "there's a '<title>' at the same time" sentence).
-  // args.date is required by proposeScheduleArgsSchema (parseAgentToolCall
-  // already validated it before this handler ran) -- no fallback needed.
-  const proposedDate = resolveDate(args.date, today)
+  const proposedDate = resolvedArgs.date
   let existing: ExistingScheduleRow[]
   try {
     existing = await fetchSchedules(supabase, proposedDate, proposedDate)
@@ -996,7 +1073,9 @@ async function handleProposeSchedule(
     existing = []
     state.conflictCheckFailed = true
   }
-  state.conflictTitle = state.conflictCheckFailed ? null : findConflict(existing, args, today)
+  state.conflictTitle = state.conflictCheckFailed
+    ? null
+    : findConflict(existing, resolvedArgs, today)
   return state.conflictCheckFailed
     ? {
       ok: false,
@@ -1043,15 +1122,21 @@ async function handleProposeScheduleUpdate(
     // "conflict" with itself.
     let updateConflictTitle: string | null = null
     let updateConflictCheckFailed = false
+    // bd5: resolved once against the user's own timezone, same as
+    // handleProposeSchedule above -- see its comment. Left undefined for
+    // complete/delete, which never carry a date; updateArgs.date passes
+    // through unchanged for those below.
+    let resolvedRescheduleDate: string | undefined
     if (updateArgs.action === 'reschedule') {
       // Required by proposeScheduleUpdateArgsSchema's 'reschedule' variant
       // (parseAgentToolCall already validated this) -- ProposedScheduleUpdateArgs
       // still types `date` as optional since it also covers complete/delete,
       // which never carry one.
-      const date = updateArgs.date as string
-      const targetDate = resolveDate(date, today)
+      const offsetMinutes = await resolveUserTimezoneOffsetMinutes(supabase, today)
+      const date = resolveDate(updateArgs.date as string, today, offsetMinutes)
+      resolvedRescheduleDate = date
       try {
-        const existing = await fetchSchedules(supabase, targetDate, targetDate)
+        const existing = await fetchSchedules(supabase, date, date)
         updateConflictTitle = findConflict(
           existing.filter((row) => row.id !== updateArgs.id),
           {
@@ -1070,6 +1155,7 @@ async function handleProposeScheduleUpdate(
 
     state.proposedScheduleUpdate = {
       ...updateArgs,
+      date: resolvedRescheduleDate ?? updateArgs.date,
       title: target.title,
       version: target.version,
       conflictTitle: updateConflictCheckFailed ? null : updateConflictTitle,

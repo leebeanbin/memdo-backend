@@ -145,7 +145,12 @@ export function expandOccurrences(rule: RecurrenceFields, from: string, to: stri
       case 'weekly':
         return addDays(rule.anchorDate, index * interval * 7)
       case 'biweekly':
-        return addDays(rule.anchorDate, index * 14)
+        // bd15/be15: hardcoded `index * 14`, silently ignoring
+        // `interval` -- every other case here scales its base period by
+        // `interval` (weekly: index * interval * 7). A 'biweekly' rule with
+        // interval 2 ("every 2 biweeks" = every 4 weeks) collapsed to plain
+        // biweekly instead.
+        return addDays(rule.anchorDate, index * interval * 14)
       case 'monthly':
         return addMonths(rule.anchorDate, index * interval)
       case 'yearly':
