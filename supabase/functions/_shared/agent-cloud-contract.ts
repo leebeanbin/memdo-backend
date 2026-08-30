@@ -655,11 +655,18 @@ type DayItemRow = {
 }
 
 async function fetchDayItems(supabase: SupabasePort, date: string): Promise<DayItemRow[]> {
+  // fetchSchedules/fetchScheduleById already got this filter (founder-
+  // dogfooding fix, earlier Critical round) -- fetchDayItems (backing
+  // get_day_context) was the one Agent-facing DB read left without it, so a
+  // rescheduled/cancelled/skipped row (deleted_at stays null, only status
+  // changes) still counted as an incomplete item the calendar doesn't show
+  // (be6).
   const { data, error } = await supabase
     .from('todos')
     .select('id,title,start_at,end_at,status')
     .eq('scheduled_date', date)
     .is('deleted_at', null)
+    .not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
     .limit(200)
   if (error) throw error
   return data as DayItemRow[]
