@@ -1,6 +1,7 @@
 import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
 import {
   appleTokenExchangeRequestSchema,
+  decodeAppleIdTokenSub,
   exchangeAppleAuthCode,
   storeAppleRefreshTokenSecret,
   updateAppleRefreshTokenSecret,
@@ -35,6 +36,7 @@ export default {
     const supabase = serviceClient()
 
     let refreshToken: string
+    let appleSub: string | null = null
     try {
       const tokenResponse = await exchangeAppleAuthCode(parsed.data.authorizationCode)
       if (!tokenResponse.refresh_token) {
@@ -44,6 +46,7 @@ export default {
         throw new Error('apple token response had no refresh_token')
       }
       refreshToken = tokenResponse.refresh_token
+      appleSub = tokenResponse.id_token ? decodeAppleIdTokenSub(tokenResponse.id_token) : null
     } catch (error) {
       console.error(
         JSON.stringify({
@@ -53,6 +56,44 @@ export default {
         }),
       )
       return apiError('INTERNAL_ERROR', 'Apple 인증 처리에 실패했습니다.', 500, currentRequestId)
+    }
+
+    // The endpoint accepted any authorizationCode from any authenticated
+    // caller and stored the resulting refresh token under *their* userId --
+    // nothing checked that the Apple identity in the token response
+    // actually matches the caller's own. An authorization code minted for
+    // the same client_id but a different Apple account would bind that
+    // account's refresh token (and later, revoke privileges via account
+    // deletion) to the caller. Found via founder-dogfooding code review
+    // (be5). Compares against auth.identities' own record of which Apple
+    // account this Supabase user actually signed in with -- not something
+    // this request's payload can influence.
+    if (!appleSub) {
+      console.error(
+        JSON.stringify({
+          requestId: currentRequestId,
+          operation: 'apple_auth.id_token_missing',
+        }),
+      )
+      return apiError('INTERNAL_ERROR', 'Apple 인증 처리에 실패했습니다.', 500, currentRequestId)
+    }
+    const { data: userData, error: userLookupError } = await supabase.auth.admin.getUserById(userId)
+    const expectedSub = userData?.user?.identities?.find((i) => i.provider === 'apple')
+      ?.identity_data?.sub as string | undefined
+    if (userLookupError || !expectedSub || expectedSub !== appleSub) {
+      console.error(
+        JSON.stringify({
+          requestId: currentRequestId,
+          operation: 'apple_auth.identity_mismatch',
+          error: userLookupError,
+        }),
+      )
+      return apiError(
+        'INVALID_REQUEST',
+        'Apple 계정 정보가 일치하지 않아요.',
+        400,
+        currentRequestId,
+      )
     }
 
     try {

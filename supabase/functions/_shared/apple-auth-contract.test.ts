@@ -1,4 +1,8 @@
-import { appleTokenExchangeRequestSchema, buildAppleClientSecret } from './apple-auth-contract.ts'
+import {
+  appleTokenExchangeRequestSchema,
+  buildAppleClientSecret,
+  decodeAppleIdTokenSub,
+} from './apple-auth-contract.ts'
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
@@ -94,4 +98,39 @@ Deno.test('buildAppleClientSecret produces a structurally valid, correctly signe
     new TextEncoder().encode(signingInput),
   )
   assert(signatureValid)
+})
+
+function base64UrlEncodeJson(value: unknown): string {
+  const binary = new TextEncoder().encode(JSON.stringify(value))
+  let str = ''
+  for (const byte of binary) str += String.fromCharCode(byte)
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function fakeIdToken(payload: Record<string, unknown>): string {
+  const header = base64UrlEncodeJson({ alg: 'RS256', kid: 'test' })
+  const body = base64UrlEncodeJson(payload)
+  // decodeAppleIdTokenSub never checks the signature (see its own doc
+  // comment on why) -- any third segment round-trips through split('.').
+  return `${header}.${body}.fake-signature`
+}
+
+Deno.test('decodeAppleIdTokenSub reads the sub claim out of a real-shaped id_token', () => {
+  const token = fakeIdToken({
+    iss: 'https://appleid.apple.com',
+    sub: '001234.abcd5678.5678',
+    aud: 'com.memdo.ios',
+  })
+  assert(decodeAppleIdTokenSub(token) === '001234.abcd5678.5678')
+})
+
+Deno.test('decodeAppleIdTokenSub returns null for a malformed token', () => {
+  assert(decodeAppleIdTokenSub('not-a-jwt') === null)
+  assert(decodeAppleIdTokenSub('only.two') === null)
+  assert(decodeAppleIdTokenSub('a.b.c') === null)
+})
+
+Deno.test('decodeAppleIdTokenSub returns null when sub is missing or not a string', () => {
+  assert(decodeAppleIdTokenSub(fakeIdToken({ aud: 'com.memdo.ios' })) === null)
+  assert(decodeAppleIdTokenSub(fakeIdToken({ sub: 12345 })) === null)
 })

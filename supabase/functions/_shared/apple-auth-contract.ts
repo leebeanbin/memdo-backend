@@ -111,6 +111,31 @@ type AppleTokenResponse = {
   refresh_token?: string
   expires_in: number
   token_type: string
+  // Always present for an authorization_code exchange (distinct from the
+  // identityToken the client already sent Supabase for signInWithIdToken --
+  // this is Apple's *own* copy from the same exchange, used only to verify
+  // it names the same Apple account as the caller, see decodeAppleIdTokenSub).
+  id_token?: string
+}
+
+/** Decodes (does not verify -- see below) the `sub` claim from an Apple
+ * id_token. No signature verification needed: this token comes directly
+ * from Apple's /auth/token response to *our own* authenticated request
+ * (our client_secret, over TLS) -- it was never passed through the client,
+ * unlike the identityToken Supabase already verified for sign-in. Decoding
+ * the payload is only to read a claim out of a value we already trust the
+ * source of, not to establish trust. */
+export function decodeAppleIdTokenSub(idToken: string): string | null {
+  const parts = idToken.split('.')
+  if (parts.length !== 3) return null
+  try {
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = base64 + '='.repeat((4 - base64.length % 4) % 4)
+    const payload = JSON.parse(atob(padded)) as { sub?: unknown }
+    return typeof payload.sub === 'string' ? payload.sub : null
+  } catch {
+    return null
+  }
 }
 
 /** Exchanges a Sign in with Apple authorization code for tokens.
