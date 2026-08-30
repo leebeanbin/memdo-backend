@@ -363,9 +363,25 @@ export default {
             },
           )
         }
+        // bd14: todoUpdate needs the row's status as it stood *before* this
+        // PATCH to tell a genuine not-completed -> completed transition
+        // apart from a PATCH that merely keeps an already-completed item
+        // completed (e.g. fixing a typo) -- see todoUpdate's comment. A
+        // race between this read and the update below is already handled
+        // by the existing optimistic-lock .eq('version', ...) check: if
+        // another write lands in between, that check simply fails to match
+        // and the request 409s, so a stale `previousStatus` here can never
+        // actually get applied.
+        const current = await context.supabase
+          .from('todos')
+          .select('status')
+          .eq('id', itemId)
+          .maybeSingle()
+        if (current.error) throw current.error
+
         const { data, error } = await context.supabase
           .from('todos')
-          .update(todoUpdate(parsed.data))
+          .update(todoUpdate(parsed.data, (current.data?.status as string | undefined) ?? null))
           .eq('id', itemId)
           .eq('version', parsed.data.version)
           .is('deleted_at', null)
