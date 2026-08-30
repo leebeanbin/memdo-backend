@@ -103,3 +103,25 @@ Deno.test('googleMirrorEventsInRange maps a mirror row into the shared list-item
   assert(items[0].source === 'google_calendar')
   assert(items[0].isVirtual === false)
 })
+
+Deno.test('googleMirrorEventsInRange derives scheduledDate in KST, not raw UTC', async () => {
+  // 2026-08-15T20:00:00Z is 2026-08-16 05:00 KST -- a naive UTC slice
+  // reports the previous day (be7).
+  const items = await googleMirrorEventsInRange(
+    fakeSupabase({
+      google_calendar_mirror_events: [{
+        id: 'evt-early',
+        connection_id: 'conn-1',
+        title: '새벽 러닝',
+        is_all_day: false,
+        start_at: '2026-08-15T20:00:00.000Z',
+        end_at: '2026-08-15T20:30:00.000Z',
+        location_name: null,
+      }],
+    }),
+    '2026-08-16',
+    '2026-08-16',
+  )
+  assert(items.length === 1)
+  assert(items[0].scheduledDate === '2026-08-16')
+})

@@ -73,6 +73,21 @@ export async function virtualOccurrencesInRange(
   return { items: await Promise.all(pending), windowEnd: clampedTo }
 }
 
+// Same fixed KST assumption DEFAULT_TIMEZONE_OFFSET_MINUTES (agent-cloud-
+// contract.ts) makes elsewhere -- not duplicating that import here (this
+// module sits below agent-cloud-contract.ts in the dependency graph) is
+// deliberate; a real per-user timezone here is a bigger, separate change
+// (see the schedule_rules timezone-storage work).
+const GOOGLE_MIRROR_KST_OFFSET_MINUTES = 540
+
+/** Converts a UTC instant to its KST calendar date (yyyy-MM-dd) -- shifting
+ * the instant forward by the offset and reading the UTC date of *that*
+ * moment gives the KST date without needing a timezone-aware Date API. */
+function kstDateString(instant: string): string {
+  const shifted = new Date(new Date(instant).getTime() + GOOGLE_MIRROR_KST_OFFSET_MINUTES * 60_000)
+  return shifted.toISOString().slice(0, 10)
+}
+
 /** Read-only Google Calendar events mirrored into the same list as todos, the
  * same way virtual recurring occurrences are: merged in, never DB-backed
  * from the client's perspective, calendarId points at the synthetic "Google
@@ -82,16 +97,25 @@ export async function googleMirrorEventsInRange(
   from: string,
   to: string,
 ): Promise<Record<string, unknown>[]> {
+  // Range filters and scheduledDate used to be computed in raw UTC while
+  // everything else here treats "today"/scheduledDate as KST -- an event
+  // before ~09:00 KST has a UTC start_at on the *previous* UTC day, so it
+  // rendered a day early, and if that previous day was the first day of
+  // the requested range, .gt('end_at', ...) (also UTC-midnight) dropped it
+  // from the response entirely. Both boundaries now carry an explicit
+  // +09:00 offset instead of implicit UTC, and scheduledDate is derived
+  // from the KST-shifted instant (found via founder-dogfooding code
+  // review, be7).
   const { data, error } = await supabase
     .from('google_calendar_mirror_events')
     .select('id,connection_id,title,is_all_day,start_at,end_at,location_name')
-    .lt('start_at', `${to}T23:59:59.999Z`)
-    .gt('end_at', `${from}T00:00:00.000Z`)
+    .lt('start_at', `${to}T23:59:59.999+09:00`)
+    .gt('end_at', `${from}T00:00:00.000+09:00`)
   if (error) throw error
 
   return (data as Record<string, unknown>[]).map((row) => ({
     id: row.id,
-    scheduledDate: String(row.start_at).slice(0, 10),
+    scheduledDate: kstDateString(row.start_at as string),
     calendarId: row.connection_id,
     title: row.title,
     entryKind: 'event',
