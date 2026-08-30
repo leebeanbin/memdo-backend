@@ -291,11 +291,22 @@ export default {
           .single()
 
         if (!error) return success(todoDto(data), 201, 'todos.create', 1)
-        // scheduleRuleId is client-supplied; a nonexistent (or, since the FK
-        // check runs before RLS would ever filter it, another user's) rule id
-        // fails the foreign key rather than something we validated ourselves.
-        // Surface it as a normal validation error, not a 500.
+        // Two different FKs can fire here (calendarId or scheduleRuleId),
+        // and this used to always blame the recurrence rule regardless of
+        // which one actually violated -- calendarId is reachable on a
+        // normal path (GET /calendars appends a synthetic, non-writable
+        // Google Calendar entry) and got a message about recurrence rules
+        // instead. Postgres includes the constraint name in the error
+        // message itself, no extra query needed to tell them apart (bd10).
         if (error.code === POSTGRES_FOREIGN_KEY_VIOLATION) {
+          if (error.message?.includes('todos_calendar_user_fkey')) {
+            return apiError(
+              'INVALID_REQUEST',
+              '연결할 캘린더를 찾을 수 없습니다.',
+              400,
+              currentRequestId,
+            )
+          }
           return apiError(
             'INVALID_REQUEST',
             '연결할 반복 규칙을 찾을 수 없습니다.',
@@ -304,6 +315,23 @@ export default {
           )
         }
         if (error.code !== POSTGRES_UNIQUE_VIOLATION) throw error
+
+        // todos_pkey (the idempotency-key replay this branch exists for)
+        // isn't the only unique constraint on this table --
+        // todos_rule_occurrence_uidx (schedule_rule_id, scheduled_date)
+        // fires when materializing a virtual occurrence for a date that
+        // already has a real row for that rule, which is a genuinely
+        // different situation this used to misreport as "same request key
+        // used for a different item" (it looks up idempotencyKey as an id,
+        // finds nothing, and returns that message regardless) (be8).
+        if (error.message?.includes('todos_rule_occurrence_uidx')) {
+          return apiError(
+            'VERSION_CONFLICT',
+            '이미 해당 날짜에 반복 일정이 있어요.',
+            409,
+            currentRequestId,
+          )
+        }
 
         const existing = await context.supabase
           .from('todos')
