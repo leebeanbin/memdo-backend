@@ -51,6 +51,27 @@ Deno.test('count bounds the whole series even before the window', () => {
   assert(JSON.stringify(dates) === JSON.stringify(['2026-08-02', '2026-08-03']))
 })
 
+Deno.test('biweekly rule respects interval, not just a hardcoded 14 days (bd15/be15)', () => {
+  // interval: 2 on a 'biweekly' rule means every 4 weeks (2 * 14 days) --
+  // previously hardcoded to `index * 14`, so this collapsed to plain
+  // biweekly (every 2 weeks) regardless of interval.
+  const dates = expandOccurrences(
+    { frequency: 'biweekly', interval: 2, anchorDate: '2026-08-01' },
+    '2026-08-01',
+    '2026-09-30',
+  )
+  assert(JSON.stringify(dates) === JSON.stringify(['2026-08-01', '2026-08-29', '2026-09-26']))
+})
+
+Deno.test('biweekly rule with interval 1 is unchanged -- every 14 days', () => {
+  const dates = expandOccurrences(
+    { frequency: 'biweekly', interval: 1, anchorDate: '2026-08-01' },
+    '2026-08-01',
+    '2026-09-05',
+  )
+  assert(JSON.stringify(dates) === JSON.stringify(['2026-08-01', '2026-08-15', '2026-08-29']))
+})
+
 Deno.test('untilDate stops the series', () => {
   const dates = expandOccurrences(
     { frequency: 'weekly', interval: 1, anchorDate: '2026-08-03', untilDate: '2026-08-20' },

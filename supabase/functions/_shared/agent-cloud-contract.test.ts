@@ -8,6 +8,7 @@ import {
   type ExistingScheduleRow,
   expandScope,
   findConflict,
+  ianaOffsetMinutes,
   newToolDispatchState,
   resolveDate,
   resolveOpenRouterModel,
@@ -167,6 +168,26 @@ Deno.test('findConflict excludes the item being updated from its own conflict ch
   assert(conflict === null)
 })
 
+Deno.test('ianaOffsetMinutes matches the fixed KST constant for Asia/Seoul', () => {
+  // Asia/Seoul is a fixed +540, year-round -- same value as
+  // DEFAULT_TIMEZONE_OFFSET_MINUTES.
+  assert(ianaOffsetMinutes('Asia/Seoul', new Date('2026-08-16T00:00:00Z')) === 540)
+  assert(ianaOffsetMinutes('Asia/Seoul', new Date('2026-01-16T00:00:00Z')) === 540)
+})
+
+Deno.test('ianaOffsetMinutes is negative west of UTC', () => {
+  // America/Los_Angeles is UTC-7 (PDT) in August.
+  assert(ianaOffsetMinutes('America/Los_Angeles', new Date('2026-08-16T00:00:00Z')) === -420)
+})
+
+Deno.test('ianaOffsetMinutes tracks a DST transition, unlike a fixed offset constant', () => {
+  // America/Los_Angeles is UTC-8 (PST) in January, UTC-7 (PDT) in August --
+  // the whole point of resolving this from Intl per-instant rather than a
+  // single stored constant.
+  assert(ianaOffsetMinutes('America/Los_Angeles', new Date('2026-01-16T00:00:00Z')) === -480)
+  assert(ianaOffsetMinutes('America/Los_Angeles', new Date('2026-08-16T00:00:00Z')) === -420)
+})
+
 // ── dispatchToolCall: fake Supabase port covering the exact chain shapes
 // fetchSchedules()/fetchScheduleById() call (…select().is().gte().lte()
 // .limit() awaited directly; …eq().is().maybeSingle() awaited separately).
@@ -195,6 +216,30 @@ function fakeSupabase(rows: ExistingScheduleRow[]): { from: (table: string) => a
           resolve({ data: rows, error: null }),
       }
       return chain
+    },
+  }
+}
+
+// bd5: branches on table name so `user_preferences` reads (resolveUser
+// TimezoneOffsetMinutes) return a real timezone independent of whatever
+// `rows` seeds for the schedule-fetch chain (fakeSupabase's own bare
+// .maybeSingle() with no .eq() would otherwise just return null, silently
+// falling back to the KST default and never exercising this codepath at
+// all).
+function fakeSupabaseWithTimezone(
+  rows: ExistingScheduleRow[],
+  timezone: string,
+): { from: (table: string) => any } {
+  return {
+    from: (table: string) => {
+      if (table === 'user_preferences') {
+        return {
+          select: () => ({
+            maybeSingle: () => Promise.resolve({ data: { timezone }, error: null }),
+          }),
+        }
+      }
+      return fakeSupabase(rows).from(table)
     },
   }
 }
@@ -235,6 +280,38 @@ Deno.test('dispatchToolCall propose_schedule with no conflict', async () => {
   assert(state.proposedSchedule?.title === '점심')
   assert(state.conflictTitle === null)
   assert(state.conflictCheckFailed === false)
+})
+
+Deno.test('dispatchToolCall propose_schedule ships the resolved date, not the raw "today" token (bd5)', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule',
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  // dispatchToday is 2026-08-16T00:00:00Z; the default (KST, +540) resolves
+  // 'today' to 2026-08-16. The point of bd5 is that this is now a concrete
+  // date, not the literal string "today" the client would have to resolve
+  // a second time itself.
+  assert(state.proposedSchedule?.date === '2026-08-16')
+})
+
+Deno.test('dispatchToolCall propose_schedule resolves "today" against the user\'s own timezone, not the fixed KST default (bd5)', async () => {
+  // dispatchToday = 2026-08-16T00:00:00Z is still Aug 16 in KST (+540) but
+  // still Aug 15 in America/Los_Angeles (-420, PDT in August) -- previously
+  // the server always assumed KST here regardless of the actual user.
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabaseWithTimezone([], 'America/Los_Angeles'),
+    'propose_schedule',
+    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.proposedSchedule?.date === '2026-08-15')
 })
 
 Deno.test('dispatchToolCall propose_schedule surfaces a real conflict', async () => {
@@ -383,6 +460,29 @@ Deno.test('dispatchToolCall propose_schedule_update reschedule excludes its own 
   )
   assert(result.ok === true)
   assert(state.proposedScheduleUpdate?.conflictTitle === null)
+})
+
+Deno.test("dispatchToolCall propose_schedule_update reschedule resolves date against the user's own timezone (bd5)", async () => {
+  // Same boundary as the propose_schedule test above: dispatchToday
+  // (2026-08-16T00:00:00Z) is still Aug 15 in America/Los_Angeles.
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: null,
+    end_at: null,
+    version: 1,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabaseWithTimezone(existing, 'America/Los_Angeles'),
+    'propose_schedule_update',
+    { id: 'a1', action: 'reschedule', date: 'today', startTime: '14:00', endTime: '15:00' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.proposedScheduleUpdate?.date === '2026-08-15')
 })
 
 Deno.test('dispatchToolCall propose_schedule_update reschedule detects a conflict with a different item', async () => {
