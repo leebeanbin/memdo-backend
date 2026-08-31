@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { categoryDto } from './category-contract.ts'
 import { todoDto } from './todo-contract.ts'
 import { workoutLogDto } from './workout-log-contract.ts'
 
@@ -40,14 +41,16 @@ export function encodeSyncCursor(row: Record<string, unknown>): string {
     .replaceAll('=', '')
 }
 
-// bd26: entity-aware -- /sync now merges todos and workout_logs (bare
-// entityType:'todo' was the last hardcoded piece). workout_logs has no
-// DELETE endpoint (nothing to soft-delete/tombstone) and no version column
-// (no optimistic-lock API for it), so those fields are simply absent from
-// a workout item's data rather than a placeholder.
+// bd26: entity-aware -- /sync now merges todos, workout_logs, and
+// user_categories (bare entityType:'todo' was the last hardcoded piece).
+// workout_logs has no DELETE endpoint (nothing to soft-delete/tombstone)
+// and no version column (no optimistic-lock API for it), so those fields
+// are simply absent from a workout item's data rather than a placeholder.
+// user_categories has no version column either, but does soft-delete now
+// (PUT /categories' prune step, same migration that added sync_seq here).
 export function syncItem(
   row: Record<string, unknown>,
-  entity: 'todo' | 'workout',
+  entity: 'todo' | 'workout' | 'category',
   category: TodoCategory | null = null,
 ) {
   if (entity === 'workout') {
@@ -57,6 +60,16 @@ export function syncItem(
       id: row.id,
       updatedAt: row.updated_at,
       data: workoutLogDto(row),
+    }
+  }
+  if (entity === 'category') {
+    const deletedAt = row.deleted_at as string | null
+    return {
+      entityType: 'category' as const,
+      operation: deletedAt ? 'delete' as const : 'upsert' as const,
+      id: row.id,
+      updatedAt: row.updated_at,
+      data: deletedAt ? null : categoryDto(row),
     }
   }
   const deletedAt = row.deleted_at as string | null
