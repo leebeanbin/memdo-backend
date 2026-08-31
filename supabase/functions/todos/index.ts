@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   apiError,
+  normalizeZodIssues,
   POSTGRES_FOREIGN_KEY_VIOLATION,
   POSTGRES_UNIQUE_VIOLATION,
   sha256,
@@ -69,7 +70,7 @@ export default {
         })
         if (!parsed.success) {
           return apiError('INVALID_REQUEST', '조회 조건을 확인해 주세요.', 400, currentRequestId, {
-            issues: parsed.error.issues,
+            issues: normalizeZodIssues(parsed.error.issues),
           })
         }
 
@@ -184,7 +185,7 @@ export default {
             400,
             currentRequestId,
             {
-              issues: parsed.error.issues,
+              issues: normalizeZodIssues(parsed.error.issues),
             },
           )
         }
@@ -279,7 +280,7 @@ export default {
         const parsed = todoInputSchema.safeParse(body)
         if (!parsed.success) {
           return apiError('INVALID_REQUEST', '일정 입력을 확인해 주세요.', 400, currentRequestId, {
-            issues: parsed.error.issues,
+            issues: normalizeZodIssues(parsed.error.issues),
           })
         }
 
@@ -359,7 +360,7 @@ export default {
             400,
             currentRequestId,
             {
-              issues: parsed.error.issues,
+              issues: normalizeZodIssues(parsed.error.issues),
             },
           )
         }
@@ -454,7 +455,7 @@ export default {
             400,
             currentRequestId,
             {
-              issues: parsed.error.issues,
+              issues: normalizeZodIssues(parsed.error.issues),
             },
           )
         }

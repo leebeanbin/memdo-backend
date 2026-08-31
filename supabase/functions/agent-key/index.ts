@@ -1,4 +1,10 @@
-import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
+import {
+  apiError,
+  normalizeZodIssues,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import { agentKeySaveSchema, OPENROUTER_PROVIDER } from '../_shared/agent-key-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
 
@@ -39,7 +45,7 @@ export default {
         const parsed = agentKeySaveSchema.safeParse(await request.json().catch(() => undefined))
         if (!parsed.success) {
           return apiError('INVALID_REQUEST', 'API 키를 확인해 주세요.', 400, currentRequestId, {
-            issues: parsed.error.issues,
+            issues: normalizeZodIssues(parsed.error.issues),
           })
         }
 

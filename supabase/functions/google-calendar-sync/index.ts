@@ -7,6 +7,7 @@ import {
   refreshAccessToken,
   serviceClient,
 } from '../_shared/google-calendar-contract.ts'
+import { constantTimeEquals } from '../_shared/http.ts'
 
 const STALE_AFTER_MS = 10 * 60 * 1000
 const MAX_CONNECTIONS_PER_RUN = 50
@@ -119,7 +120,9 @@ export default {
   fetch: async (request: Request): Promise<Response> => {
     const secret = Deno.env.get('GOOGLE_CALENDAR_SYNC_SECRET')
     const auth = request.headers.get('Authorization')
-    if (!secret || auth !== `Bearer ${secret}`) {
+    // be19: this endpoint's only authentication was a plain string
+    // comparison on a publicly reachable route.
+    if (!secret || !auth || !constantTimeEquals(auth, `Bearer ${secret}`)) {
       return new Response('unauthorized', { status: 401 })
     }
 

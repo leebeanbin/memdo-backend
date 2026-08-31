@@ -1215,7 +1215,17 @@ export async function dispatchToolCall(
   const entry: ToolDispatchState['dispatchedTools'][number] = { name: toolName, args: parsed.args }
   state.dispatchedTools.push(entry)
 
+  // be20: parseAgentToolCall validates toolName against AGENT_TOOL_NAMES,
+  // but toolHandlers is a separate lookup table -- adding a tool to
+  // AGENT_TOOL_NAMES without registering its handler here would otherwise
+  // reach `handler(...)` as undefined, an uncaught TypeError that (per be11)
+  // can also skip close()'s audit-log write for the whole turn.
   const handler = toolHandlers[toolName]
+  if (!handler) {
+    const result = { error: 'UNSUPPORTED_TOOL' }
+    entry.result = result
+    return result
+  }
   const result = await handler(supabase, parsed.args, state, today)
   entry.result = result
   return result

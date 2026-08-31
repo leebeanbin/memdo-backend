@@ -23,7 +23,7 @@ import {
   type StreamAccumulator,
 } from '../_shared/agent-stream-contract.ts'
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
-import { apiError, withApi } from '../_shared/http.ts'
+import { apiError, errorEnvelope, normalizeZodIssues, withApi } from '../_shared/http.ts'
 import { isExperimentalModelSelectable } from '../_shared/model-registry-contract.ts'
 
 type ChatMessage = {
@@ -100,7 +100,7 @@ export default {
     const parsed = chatRequestSchema.safeParse(await request.json().catch(() => undefined))
     if (!parsed.success) {
       return apiError('INVALID_REQUEST', '요청을 확인해 주세요.', 400, currentRequestId, {
-        issues: parsed.error.issues,
+        issues: normalizeZodIssues(parsed.error.issues),
       })
     }
 
@@ -434,7 +434,10 @@ export default {
               error: String(error),
             }),
           )
-          send({ error: 'Agent 응답을 받지 못했습니다.' })
+          // bd24: same envelope every other error response in this API
+          // uses, instead of a bare {error: string} unique to this one
+          // mid-stream path.
+          send(errorEnvelope('INTERNAL_ERROR', 'Agent 응답을 받지 못했습니다.', currentRequestId))
           await close('error')
         }
       },

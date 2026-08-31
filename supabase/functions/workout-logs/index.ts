@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   apiError,
+  normalizeZodIssues,
   POSTGRES_UNIQUE_VIOLATION,
   successResponder,
   withApi,
@@ -132,7 +133,7 @@ async function handleCreate(
   const parsed = workoutLogCreateSchema.safeParse(body)
   if (!parsed.success) {
     return apiError('INVALID_REQUEST', '요청을 확인해 주세요.', 400, currentRequestId, {
-      issues: parsed.error.issues,
+      issues: normalizeZodIssues(parsed.error.issues),
     })
   }
   const {
@@ -255,7 +256,7 @@ async function handleUpdateDetails(
   const parsedDetails = workoutLogUpdateDetailsSchema.safeParse(body)
   if (!parsedDetails.success) {
     return apiError('INVALID_REQUEST', '요청을 확인해 주세요.', 400, currentRequestId, {
-      issues: parsedDetails.error.issues,
+      issues: normalizeZodIssues(parsedDetails.error.issues),
     })
   }
   const { locationName, notes, exercises } = parsedDetails.data

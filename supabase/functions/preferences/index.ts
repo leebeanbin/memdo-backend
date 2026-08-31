@@ -1,5 +1,11 @@
 import { z } from 'zod'
-import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
+import {
+  apiError,
+  normalizeZodIssues,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import {
   preferencesDto,
   preferencesInputSchema,
@@ -46,7 +52,7 @@ export default {
         const parsed = preferencesInputSchema.safeParse(await request.json().catch(() => undefined))
         if (!parsed.success) {
           return apiError('INVALID_REQUEST', '설정 값을 확인해 주세요.', 400, currentRequestId, {
-            issues: parsed.error.issues,
+            issues: normalizeZodIssues(parsed.error.issues),
           })
         }
         const { data, error } = await context.supabase

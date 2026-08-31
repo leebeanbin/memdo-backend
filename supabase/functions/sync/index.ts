@@ -2,6 +2,7 @@ import {
   apiError,
   json,
   logRequest,
+  normalizeZodIssues,
   responseByteLength,
   withApi,
   withCrudErrors,
@@ -30,7 +31,7 @@ export default {
       })
       if (!parsed.success) {
         return apiError('INVALID_REQUEST', '동기화 조건을 확인해 주세요.', 400, currentRequestId, {
-          issues: parsed.error.issues,
+          issues: normalizeZodIssues(parsed.error.issues),
         })
       }
 

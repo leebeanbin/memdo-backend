@@ -1,5 +1,12 @@
 import { buildEvalSeedRows, evalSeedSchema } from '../_shared/eval-seed-contract.ts'
-import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
+import {
+  apiError,
+  json,
+  logRequest,
+  normalizeZodIssues,
+  responseByteLength,
+  withApi,
+} from '../_shared/http.ts'
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -37,7 +44,7 @@ export default {
         'eval seed 조건을 확인해 주세요.',
         400,
         currentRequestId,
-        { issues: parsed.error.issues },
+        { issues: normalizeZodIssues(parsed.error.issues) },
       )
     }
 
