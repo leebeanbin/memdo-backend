@@ -40,7 +40,7 @@ import { runEval } from './run.ts'
 type RestOpts = { baseUrl: string; publishableKey: string; accessToken: string }
 
 // The watermark is an opaque, monotonically increasing DB identifier, not a
-// number to do arithmetic on -- agent_usage_log.id is Postgres bigint,
+// number to do arithmetic on -- agent_audit_log.id is Postgres bigint,
 // whose range exceeds JS's safe-integer range. Kept as a string end to
 // end: fetched via `select=id::text` so PostgREST casts it to text before
 // serializing (avoiding a JS-number round trip that could already lose
@@ -48,8 +48,12 @@ type RestOpts = { baseUrl: string; publishableKey: string; accessToken: string }
 // added or subtracted.
 type UsageId = string
 
+// bd22: agent_usage_log was merged into agent_audit_log (one row per turn,
+// usage fields null unless the turn had a completed provider call). The
+// watermark itself doesn't need the prompt_tokens filter -- any row's id is
+// a valid starting point -- only fetchUsageSince's counting query does.
 async function fetchUsageWatermark(opts: RestOpts): Promise<UsageId> {
-  const url = `${opts.baseUrl}/rest/v1/agent_usage_log?select=id::text&order=id.desc&limit=1`
+  const url = `${opts.baseUrl}/rest/v1/agent_audit_log?select=id::text&order=id.desc&limit=1`
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${opts.accessToken}`, apikey: opts.publishableKey },
   })
@@ -67,10 +71,11 @@ async function fetchUsageSince(
 ): Promise<
   { costUsd: number; promptTokens: number; completionTokens: number; requestCount: number }
 > {
-  const url = `${opts.baseUrl}/rest/v1/agent_usage_log` +
+  const url = `${opts.baseUrl}/rest/v1/agent_audit_log` +
     `?select=cost_usd,prompt_tokens,completion_tokens` +
     `&id=gt.${encodeURIComponent(opts.afterId)}` +
-    `&model=eq.${encodeURIComponent(opts.model)}`
+    `&model=eq.${encodeURIComponent(opts.model)}` +
+    `&prompt_tokens=not.is.null`
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${opts.accessToken}`, apikey: opts.publishableKey },
   })
@@ -168,11 +173,12 @@ async function main() {
       afterId: usageAfterId,
     })
 
-    // Invariant: one usage row per completed fixture, no more, no fewer.
-    // agent-cloud-chat/index.ts inserts into agent_usage_log after a
-    // successful provider call but swallows an insert failure (logs it,
-    // still closes the stream normally) -- so a completed fixture can, in
-    // rare cases, produce zero usage rows. Silently reporting a lower
+    // Invariant: one usage row (agent_audit_log row with prompt_tokens set,
+    // bd22) per completed fixture, no more, no fewer. agent-cloud-chat/
+    // index.ts populates those fields after a successful provider call but
+    // swallows an insert failure (logs it, still closes the stream
+    // normally) -- so a completed fixture can, in rare cases, produce zero
+    // usage rows. Silently reporting a lower
     // requestCount/costUsd than what actually happened would make this
     // tool's core output quietly wrong. This also catches drift from the
     // "don't run anything else against this account concurrently" rule --
