@@ -32,3 +32,19 @@ Deno.test('enabled daily review requires a time', () => {
   })
   assert(!result.success)
 })
+
+Deno.test('dailyReview.days rejects a repeated weekday (bd26)', () => {
+  const result = preferencesInputSchema.safeParse({
+    ...valid,
+    dailyReview: { ...valid.dailyReview, days: ['MO', 'MO', 'TU'] },
+  })
+  assert(!result.success)
+})
+
+Deno.test('newsBriefing.days rejects a repeated weekday (bd26)', () => {
+  const result = preferencesInputSchema.safeParse({
+    ...valid,
+    newsBriefing: { enabled: true, localTime: '08:00', days: ['SA', 'SA'] },
+  })
+  assert(!result.success)
+})

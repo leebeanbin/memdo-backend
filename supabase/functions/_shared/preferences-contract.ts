@@ -2,6 +2,13 @@ import { z } from 'zod'
 
 const localTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/)
 const weekdays = z.enum(['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'])
+// bd26 (safe slice): dailyReview.days/newsBriefing.days previously accepted
+// duplicate weekdays (e.g. ['MO', 'MO', 'MO']) since z.array(weekdays).max(7)
+// only bounds length, not uniqueness.
+const weekdaySet = z.array(weekdays).max(7).refine(
+  (days) => new Set(days).size === days.length,
+  { message: 'weekdays must not repeat' },
+)
 
 export const preferencesInputSchema = z.object({
   timezone: z.string().min(1).max(100),
@@ -18,13 +25,13 @@ export const preferencesInputSchema = z.object({
   dailyReview: z.object({
     enabled: z.boolean(),
     time: localTime.nullable().default(null),
-    days: z.array(weekdays).max(7),
+    days: weekdaySet,
     includeReflection: z.boolean().default(true),
   }),
   newsBriefing: z.object({
     enabled: z.boolean(),
     localTime: localTime.nullable().default(null),
-    days: z.array(weekdays).max(7),
+    days: weekdaySet,
   }),
 }).superRefine((value, context) => {
   if ((value.quietHoursStart === null) !== (value.quietHoursEnd === null)) {
