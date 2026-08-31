@@ -65,9 +65,13 @@ export default {
 
         try {
           if (rows.length > 0) {
+            // bd20: onConflict target follows the PK, now (id, user_id) --
+            // a client-generated id colliding with a DIFFERENT user's
+            // category is no longer possible to conflict with, since every
+            // row here already carries this caller's own userId.
             const upserted = await context.supabase
               .from('user_categories')
-              .upsert(rows, { onConflict: 'id' })
+              .upsert(rows, { onConflict: 'id,user_id' })
             if (upserted.error) throw upserted.error
           }
 
