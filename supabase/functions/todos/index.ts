@@ -14,6 +14,7 @@ import {
   DEAD_STATUSES,
   decodeTodoCursor,
   encodeTodoCursor,
+  fetchCategoriesByIds,
   todoDeleteSchema,
   todoDto,
   todoInputSchema,
@@ -56,7 +57,15 @@ export default {
         if (!data) {
           return apiError('RESOURCE_NOT_FOUND', '일정을 찾을 수 없습니다.', 404, currentRequestId)
         }
-        return success(todoDto(data), 200, 'todos.get', 1)
+        const categories = await fetchCategoriesByIds(context.supabase, [
+          data.category_id as string | null,
+        ])
+        return success(
+          todoDto(data, categories.get(data.category_id as string) ?? null),
+          200,
+          'todos.get',
+          1,
+        )
       }
 
       if (request.method === 'GET' && !hasItemPath) {
@@ -147,8 +156,18 @@ export default {
           )
         }
 
+        const categories = await fetchCategoriesByIds(
+          context.supabase,
+          items.map((row: Record<string, unknown>) => row.category_id as string | null),
+        )
         const body = {
-          items: [...items.map(todoDto), ...virtualItems, ...googleItems].sort((a, b) =>
+          items: [
+            ...items.map((row: Record<string, unknown>) =>
+              todoDto(row, categories.get(row.category_id as string) ?? null)
+            ),
+            ...virtualItems,
+            ...googleItems,
+          ].sort((a, b) =>
             String(a.scheduledDate).localeCompare(String(b.scheduledDate)) ||
             Number(a.sortOrder) - Number(b.sortOrder) || String(a.id).localeCompare(String(b.id))
           ),
@@ -233,8 +252,18 @@ export default {
             .eq('id', itemId)
             .single()
           if (original.error) throw original.error
+          const categories = await fetchCategoriesByIds(context.supabase, [
+            original.data.category_id as string | null,
+            data.category_id as string | null,
+          ])
           return success(
-            { original: todoDto(original.data), replacement: todoDto(data) },
+            {
+              original: todoDto(
+                original.data,
+                categories.get(original.data.category_id as string) ?? null,
+              ),
+              replacement: todoDto(data, categories.get(data.category_id as string) ?? null),
+            },
             201,
             'todos.reschedule',
             2,
@@ -256,12 +285,20 @@ export default {
           )
         }
 
+        const currentCategories = await fetchCategoriesByIds(context.supabase, [
+          current.data.category_id as string | null,
+        ])
         return apiError(
           'VERSION_CONFLICT',
           '일정이 다른 곳에서 변경되었거나 재예약할 수 없는 상태입니다.',
           409,
           currentRequestId,
-          { currentResource: todoDto(current.data) },
+          {
+            currentResource: todoDto(
+              current.data,
+              currentCategories.get(current.data.category_id as string) ?? null,
+            ),
+          },
         )
       }
 
@@ -291,19 +328,37 @@ export default {
           .select(todoSelect)
           .single()
 
-        if (!error) return success(todoDto(data), 201, 'todos.create', 1)
-        // Two different FKs can fire here (calendarId or scheduleRuleId),
-        // and this used to always blame the recurrence rule regardless of
-        // which one actually violated -- calendarId is reachable on a
-        // normal path (GET /calendars appends a synthetic, non-writable
-        // Google Calendar entry) and got a message about recurrence rules
-        // instead. Postgres includes the constraint name in the error
-        // message itself, no extra query needed to tell them apart (bd10).
+        if (!error) {
+          const categories = await fetchCategoriesByIds(context.supabase, [
+            data.category_id as string | null,
+          ])
+          return success(
+            todoDto(data, categories.get(data.category_id as string) ?? null),
+            201,
+            'todos.create',
+            1,
+          )
+        }
+        // Three different FKs can fire here (calendarId, scheduleRuleId, or
+        // categoryId, bd18) -- this used to always blame the recurrence rule
+        // for anything that wasn't calendarId, which was already wrong for
+        // calendarId's own synthetic-Google-Calendar-entry path (bd10) and
+        // would now misreport a bad categoryId as a bad recurrence rule too.
+        // Postgres includes the constraint name in the error message itself,
+        // no extra query needed to tell them apart.
         if (error.code === POSTGRES_FOREIGN_KEY_VIOLATION) {
           if (error.message?.includes('todos_calendar_user_fkey')) {
             return apiError(
               'INVALID_REQUEST',
               '연결할 캘린더를 찾을 수 없습니다.',
+              400,
+              currentRequestId,
+            )
+          }
+          if (error.message?.includes('todos_category_user_fkey')) {
+            return apiError(
+              'INVALID_REQUEST',
+              '연결할 카테고리를 찾을 수 없습니다.',
               400,
               currentRequestId,
             )
@@ -348,7 +403,18 @@ export default {
             currentRequestId,
           )
         }
-        return success(todoDto(existing.data), 201, 'todos.create', 1)
+        const existingCategories = await fetchCategoriesByIds(context.supabase, [
+          existing.data.category_id as string | null,
+        ])
+        return success(
+          todoDto(
+            existing.data,
+            existingCategories.get(existing.data.category_id as string) ?? null,
+          ),
+          201,
+          'todos.create',
+          1,
+        )
       }
 
       if (request.method === 'PATCH' && hasItemPath && !action) {
@@ -443,7 +509,15 @@ export default {
           }
         }
 
-        return success(todoDto(data), 200, 'todos.update', 1)
+        const updateCategories = await fetchCategoriesByIds(context.supabase, [
+          data.category_id as string | null,
+        ])
+        return success(
+          todoDto(data, updateCategories.get(data.category_id as string) ?? null),
+          200,
+          'todos.update',
+          1,
+        )
       }
 
       if (request.method === 'DELETE' && hasItemPath && !action) {

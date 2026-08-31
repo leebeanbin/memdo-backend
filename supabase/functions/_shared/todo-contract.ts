@@ -34,6 +34,11 @@ export const todoInputSchema = z.object({
   isAllDay: z.boolean().default(false),
   note: nullableText(2000),
   meetingUrl: nullableText(2048),
+  categoryId: z.uuid().nullable().optional(),
+  // Per-todo override (bd18) -- when categoryId is set, a null emoji/color
+  // here means "inherit the category's current emoji/color" (derived at
+  // read time in todoDto, not copied at creation time); a non-null value
+  // here is an explicit override that wins regardless of the category.
   emoji: z.string().nullable().optional(),
   color: z.enum(['coral', 'amber', 'sage', 'sky', 'indigo', 'violet']).nullable().optional(),
   startAt: z.iso.datetime({ offset: true }).nullable().optional(),
@@ -133,8 +138,32 @@ export function encodeTodoCursor(row: Record<string, unknown>): string {
 export type TodoInput = z.infer<typeof todoInputSchema>
 export type TodoUpdateInput = z.infer<typeof todoUpdateSchema>
 
+type SupabasePort = { from: (table: string) => any }
+
+/** One bulk query for every distinct category_id in a page of todo rows,
+ * instead of one query per row -- used to build the `category` argument
+ * todoDto expects (bd18). RLS on user_categories already scopes this to
+ * the caller's own rows. */
+export async function fetchCategoriesByIds(
+  supabase: SupabasePort,
+  categoryIds: (string | null | undefined)[],
+): Promise<Map<string, TodoCategory>> {
+  const ids = [...new Set(categoryIds.filter((id): id is string => Boolean(id)))]
+  if (!ids.length) return new Map()
+  const { data, error } = await supabase
+    .from('user_categories')
+    .select('id,emoji,color')
+    .in('id', ids)
+  if (error) throw error
+  return new Map(
+    (data as { id: string; emoji: string; color: string }[]).map((
+      c,
+    ) => [c.id, { emoji: c.emoji, color: c.color }]),
+  )
+}
+
 export const todoSelect =
-  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at,sync_seq'
+  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,category_id,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at,sync_seq'
 
 export function todoInsert(input: TodoInput, userId: string, id: string, requestHash: string) {
   return {
@@ -188,6 +217,7 @@ function todoValues(input: TodoInput) {
     is_all_day: input.isAllDay,
     note: input.note ?? null,
     meeting_url: input.meetingUrl ?? null,
+    category_id: input.categoryId ?? null,
     emoji: input.emoji ?? null,
     color: input.color ?? null,
     start_at: input.startAt ?? null,
@@ -207,8 +237,15 @@ function todoValues(input: TodoInput) {
 }
 
 type TodoRow = Record<string, unknown>
+type TodoCategory = { emoji: string; color: string }
 
-export function todoDto(row: TodoRow) {
+// bd18: emoji/color are derived here, not read as a frozen creation-time
+// copy -- `category` is the joined user_categories row (fetched by the
+// caller; see fetchCategoriesByIds in todos/index.ts), and only the todo's
+// own emoji/color column (an explicit per-todo override) takes precedence
+// over it. A todo with no category and no override still falls through to
+// null, same as before this change.
+export function todoDto(row: TodoRow, category: TodoCategory | null = null) {
   const locationName = row.location_name as string | null
   return {
     id: row.id,
@@ -219,8 +256,9 @@ export function todoDto(row: TodoRow) {
     isAllDay: row.is_all_day,
     note: row.note,
     meetingUrl: row.meeting_url,
-    emoji: row.emoji,
-    color: row.color,
+    categoryId: row.category_id,
+    emoji: row.emoji ?? category?.emoji ?? null,
+    color: row.color ?? category?.color ?? null,
     startAt: row.start_at,
     endAt: row.end_at,
     dueAt: row.due_at,

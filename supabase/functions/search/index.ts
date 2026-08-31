@@ -6,7 +6,7 @@ import {
   withCrudErrors,
 } from '../_shared/http.ts'
 import { searchQuerySchema } from '../_shared/search-contract.ts'
-import { todoDto } from '../_shared/todo-contract.ts'
+import { fetchCategoriesByIds, todoDto } from '../_shared/todo-contract.ts'
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -41,7 +41,14 @@ export default {
       const rows = data as Record<string, unknown>[]
       const hasMore = rows.length > parsed.data.limit
       const items = rows.slice(0, parsed.data.limit)
-      const body = { items: items.map(todoDto), hasMore }
+      const categories = await fetchCategoriesByIds(
+        context.supabase,
+        items.map((row) => row.category_id as string | null),
+      )
+      const body = {
+        items: items.map((row) => todoDto(row, categories.get(row.category_id as string) ?? null)),
+        hasMore,
+      }
       return success(body, 200, 'search', items.length)
     })
   }),
