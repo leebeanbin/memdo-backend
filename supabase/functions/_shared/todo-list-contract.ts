@@ -25,7 +25,12 @@ export async function virtualOccurrencesInRange(
     ? addDays(from, MAX_VIRTUAL_WINDOW_DAYS)
     : to
   const [rules, existing] = await Promise.all([
-    supabase.from('schedule_rules').select(ruleSelect).eq('entry_kind', 'event'),
+    // bd21: a deleted rule is soft-deleted, not gone -- without this filter
+    // it would keep generating virtual occurrences forever.
+    supabase.from('schedule_rules').select(ruleSelect).eq('entry_kind', 'event').is(
+      'deleted_at',
+      null,
+    ),
     // Deliberately not filtering out soft-deleted rows: a deleted occurrence is
     // still "spoken for" and must not regenerate as virtual on the next list --
     // otherwise deleting one occurrence of a recurring event can never stick.
