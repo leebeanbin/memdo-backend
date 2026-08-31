@@ -16,6 +16,7 @@ function fakeSupabase(tables: Record<string, unknown[]>): { from: (table: string
         select: () => chain,
         eq: () => chain,
         not: () => chain,
+        is: () => chain,
         gte: () => chain,
         lte: () => chain,
         lt: () => chain,

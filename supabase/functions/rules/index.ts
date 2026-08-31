@@ -56,6 +56,7 @@ export default {
         const { data, error } = await context.supabase
           .from('schedule_rules')
           .select(ruleSelect)
+          .is('deleted_at', null)
           .order('created_at', { ascending: false })
           .order('id')
         if (error) throw error
@@ -67,6 +68,7 @@ export default {
           .from('schedule_rules')
           .select(ruleSelect)
           .eq('id', ruleId)
+          .is('deleted_at', null)
           .maybeSingle()
         if (error) throw error
         if (!data) {
@@ -213,10 +215,15 @@ export default {
           .is('deleted_at', null)
         if (cleared.error) throw cleared.error
 
+        // bd21: soft delete, matching todos' convention (DELETE itself is
+        // revoked from authenticated) -- a hard delete here would null out
+        // schedule_rule_id on every past occurrence kept for history via
+        // the on-delete-set-null FK, losing which series they came from.
         const removed = await context.supabase
           .from('schedule_rules')
-          .delete()
+          .update({ deleted_at: new Date().toISOString() })
           .eq('id', ruleId)
+          .is('deleted_at', null)
           .select('id')
           .maybeSingle()
         if (removed.error) throw removed.error

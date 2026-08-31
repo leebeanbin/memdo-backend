@@ -470,10 +470,14 @@ export default {
         // shouldn't turn into an error response for an action the user already got.
         if (data.schedule_rule_id && data.status === 'completed') {
           try {
+            // bd21: don't materialize a fresh occurrence for a rule that's
+            // been (soft-)deleted since this todo was fetched -- a deleted
+            // series shouldn't keep spawning new future rows.
             const rule = await context.supabase
               .from('schedule_rules')
               .select(ruleSelect)
               .eq('id', data.schedule_rule_id as string)
+              .is('deleted_at', null)
               .maybeSingle()
             if (rule.error) throw rule.error
             if (rule.data && rule.data.entry_kind === 'task') {
