@@ -270,35 +270,17 @@ export default {
           // overhead from persisting the result.
           const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
 
-          if (completedCalls > 0) {
-            try {
-              const logged = await service.from('agent_usage_log').insert({
-                user_id: userId,
-                model,
-                prompt_tokens: totalUsage.promptTokens,
-                completion_tokens: totalUsage.completionTokens,
-                cost_usd: totalUsage.costUsd,
-              })
-              if (logged.error) throw logged.error
-            } catch (error) {
-              console.error(
-                JSON.stringify({
-                  requestId: currentRequestId,
-                  operation: 'agent_cloud_chat.usage_log',
-                  error: String(error),
-                }),
-              )
-            }
-          }
-
-          // Unconditional (unlike agent_usage_log above) -- this is exactly
-          // what covers a first-iteration OpenRouter failure with
-          // completedCalls === 0, since that failure is caught by the
-          // try/catch below and still reaches this close() call.
-          // Failure-isolated, not "non-blocking": a failure here is caught
-          // and logged, never changing the user-facing agent result, but
-          // it's awaited before controller.close(), so it can delay when
-          // the stream actually closes.
+          // bd22: agent_usage_log merged into agent_audit_log -- one row per
+          // turn, written unconditionally (covers a first-iteration
+          // OpenRouter failure with completedCalls === 0, caught by the
+          // try/catch below and still reaching this close() call), with the
+          // usage fields populated only when completedCalls > 0 (null
+          // otherwise -- the same condition agent_usage_log's own insert
+          // used to gate on). Failure-isolated, not "non-blocking": a
+          // failure here is caught and logged, never changing the
+          // user-facing agent result, but it's awaited before
+          // controller.close(), so it can delay when the stream actually
+          // closes.
           try {
             const logged = await service.from('agent_audit_log').insert({
               agent_run_id: agentRunId,
@@ -310,6 +292,9 @@ export default {
               latency_ms: latencyMs,
               result_kind: resultKind,
               provider_completion_id: lastProviderCompletionId,
+              prompt_tokens: completedCalls > 0 ? totalUsage.promptTokens : null,
+              completion_tokens: completedCalls > 0 ? totalUsage.completionTokens : null,
+              cost_usd: completedCalls > 0 ? totalUsage.costUsd : null,
             })
             if (logged.error) throw logged.error
           } catch (error) {
