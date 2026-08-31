@@ -278,7 +278,8 @@ function sanitizeResult(toolName: string, result: unknown): Record<string, unkno
           dayCount: arrayCount(dailyReview.days),
         },
         newsBriefing: {
-          ...pick(newsBriefing, ['enabled', 'localTime']),
+          // bd19: preferencesDto's field is now `time`, not `localTime`.
+          ...pick(newsBriefing, ['enabled', 'time']),
           dayCount: arrayCount(newsBriefing.days),
         },
       }

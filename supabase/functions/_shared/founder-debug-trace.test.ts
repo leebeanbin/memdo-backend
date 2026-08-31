@@ -167,7 +167,7 @@ Deno.test('buildFounderDebugTrace get_routine_preferences never passes an unexpe
         quietHoursEnd: null,
         calendarFilter: ['업무용 캘린더', '개인 일정 - 민감함'],
         dailyReview: { enabled: true, time: '21:00', days: ['MO', 'TU'], includeReflection: true },
-        newsBriefing: { enabled: false, localTime: null, days: [] },
+        newsBriefing: { enabled: false, time: null, days: [] },
         // Not a real preferencesDto() field today -- stands in for
         // whatever narrative/private field a future change might add.
         internalDebugNote: '이건 절대 노출되면 안 되는 내부 메모',
@@ -196,6 +196,7 @@ Deno.test('buildFounderDebugTrace get_routine_preferences never passes an unexpe
   const newsBriefing = call.result!.newsBriefing as Record<string, unknown>
   assert(newsBriefing.enabled === false)
   assert(newsBriefing.dayCount === 0)
+  assert('time' in newsBriefing)
 })
 
 Deno.test('buildFounderDebugTrace get_routine_preferences reports configured:false as-is (no row exists)', () => {
