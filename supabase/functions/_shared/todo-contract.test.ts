@@ -1,6 +1,8 @@
 import {
   decodeTodoCursor,
   encodeTodoCursor,
+  fetchCategoriesByIds,
+  todoDto,
   todoInputSchema,
   todoRescheduleSchema,
   todoUpdate,
@@ -157,4 +159,56 @@ Deno.test('reschedule accepts an untimed task', () => {
     timeBucket: 'anytime',
   })
   assert(result.success)
+})
+
+Deno.test('todoDto derives emoji/color from the category when the todo has no override (bd18)', () => {
+  const dto = todoDto({ id: '1', category_id: 'cat-1', emoji: null, color: null }, {
+    emoji: '📚',
+    color: 'sky',
+  })
+  assert(dto.emoji === '📚')
+  assert(dto.color === 'sky')
+  assert(dto.categoryId === 'cat-1')
+})
+
+Deno.test('todoDto keeps a per-todo emoji/color override over the category (bd18)', () => {
+  const dto = todoDto({ id: '1', category_id: 'cat-1', emoji: '🔥', color: 'amber' }, {
+    emoji: '📚',
+    color: 'sky',
+  })
+  assert(dto.emoji === '🔥')
+  assert(dto.color === 'amber')
+})
+
+Deno.test('todoDto falls back to null with no category and no override (bd18)', () => {
+  const dto = todoDto({ id: '1', category_id: null, emoji: null, color: null })
+  assert(dto.emoji === null)
+  assert(dto.color === null)
+  assert(dto.categoryId === null)
+})
+
+Deno.test('fetchCategoriesByIds dedupes ids and skips a query when there are none (bd18)', async () => {
+  let calls = 0
+  const fakeSupabase = {
+    from: (_table: string) => ({
+      select: (_cols: string) => ({
+        in: (_col: string, ids: string[]) => {
+          calls++
+          assert(ids.length === 2)
+          return Promise.resolve({
+            data: ids.map((id) => ({ id, emoji: '📚', color: 'sky' })),
+            error: null,
+          })
+        },
+      }),
+    }),
+  }
+  const map = await fetchCategoriesByIds(fakeSupabase, ['a', 'a', null, 'b', undefined])
+  assert(calls === 1)
+  assert(map.get('a')?.emoji === '📚')
+  assert(map.size === 2)
+
+  const empty = await fetchCategoriesByIds(fakeSupabase, [null, undefined])
+  assert(empty.size === 0)
+  assert(calls === 1)
 })

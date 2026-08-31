@@ -122,6 +122,7 @@ export async function googleMirrorEventsInRange(
     isAllDay: row.is_all_day,
     note: null,
     meetingUrl: null,
+    categoryId: null,
     emoji: null,
     color: null,
     startAt: row.start_at,
