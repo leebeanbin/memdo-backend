@@ -79,9 +79,25 @@ export default {
         .limit(parsed.data.limit + 1)
       if (cursor) workoutQuery = workoutQuery.gt('sync_seq', cursor.syncSeq)
 
-      const [todoResult, workoutResult] = await Promise.all([todoQuery, workoutQuery])
+      // user_categories keeps its normal grants (unlike workout_log_full),
+      // so context.supabase + RLS is enough here -- RLS doesn't filter
+      // deleted_at, only ownership, so a soft-deleted row (needed for the
+      // tombstone) is still readable through it.
+      let categoryQuery = context.supabase
+        .from('user_categories')
+        .select('*')
+        .order('sync_seq')
+        .limit(parsed.data.limit + 1)
+      if (cursor) categoryQuery = categoryQuery.gt('sync_seq', cursor.syncSeq)
+
+      const [todoResult, workoutResult, categoryResult] = await Promise.all([
+        todoQuery,
+        workoutQuery,
+        categoryQuery,
+      ])
       if (todoResult.error) throw todoResult.error
       if (workoutResult.error) throw workoutResult.error
+      if (categoryResult.error) throw categoryResult.error
 
       const todoRows = todoResult.data as SyncRow[]
       const categories = await fetchCategoriesByIds(
@@ -92,6 +108,7 @@ export default {
       const merged = [
         ...todoRows.map((row) => ({ row, entity: 'todo' as const })),
         ...(workoutResult.data as SyncRow[]).map((row) => ({ row, entity: 'workout' as const })),
+        ...(categoryResult.data as SyncRow[]).map((row) => ({ row, entity: 'category' as const })),
       ].sort((a, b) => Number(a.row.sync_seq) - Number(b.row.sync_seq))
 
       const hasMore = merged.length > parsed.data.limit

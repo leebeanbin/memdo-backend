@@ -27,6 +27,7 @@ export default {
         const { data, error } = await context.supabase
           .from('user_categories')
           .select(categorySelect)
+          .is('deleted_at', null)
           .order('sort_order')
           .order('id')
         if (error) {
@@ -75,12 +76,20 @@ export default {
             if (upserted.error) throw upserted.error
           }
 
-          let deleteQuery = context.supabase.from('user_categories').delete().eq('user_id', userId)
-          deleteQuery = ids.length > 0
-            ? deleteQuery.not('id', 'in', `(${ids.join(',')})`)
-            : deleteQuery
-          const deleted = await deleteQuery
-          if (deleted.error) throw deleted.error
+          // bd26: soft delete (deleted_at), matching todos'/schedule_rules'
+          // convention (DELETE itself is revoked from authenticated) --
+          // this is also what lets /sync report a category removal as a
+          // tombstone instead of the row just silently disappearing.
+          let pruneQuery = context.supabase
+            .from('user_categories')
+            .update({ deleted_at: new Date().toISOString() })
+            .eq('user_id', userId)
+            .is('deleted_at', null)
+          pruneQuery = ids.length > 0
+            ? pruneQuery.not('id', 'in', `(${ids.join(',')})`)
+            : pruneQuery
+          const pruned = await pruneQuery
+          if (pruned.error) throw pruned.error
         } catch (error) {
           console.error(
             JSON.stringify({ requestId: currentRequestId, operation: 'categories.replace', error }),

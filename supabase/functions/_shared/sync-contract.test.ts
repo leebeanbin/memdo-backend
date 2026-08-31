@@ -68,3 +68,33 @@ Deno.test('workout sync item has no version/delete concept (bd26)', () => {
   assert(!('version' in item))
   assert(item.data.activityType === 'running')
 })
+
+Deno.test('category sync item upserts when not deleted (bd26)', () => {
+  const item = syncItem({
+    id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    updated_at: '2026-08-03T12:30:45.123Z',
+    deleted_at: null,
+    name: '운동',
+    emoji: '🏃',
+    color: 'coral',
+    is_task_kind: true,
+  }, 'category')
+  if (item.entityType !== 'category') throw new Error('expected a category item')
+  assert(item.operation === 'upsert')
+  assert(!('version' in item))
+  assert(item.data?.name === '운동')
+})
+
+Deno.test('category sync item is a tombstone once soft-deleted (bd26)', () => {
+  const item = syncItem({
+    id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    updated_at: '2026-08-03T12:30:45.123Z',
+    deleted_at: '2026-08-03T12:30:45.123Z',
+    name: '운동',
+    emoji: '🏃',
+    color: 'coral',
+    is_task_kind: true,
+  }, 'category')
+  assert(item.operation === 'delete')
+  assert(item.data === null)
+})
