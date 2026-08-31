@@ -30,3 +30,13 @@ Deno.test('day view is complete when no tasks need review', () => {
 
   assert(view.emptyState === 'completed')
 })
+
+Deno.test('day view with only events (no tasks) is not mislabeled "completed" (bd26)', () => {
+  const view = dayViewDto('2026-08-02', [
+    { entryKind: 'event', status: 'planned' },
+    { entryKind: 'event', status: 'planned' },
+  ])
+
+  assert(view.emptyState === 'planned')
+  assert(view.needsReviewCount === 0)
+})
