@@ -32,7 +32,39 @@ Deno.test('deleted sync item is a minimal tombstone', () => {
     version: 3,
     updated_at: '2026-08-03T12:30:45.123Z',
     deleted_at: '2026-08-03T12:30:45.123Z',
-  })
+  }, 'todo')
   assert(item.operation === 'delete')
   assert(item.data === null)
+})
+
+Deno.test('todo sync item derives emoji/color from the passed category (bd18/bd26)', () => {
+  const item = syncItem(
+    {
+      id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+      version: 1,
+      updated_at: '2026-08-03T12:30:45.123Z',
+      deleted_at: null,
+      category_id: 'cat-1',
+      emoji: null,
+      color: null,
+    },
+    'todo',
+    { emoji: '📚', color: 'sky' },
+  )
+  assert(item.operation === 'upsert')
+  if (item.entityType !== 'todo') throw new Error('expected a todo item')
+  assert(item.data?.emoji === '📚')
+  assert(item.data?.color === 'sky')
+})
+
+Deno.test('workout sync item has no version/delete concept (bd26)', () => {
+  const item = syncItem({
+    id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    updated_at: '2026-08-03T12:30:45.123Z',
+    activity_type: 'running',
+  }, 'workout')
+  if (item.entityType !== 'workout') throw new Error('expected a workout item')
+  assert(item.operation === 'upsert')
+  assert(!('version' in item))
+  assert(item.data.activityType === 'running')
 })
