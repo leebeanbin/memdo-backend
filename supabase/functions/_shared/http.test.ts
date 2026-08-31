@@ -1,5 +1,8 @@
 import {
   apiError,
+  constantTimeEquals,
+  errorEnvelope,
+  normalizeZodIssues,
   POSTGRES_FOREIGN_KEY_VIOLATION,
   POSTGRES_UNIQUE_VIOLATION,
   successResponder,
@@ -85,4 +88,47 @@ Deno.test('apiError marks a real 4xx client error as not retryable', async () =>
   const invalidRequest = await apiError('INVALID_REQUEST', 'bad', 400, 'req-1').json()
   assert(versionConflict.error.retryable === false)
   assert(invalidRequest.error.retryable === false)
+})
+
+Deno.test('errorEnvelope produces the exact body apiError wraps in a Response', () => {
+  // bd24: this is what agent-cloud-chat's SSE stream sends directly (no
+  // Response involved) -- pins that it's the same shape apiError uses.
+  const envelope = errorEnvelope('INTERNAL_ERROR', 'Agent 응답을 받지 못했습니다.', 'req-1')
+  assert(envelope.error.code === 'INTERNAL_ERROR')
+  assert(envelope.error.message === 'Agent 응답을 받지 못했습니다.')
+  assert(envelope.error.retryable === true)
+  assert(envelope.error.requestId === 'req-1')
+})
+
+Deno.test('normalizeZodIssues maps path/message into field/reason', () => {
+  // bd25: the shape every ~15 call sites now send instead of a raw
+  // ZodIssue array (code, path, expected, ...).
+  const normalized = normalizeZodIssues([
+    { path: ['title'], message: 'Required' },
+    { path: ['location', 'latitude'], message: 'Expected number, received string' },
+  ])
+  assert(normalized.length === 2)
+  assert(normalized[0].field === 'title')
+  assert(normalized[0].reason === 'Required')
+  assert(normalized[1].field === 'location.latitude')
+})
+
+Deno.test('normalizeZodIssues falls back to (root) for a root-level issue', () => {
+  const normalized = normalizeZodIssues([{ path: [], message: 'Invalid input' }])
+  assert(normalized[0].field === '(root)')
+})
+
+Deno.test('constantTimeEquals matches on equal strings and rejects unequal ones', () => {
+  // be19: pins the actual comparison result, not the timing property
+  // itself (a real timing-side-channel test isn't practical in a unit
+  // test) -- the point under test is that this replaces `===` correctly,
+  // not that it's provably constant-time.
+  assert(constantTimeEquals('Bearer secret-token', 'Bearer secret-token') === true)
+  assert(constantTimeEquals('Bearer secret-token', 'Bearer wrong-token!!') === false)
+})
+
+Deno.test('constantTimeEquals rejects a length mismatch without throwing', () => {
+  assert(constantTimeEquals('short', 'a much longer string') === false)
+  assert(constantTimeEquals('', 'nonempty') === false)
+  assert(constantTimeEquals('', '') === true)
 })

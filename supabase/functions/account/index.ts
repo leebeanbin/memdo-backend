@@ -1,4 +1,11 @@
-import { apiError, json, logRequest, responseByteLength, withApi } from '../_shared/http.ts'
+import {
+  apiError,
+  json,
+  logRequest,
+  normalizeZodIssues,
+  responseByteLength,
+  withApi,
+} from '../_shared/http.ts'
 import { accountDeletionRequestSchema } from '../_shared/account-contract.ts'
 import {
   deleteAppleRefreshTokenSecret,
@@ -28,7 +35,7 @@ export default {
     )
     if (!parsed.success) {
       return apiError('INVALID_REQUEST', '삭제 확인 문구를 확인해 주세요.', 400, currentRequestId, {
-        issues: parsed.error.issues,
+        issues: normalizeZodIssues(parsed.error.issues),
       })
     }
 

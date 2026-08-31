@@ -1,4 +1,10 @@
-import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
+import {
+  apiError,
+  normalizeZodIssues,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import {
   categoriesReplaceSchema,
   categoryDto,
@@ -49,7 +55,7 @@ export default {
             400,
             currentRequestId,
             {
-              issues: parsed.error.issues,
+              issues: normalizeZodIssues(parsed.error.issues),
             },
           )
         }

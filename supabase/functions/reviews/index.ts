@@ -1,5 +1,11 @@
 import { z } from 'zod'
-import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
+import {
+  apiError,
+  normalizeZodIssues,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import { reviewInputSchema } from '../_shared/summary-contract.ts'
 
 const dateSchema = z.iso.date()
@@ -71,7 +77,7 @@ export default {
         const parsed = reviewInputSchema.safeParse(await request.json().catch(() => undefined))
         if (!parsed.success) {
           return apiError('INVALID_REQUEST', '회고 내용을 확인해 주세요.', 400, currentRequestId, {
-            issues: parsed.error.issues,
+            issues: normalizeZodIssues(parsed.error.issues),
           })
         }
         const { data, error } = await context.supabase

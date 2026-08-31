@@ -1,4 +1,10 @@
-import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
+import {
+  apiError,
+  normalizeZodIssues,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import { summaryQuerySchema, summaryRange } from '../_shared/summary-contract.ts'
 import { todoDto, todoSelect } from '../_shared/todo-contract.ts'
 
@@ -24,7 +30,7 @@ export default {
       })
       if (!parsed.success) {
         return apiError('INVALID_REQUEST', '요약 조건을 확인해 주세요.', 400, currentRequestId, {
-          issues: parsed.error.issues,
+          issues: normalizeZodIssues(parsed.error.issues),
         })
       }
 

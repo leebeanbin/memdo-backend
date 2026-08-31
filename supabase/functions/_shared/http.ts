@@ -39,6 +39,30 @@ export function json(body: unknown, status: number, requestId: string): Response
 // never will.
 const RETRYABLE_ERROR_CODES: ReadonlySet<ErrorCode> = new Set(['RATE_LIMITED', 'INTERNAL_ERROR'])
 
+// bd24: split out from apiError so agent-cloud-chat's SSE stream can reuse
+// the exact same envelope shape for a mid-stream error -- that was the one
+// place in the whole API sending a bare `{error: string}`, a different
+// contract depending on whether the failure happened before or after the
+// stream started.
+export function errorEnvelope(
+  code: ErrorCode,
+  message: string,
+  requestId: string,
+  details: Record<string, unknown> = {},
+): {
+  error: {
+    code: ErrorCode
+    message: string
+    retryable: boolean
+    requestId: string
+    details: Record<string, unknown>
+  }
+} {
+  return {
+    error: { code, message, retryable: RETRYABLE_ERROR_CODES.has(code), requestId, details },
+  }
+}
+
 export function apiError(
   code: ErrorCode,
   message: string,
@@ -46,11 +70,7 @@ export function apiError(
   requestId: string,
   details: Record<string, unknown> = {},
 ): Response {
-  return json(
-    { error: { code, message, retryable: RETRYABLE_ERROR_CODES.has(code), requestId, details } },
-    status,
-    requestId,
-  )
+  return json(errorEnvelope(code, message, requestId, details), status, requestId)
 }
 
 /**
@@ -85,10 +105,52 @@ export function withApi<T = unknown>(
   }
 }
 
+// bd25: raw Zod issues (code, path, expected, ...) were passed straight
+// into apiError's `details` at ~15 call sites, coupling every client to
+// Zod's own internal shape. agent-tool-contract.ts's parseAgentToolCall
+// already normalizes to {field,reason} for the model-facing boundary --
+// this is the same normalization for the client-facing one. Takes a
+// minimal structural type (not zod's own ZodIssue) so this file doesn't
+// need a zod import just for validation-error formatting; `path` is typed
+// PropertyKey[] (zod's own path element type -- string | number | symbol)
+// rather than narrowing it, since none of these schemas ever actually
+// produce a symbol path segment but the type still has to accept one.
+export function normalizeZodIssues(
+  issues: { path: PropertyKey[]; message: string }[],
+): { field: string; reason: string }[] {
+  return issues.map((issue) => ({
+    field: issue.path.join('.') || '(root)',
+    reason: issue.message,
+  }))
+}
+
 export async function sha256(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(value))
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+// be19: a plain `===`/`!==` comparison of a shared secret against a
+// publicly reachable endpoint (google-calendar-sync's cron auth) leaks
+// timing information proportional to how many leading bytes match,
+// letting an attacker recover the secret byte-by-byte. Web Crypto has no
+// timingSafeEqual of its own (SubtleCrypto doesn't expose one) -- rather
+// than pull in @types/node just for node:crypto's version, this is the
+// same standard XOR-accumulate idiom: every byte is always inspected (the
+// `|=` never short-circuits), so the loop's own timing doesn't depend on
+// *where* the first differing byte is. The one exception is the length
+// check up front, which does exit early on a length mismatch -- the same
+// residual length-only leak every timingSafeEqual implementation accepts,
+// not something specific to this one.
+export function constantTimeEquals(a: string, b: string): boolean {
+  const aBytes = new TextEncoder().encode(a)
+  const bBytes = new TextEncoder().encode(b)
+  if (aBytes.length !== bBytes.length) return false
+  let diff = 0
+  for (let i = 0; i < aBytes.length; i++) {
+    diff |= aBytes[i] ^ bBytes[i]
+  }
+  return diff === 0
 }
 
 export function responseByteLength(body: unknown): number {

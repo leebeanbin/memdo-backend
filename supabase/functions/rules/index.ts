@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   apiError,
+  normalizeZodIssues,
   POSTGRES_UNIQUE_VIOLATION,
   successResponder,
   withApi,
@@ -95,7 +96,7 @@ export default {
         )
         if (!parsed.success) {
           return apiError('INVALID_REQUEST', '반복 규칙을 확인해 주세요.', 400, currentRequestId, {
-            issues: parsed.error.issues,
+            issues: normalizeZodIssues(parsed.error.issues),
           })
         }
         const input = parsed.data

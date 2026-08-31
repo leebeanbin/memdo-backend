@@ -1,4 +1,10 @@
-import { apiError, successResponder, withApi, withCrudErrors } from '../_shared/http.ts'
+import {
+  apiError,
+  normalizeZodIssues,
+  successResponder,
+  withApi,
+  withCrudErrors,
+} from '../_shared/http.ts'
 import { searchQuerySchema } from '../_shared/search-contract.ts'
 import { todoDto } from '../_shared/todo-contract.ts'
 
@@ -24,7 +30,7 @@ export default {
       })
       if (!parsed.success) {
         return apiError('INVALID_REQUEST', '검색어를 확인해 주세요.', 400, currentRequestId, {
-          issues: parsed.error.issues,
+          issues: normalizeZodIssues(parsed.error.issues),
         })
       }
 
