@@ -11,6 +11,14 @@ const weekdaySet = z.array(weekdays).max(7).refine(
 )
 
 export const preferencesInputSchema = z.object({
+  // bd19: optimistic concurrency -- the client must send back the updatedAt
+  // it last read. PUT was previously a blind full-object upsert, so two
+  // concurrent single-toggle changes (e.g. one from Settings, one from an
+  // approved Agent proposal) built from two different stale reads could
+  // silently clobber each other; the loser's toggle just vanishes with no
+  // error. Compared by the DB as a timestamptz instant, not by string
+  // equality, so 'Z' vs '+00:00' formatting differences don't matter.
+  updatedAt: z.iso.datetime({ offset: true }),
   timezone: z.string().min(1).max(100),
   widgetStyle: z.enum(['nextTodo', 'dailyIntention']),
   defaultMood: z.enum(['focus', 'relaxed', 'active', 'recovery', 'excited']).nullable().default(
@@ -28,9 +36,13 @@ export const preferencesInputSchema = z.object({
     days: weekdaySet,
     includeReflection: z.boolean().default(true),
   }),
+  // bd19: was `localTime`, the only field of its kind not named `time`
+  // (dailyReview.time, planningPromptTime, quietHoursStart/End all say
+  // `time`/`Time` with no locale qualifier) -- unified since nothing about
+  // any of these fields is more or less "local" than the others.
   newsBriefing: z.object({
     enabled: z.boolean(),
-    localTime: localTime.nullable().default(null),
+    time: localTime.nullable().default(null),
     days: weekdaySet,
   }),
 }).superRefine((value, context) => {
@@ -49,7 +61,7 @@ export const preferencesInputSchema = z.object({
     })
   }
   if (
-    value.newsBriefing.enabled && (!value.newsBriefing.localTime || !value.newsBriefing.days.length)
+    value.newsBriefing.enabled && (!value.newsBriefing.time || !value.newsBriefing.days.length)
   ) {
     context.addIssue({
       code: 'custom',
@@ -77,7 +89,7 @@ export function preferencesValues(input: PreferencesInput) {
     daily_review_days: input.dailyReview.days,
     daily_review_include_reflection: input.dailyReview.includeReflection,
     news_briefing_enabled: input.newsBriefing.enabled,
-    news_briefing_time: input.newsBriefing.localTime,
+    news_briefing_time: input.newsBriefing.time,
     news_briefing_days: input.newsBriefing.days,
   }
 }
@@ -101,7 +113,7 @@ export function preferencesDto(row: Record<string, unknown>) {
     },
     newsBriefing: {
       enabled: row.news_briefing_enabled,
-      localTime: row.news_briefing_time,
+      time: row.news_briefing_time,
       days: row.news_briefing_days,
       lastGeneratedLocalDate: row.news_briefing_last_generated_date,
     },

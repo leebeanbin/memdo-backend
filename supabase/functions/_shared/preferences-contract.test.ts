@@ -5,6 +5,7 @@ function assert(condition: unknown): asserts condition {
 }
 
 const valid = {
+  updatedAt: '2026-08-31T00:00:00Z',
   timezone: 'Asia/Seoul',
   widgetStyle: 'nextTodo',
   defaultMood: null,
@@ -15,7 +16,7 @@ const valid = {
   quietHoursEnd: null,
   calendarFilter: [],
   dailyReview: { enabled: true, time: '21:30', days: ['MO', 'TU'], includeReflection: true },
-  newsBriefing: { enabled: false, localTime: null, days: [] },
+  newsBriefing: { enabled: false, time: null, days: [] },
 }
 
 Deno.test('preferences map API names to database values', () => {
@@ -44,7 +45,23 @@ Deno.test('dailyReview.days rejects a repeated weekday (bd26)', () => {
 Deno.test('newsBriefing.days rejects a repeated weekday (bd26)', () => {
   const result = preferencesInputSchema.safeParse({
     ...valid,
-    newsBriefing: { enabled: true, localTime: '08:00', days: ['SA', 'SA'] },
+    newsBriefing: { enabled: true, time: '08:00', days: ['SA', 'SA'] },
   })
   assert(!result.success)
+})
+
+Deno.test('preferences require updatedAt for optimistic concurrency (bd19)', () => {
+  const { updatedAt: _unused, ...withoutUpdatedAt } = valid
+  const result = preferencesInputSchema.safeParse(withoutUpdatedAt)
+  assert(!result.success)
+})
+
+Deno.test('newsBriefing.time is the unified field name, not localTime (bd19)', () => {
+  const parsed = preferencesInputSchema.parse(valid)
+  assert(preferencesValues(parsed).news_briefing_time === null)
+  const result = preferencesInputSchema.safeParse({
+    ...valid,
+    newsBriefing: { enabled: false, time: '08:00', days: [] },
+  })
+  assert(result.success && result.data.newsBriefing.time === '08:00')
 })
