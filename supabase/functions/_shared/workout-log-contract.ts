@@ -70,3 +70,27 @@ export const workoutLogUpdateDetailsSchema = z.object({
   notes: z.string().max(2000).default(''),
   exercises: exercisesSchema,
 })
+
+// bd26: extracted from workout-logs/index.ts's private toDTO so
+// sync-contract.ts's entityType:'workout' path (workout_log_full rows,
+// same shape) can reuse it instead of duplicating the mapping.
+export function workoutLogDto(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    hkUuid: row.hk_uuid ?? null,
+    source: row.source,
+    activityType: row.activity_type,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    durationSec: row.duration_sec,
+    distanceM: row.distance_m ?? null,
+    calories: row.calories ?? null,
+    avgHeartRate: row.avg_heart_rate ?? null,
+    routeImageUrl: row.route_image_url ?? null,
+    photoUrl: row.photo_url ?? null,
+    scheduledDate: row.scheduled_date,
+    locationName: row.location_name ?? null,
+    notes: row.notes ?? '',
+    exercises: row.exercises ?? null,
+  }
+}

@@ -10,33 +10,12 @@ import {
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
 import {
   workoutLogCreateSchema,
+  workoutLogDto as toDTO,
   workoutLogUpdateDetailsSchema,
 } from '../_shared/workout-log-contract.ts'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-
-// Maps workout_log_full view row → camelCase DTO that iOS WorkoutLogResponseDTO expects.
-function toDTO(row: Row) {
-  return {
-    id: row.id,
-    hkUuid: row.hk_uuid ?? null,
-    source: row.source,
-    activityType: row.activity_type,
-    startedAt: row.started_at,
-    endedAt: row.ended_at,
-    durationSec: row.duration_sec,
-    distanceM: row.distance_m ?? null,
-    calories: row.calories ?? null,
-    avgHeartRate: row.avg_heart_rate ?? null,
-    routeImageUrl: row.route_image_url ?? null,
-    photoUrl: row.photo_url ?? null,
-    scheduledDate: row.scheduled_date,
-    locationName: row.location_name ?? null,
-    notes: row.notes ?? '',
-    exercises: row.exercises ?? null,
-  }
-}
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
