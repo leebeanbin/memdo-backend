@@ -114,6 +114,13 @@ const todoCursorSchema = z.object({
   scheduledDate: z.iso.date(),
   sortOrder: z.number().int().min(0),
   id: z.uuid(),
+  // bd12: date through which virtual/Google-mirror items have already
+  // been returned to the client, inclusive -- absent/null on the first
+  // page means "not started yet" (equivalent to the request's `from`).
+  // Opaque to the client either way (this cursor is a base64 blob no
+  // caller ever decodes structurally), so adding this field is fully
+  // transparent -- no iOS change needed.
+  virtualThroughDate: z.iso.date().nullish(),
 })
 
 export type TodoCursor = z.infer<typeof todoCursorSchema>
@@ -127,11 +134,15 @@ export function decodeTodoCursor(cursor: string): TodoCursor | null {
   }
 }
 
-export function encodeTodoCursor(row: Record<string, unknown>): string {
+export function encodeTodoCursor(
+  row: Record<string, unknown>,
+  virtualThroughDate: string | null,
+): string {
   return btoa(JSON.stringify({
     scheduledDate: row.scheduled_date,
     sortOrder: row.sort_order,
     id: row.id,
+    virtualThroughDate,
   })).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
 }
 

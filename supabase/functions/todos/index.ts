@@ -26,8 +26,12 @@ import {
   todoUpdateSchema,
 } from '../_shared/todo-contract.ts'
 import {
+  firstIndexAfterDate,
   googleMirrorEventsInRange,
+  MAX_PAGE_EXTENSION,
+  pageSplitsADate,
   virtualOccurrencesInRange,
+  virtualRangeForPage,
 } from '../_shared/todo-list-contract.ts'
 
 export default {
@@ -88,72 +92,136 @@ export default {
           return apiError('INVALID_REQUEST', '조회 커서를 확인해 주세요.', 400, currentRequestId)
         }
 
-        let query = context.supabase
-          .from('todos')
-          .select(todoSelect)
-          .is('deleted_at', null)
-          .order('scheduled_date')
-          .order('sort_order')
-          .order('id')
-          .limit(parsed.data.limit + 1)
+        // bd12: over-fetch by one to detect hasMore (as before), but also
+        // extend the effective page size -- re-fetching with a larger
+        // limit -- when the peeked (limit+1-th) row shares its date with
+        // the last row that would otherwise be returned. This guarantees a
+        // single calendar date's real todos are never split across two
+        // pages, which is what makes the per-page virtual/Google merge
+        // below sort-equivalent to a single unbounded fetch: every date's
+        // real+virtual+Google items always end up merge-sorted together
+        // within the same page's response, using the same (scheduledDate,
+        // sortOrder, id) comparator a single big fetch would use.
+        const fetchPage = async (limit: number): Promise<Record<string, unknown>[]> => {
+          let query = context.supabase
+            .from('todos')
+            .select(todoSelect)
+            .is('deleted_at', null)
+            .order('scheduled_date')
+            .order('sort_order')
+            .order('id')
+            .limit(limit + 1)
 
-        if (parsed.data.from) query = query.gte('scheduled_date', parsed.data.from)
-        if (parsed.data.to) query = query.lte('scheduled_date', parsed.data.to)
-        // Default view excludes dead statuses (matching ScheduleDetail.isActive
-        // and the Agent's own DB reads -- founder-dogfooding fix, this used to
-        // be the one reader of `todos` that left the filtering to the client,
-        // so it disagreed with GET /days and search_schedules for the same
-        // day). An explicit ?status= filter is a deliberate ask for exactly
-        // those statuses (e.g. a future "rescheduled/cancelled history" view)
-        // and overrides the default rather than being ANDed with it.
-        if (parsed.data.status?.length) {
-          query = query.in('status', parsed.data.status)
-        } else {
-          query = query.not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
+          if (parsed.data.from) query = query.gte('scheduled_date', parsed.data.from)
+          if (parsed.data.to) query = query.lte('scheduled_date', parsed.data.to)
+          // Default view excludes dead statuses (matching ScheduleDetail.isActive
+          // and the Agent's own DB reads -- founder-dogfooding fix, this used to
+          // be the one reader of `todos` that left the filtering to the client,
+          // so it disagreed with GET /days and search_schedules for the same
+          // day). An explicit ?status= filter is a deliberate ask for exactly
+          // those statuses (e.g. a future "rescheduled/cancelled history" view)
+          // and overrides the default rather than being ANDed with it.
+          if (parsed.data.status?.length) {
+            query = query.in('status', parsed.data.status)
+          } else {
+            query = query.not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
+          }
+          if (cursor) {
+            query = query.or(
+              `scheduled_date.gt.${cursor.scheduledDate},and(scheduled_date.eq.${cursor.scheduledDate},sort_order.gt.${cursor.sortOrder}),and(scheduled_date.eq.${cursor.scheduledDate},sort_order.eq.${cursor.sortOrder},id.gt.${cursor.id})`,
+            )
+          }
+
+          const result = await query
+          if (result.error) throw result.error
+          return result.data
         }
-        if (cursor) {
-          query = query.or(
-            `scheduled_date.gt.${cursor.scheduledDate},and(scheduled_date.eq.${cursor.scheduledDate},sort_order.gt.${cursor.sortOrder}),and(scheduled_date.eq.${cursor.scheduledDate},sort_order.eq.${cursor.sortOrder},id.gt.${cursor.id})`,
-          )
+
+        let data = await fetchPage(parsed.data.limit)
+        // Defaults to the requested limit (no split) -- overwritten below
+        // only if the initial fetch actually split a date.
+        let cutIndex = parsed.data.limit
+
+        if (pageSplitsADate(data, parsed.data.limit)) {
+          // Freeze the split date -- only ITS OWN row count determines how
+          // far this page extends. Re-checking whatever date lands at each
+          // doubled boundary (pageSplitsADate again) would let a LATER date
+          // that also has more rows than fit cascade the extension past
+          // what this date alone needed, potentially all the way to
+          // MAX_PAGE_EXTENSION even when the original split was tiny.
+          // firstIndexAfterDate scans for the first row past this specific
+          // date instead, so a later date's own split (if any) is left
+          // entirely to its own page's independent extension decision.
+          const splitDate = data[parsed.data.limit - 1].scheduled_date
+          let growLimit = parsed.data.limit
+          let found: number | null = null
+          while (found === null) {
+            const nextLimit = Math.min(growLimit * 2, MAX_PAGE_EXTENSION)
+            if (nextLimit === growLimit) {
+              cutIndex = growLimit // safety valve -- accept the split
+              break
+            }
+            growLimit = nextLimit
+            data = await fetchPage(growLimit)
+            found = firstIndexAfterDate(data, splitDate)
+            if (found !== null) cutIndex = found
+          }
         }
 
-        const { data, error } = await query
-        if (error) throw error
-
-        const hasMore = data.length > parsed.data.limit
-        const items = data.slice(0, parsed.data.limit)
+        const hasMore = data.length > cutIndex
+        const items = data.slice(0, cutIndex)
 
         // event-mode recurring rules materialize nothing up front (see rules POST) --
         // occurrences are computed on demand for whatever range is queried, like
-        // Google Calendar/Outlook treat recurring events. Only done on the first
-        // page of a from/to query: virtual occurrences don't participate in the
-        // real-row cursor, so they'd either be skipped or duplicated on later pages.
+        // Google Calendar/Outlook treat recurring events. Scoped to the date range
+        // this specific page covers (not the whole request), and computed on every
+        // page now, not just the first -- see clampedTo/virtualFrom/virtualTo below.
         let virtualItems: Record<string, unknown>[] = []
-        // Virtual occurrences are only ever computed up to this date, even if the
-        // caller asked for a wider range (see MAX_VIRTUAL_WINDOW_DAYS) -- surfaced
-        // in appliedFilters below so a truncated response is distinguishable from
-        // "the rule genuinely has no more occurrences."
-        let virtualWindowEnd: string | null = null
+        let googleItems: Record<string, unknown>[] = []
+        // Surfaced in appliedFilters below so a truncated response is
+        // distinguishable from "the rule genuinely has no more occurrences."
+        let clampedTo: string | null = null
+        // Carried into nextCursor -- the date through which virtual/Google
+        // items have been returned, inclusive. Stays null when virtual
+        // computation never applies to this query at all (no date range, or
+        // the status filter excludes 'planned').
+        let virtualThroughDateForCursor: string | null = null
         // Virtual occurrences are always synthesized as status 'planned' -- if the
         // caller filtered to statuses that exclude it, none of them can match, so
         // don't bother generating (and don't leak unfiltered ones into a filtered
         // response either).
         const statusAllowsVirtual = !parsed.data.status?.length ||
           parsed.data.status.includes('planned')
-        let googleItems: Record<string, unknown>[] = []
-        if (!cursor && parsed.data.from && parsed.data.to && statusAllowsVirtual) {
-          const virtual = await virtualOccurrencesInRange(
-            context.supabase,
-            parsed.data.from,
-            parsed.data.to,
-          )
-          virtualItems = virtual.items
-          virtualWindowEnd = virtual.windowEnd
-          googleItems = await googleMirrorEventsInRange(
-            context.supabase,
-            parsed.data.from,
-            parsed.data.to,
-          )
+        if (parsed.data.from && parsed.data.to && statusAllowsVirtual) {
+          // Bounding virtualTo by the last real todo's date is only correct
+          // when a LATER page is coming to pick up whatever comes after it --
+          // on the final page (hasMore false) there is no later page, so
+          // trailing dates past the last real todo (with no real todos of
+          // their own) must be covered here or they're dropped entirely.
+          // Passing null on the last page makes virtualRangeForPage fall
+          // through to the full clampedTo, regardless of where the last real
+          // todo landed. items.at(-1) is guaranteed fully covered by real
+          // todos for its date on a non-last page (the page-extension loop
+          // above never splits a date across pages), so it's always safe to
+          // treat as the boundary there -- no deferral needed.
+          const pageBoundaryDate = hasMore ? (items.at(-1)!.scheduled_date as string) : null
+          const range = virtualRangeForPage({
+            requestFrom: parsed.data.from,
+            requestTo: parsed.data.to,
+            cursorVirtualThroughDate: cursor?.virtualThroughDate,
+            pageBoundaryDate,
+          })
+          clampedTo = range.clampedTo
+          if (range.shouldFetch) {
+            ;[virtualItems, googleItems] = await Promise.all([
+              virtualOccurrencesInRange(context.supabase, range.virtualFrom, range.virtualTo),
+              googleMirrorEventsInRange(context.supabase, range.virtualFrom, range.virtualTo),
+            ])
+          }
+          // Written even when skipped -- stabilizes at clampedTo, so every later
+          // page's virtualFrom also exceeds virtualTo and this skip keeps
+          // firing, with no separate "we're done" flag needed.
+          virtualThroughDateForCursor = range.virtualTo
         }
 
         const categories = await fetchCategoriesByIds(
@@ -171,10 +239,10 @@ export default {
             String(a.scheduledDate).localeCompare(String(b.scheduledDate)) ||
             Number(a.sortOrder) - Number(b.sortOrder) || String(a.id).localeCompare(String(b.id))
           ),
-          nextCursor: hasMore ? encodeTodoCursor(items.at(-1)!) : null,
+          nextCursor: hasMore ? encodeTodoCursor(items.at(-1)!, virtualThroughDateForCursor) : null,
           hasMore,
-          appliedFilters: virtualWindowEnd && virtualWindowEnd < parsed.data.to!
-            ? { ...parsed.data, recurringOccurrencesThrough: virtualWindowEnd }
+          appliedFilters: clampedTo && clampedTo < parsed.data.to!
+            ? { ...parsed.data, recurringOccurrencesThrough: clampedTo }
             : parsed.data,
         }
         return success(
