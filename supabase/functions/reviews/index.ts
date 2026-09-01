@@ -35,22 +35,22 @@ export default {
       const dateParam = path[reviewsIndex + 1]
 
       if (request.method === 'GET' && !dateParam) {
+        // bd6 (review): over-fetch by one (31, not 30) to detect hasMore
+        // honestly -- `data.length === 30` was a false positive whenever
+        // the user has EXACTLY 30 reviews total (no more), since hitting
+        // the cap and having nothing left are indistinguishable from the
+        // count alone. Same over-fetch-by-one pattern todos' own cursor
+        // pagination already uses, without building a new cursor
+        // mechanism for this endpoint (out of scope here).
         const { data, error } = await context.supabase
           .from('daily_reviews')
           .select('review_date,reflection,created_at,updated_at')
           .order('review_date', { ascending: false })
-          .limit(30)
+          .limit(31)
         if (error) throw error
-        // bd6: unified list envelope. Unlike calendars/rules/categories/
-        // workout-logs (which return every row unconditionally, so
-        // hasMore is always false), this query already has a real
-        // .limit(30) with no cursor to page past it -- claiming
-        // hasMore: false unconditionally would misreport a user with 31+
-        // days of review history as having everything. Deriving it from
-        // whether the fetch hit the cap is the honest signal available
-        // without building a new cursor mechanism (out of scope here).
-        const items = data.map(reviewDto)
-        return success({ items, hasMore: data.length === 30 }, 200, 'reviews.list', items.length)
+        const hasMore = data.length > 30
+        const items = data.slice(0, 30).map(reviewDto)
+        return success({ items, hasMore }, 200, 'reviews.list', items.length)
       }
 
       if (request.method === 'GET' && dateParam) {
