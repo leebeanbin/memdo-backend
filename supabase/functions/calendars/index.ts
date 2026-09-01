@@ -69,7 +69,10 @@ export default {
           })
         }
 
-        return success(items, 200, 'calendars.list', items.length)
+        // bd6: unified list envelope -- no cursor/limit exists for this
+        // endpoint (it returns every calendar unconditionally), so
+        // hasMore is always false, not a real pagination signal yet.
+        return success({ items, hasMore: false }, 200, 'calendars.list', items.length)
       }
 
       if (request.method === 'POST' && !hasItemPath) {

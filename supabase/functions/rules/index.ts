@@ -60,7 +60,11 @@ export default {
           .order('created_at', { ascending: false })
           .order('id')
         if (error) throw error
-        return success(data.map(ruleDto), 200, 'rules.list', data.length)
+        // bd6: unified list envelope -- no cursor/limit exists for this
+        // endpoint (it returns every rule unconditionally), so hasMore is
+        // always false, not a real pagination signal yet.
+        const items = data.map(ruleDto)
+        return success({ items, hasMore: false }, 200, 'rules.list', items.length)
       }
 
       if (request.method === 'GET' && hasItemPath) {
