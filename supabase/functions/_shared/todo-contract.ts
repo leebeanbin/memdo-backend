@@ -84,6 +84,14 @@ export const todoListQuerySchema = z.object({
 export const todoUpdateSchema = todoInputSchema.and(z.object({
   version: z.number().int().min(1),
   status: todoStatusEnum,
+  // bd13/be16: capped at 99, not 100, in the schema itself -- a client
+  // literally cannot request progress: 100 without going through the
+  // `completed` status transition (see todoUpdate below). `.optional()`,
+  // not `.nullable().optional()`: there's no documented domain meaning for
+  // an explicit `progress: null` distinct from "field omitted" (unlike
+  // e.g. calendarUpdateSchema's colorToken, where null deliberately means
+  // "clear this" -- progress has no analogous "clear" state).
+  progress: z.number().int().min(0).max(99).optional(),
 }))
 
 export const todoDeleteSchema = z.object({
@@ -193,11 +201,34 @@ export function todoInsert(input: TodoInput, userId: string, id: string, request
 // completed_at is omitted from the returned object entirely (not set to
 // `null`) so PostgREST's PATCH leaves the existing column value untouched
 // rather than overwriting it with anything at all.
+// bd13/be16: progress was unconditionally 0 for every non-completed status,
+// dead for the entire point of 'in_progress'/'partial' existing. Canonical
+// rule, mirrored by the schema cap above: 'completed' forces 100
+// (unchanged, a hard boundary, not client-negotiable); 'in_progress' and
+// 'partial' read an explicit client value (0-99, defaulting to 0 when
+// omitted); every other status -- 'planned', and the exit states
+// 'skipped'/'rescheduled'/'cancelled' -- forces 0 regardless of any
+// client-supplied value, the same way 'completed' forces 100. 'planned'
+// joins the forced-zero group rather than the client-editable one because
+// "not started" and "0% done" are the same fact, not two independently-
+// settable ones. For the exit states: they're no longer being actively
+// worked, not partial-completion states -- mirrors this codebase's own
+// precedent for the same class of question (bd14: completed_at is cleared,
+// not preserved, when status leaves completed -- fields describing "how
+// far along was this" reset on exit from active states, not carried
+// forward as a souvenir).
+const PROGRESS_BEARING_STATUSES = new Set(['in_progress', 'partial'])
+
 export function todoUpdate(input: TodoUpdateInput, previousStatus: string | null) {
+  const progress = input.status === 'completed'
+    ? 100
+    : PROGRESS_BEARING_STATUSES.has(input.status)
+    ? (input.progress ?? 0)
+    : 0
   const values: Record<string, unknown> = {
     ...todoValues(input),
     status: input.status,
-    progress: input.status === 'completed' ? 100 : 0,
+    progress,
     version: input.version + 1,
   }
   if (input.status === 'completed') {
