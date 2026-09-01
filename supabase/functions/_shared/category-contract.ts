@@ -25,21 +25,3 @@ export function categoryDto(row: Record<string, unknown>) {
     isTaskKind: row.is_task_kind,
   }
 }
-
-export function categoryRow(input: CategoryInput, userId: string, sortOrder: number) {
-  return {
-    id: input.id,
-    user_id: userId,
-    name: input.name,
-    emoji: input.emoji,
-    color: input.color,
-    is_task_kind: input.isTaskKind,
-    sort_order: sortOrder,
-    // bd26: explicit, not omitted -- upserting a category id that was
-    // previously soft-deleted (the user removed it, then later re-adds a
-    // category with the same id) must revive it. Without this, the upsert
-    // would leave deleted_at at whatever it already was, since PostgREST's
-    // upsert only touches the fields present in the payload.
-    deleted_at: null,
-  }
-}

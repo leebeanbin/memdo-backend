@@ -206,24 +206,17 @@ export default {
         // Drop future, non-edited occurrences; keep past ones as history. Uses the
         // client's local calendar date, not UTC — the server has no timezone of its own.
         const today = localDateParsed.data
-        const cleared = await context.supabase
-          .from('todos')
-          .update({ deleted_at: new Date().toISOString() })
-          .eq('schedule_rule_id', ruleId)
-          .eq('is_recurrence_exception', false)
-          .gte('scheduled_date', today)
-          .is('deleted_at', null)
-        if (cleared.error) throw cleared.error
-
+        // be17: previously two sequential, unguarded updates (todos, then
+        // schedule_rules) -- a crash between them could soft-delete future
+        // todos while leaving the rule itself active. Now one atomic RPC
+        // (see the migration for the ordering rationale: existence/
+        // ownership is confirmed and the row locked before either write).
         // bd21: soft delete, matching todos' convention (DELETE itself is
         // revoked from authenticated) -- a hard delete here would null out
         // schedule_rule_id on every past occurrence kept for history via
         // the on-delete-set-null FK, losing which series they came from.
         const removed = await context.supabase
-          .from('schedule_rules')
-          .update({ deleted_at: new Date().toISOString() })
-          .eq('id', ruleId)
-          .is('deleted_at', null)
+          .rpc('delete_schedule_rule_atomic', { p_rule_id: ruleId, p_today: today })
           .select('id')
           .maybeSingle()
         if (removed.error) throw removed.error
