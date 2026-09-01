@@ -49,10 +49,23 @@ Deno.test('todo cursor round trips', () => {
     scheduled_date: '2026-08-02',
     sort_order: 3,
     id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
-  })
+  }, '2026-08-02')
 
   assert(decodeTodoCursor(cursor)?.sortOrder === 3)
+  assert(decodeTodoCursor(cursor)?.virtualThroughDate === '2026-08-02')
   assert(decodeTodoCursor('invalid') === null)
+})
+
+// bd12: virtualThroughDate is nullable/absent on the first page -- must
+// still round trip cleanly (not rejected, not coerced to a string).
+Deno.test('todo cursor round trips with a null virtualThroughDate', () => {
+  const cursor = encodeTodoCursor({
+    scheduled_date: '2026-08-02',
+    sort_order: 3,
+    id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+  }, null)
+
+  assert(decodeTodoCursor(cursor)?.virtualThroughDate == null)
 })
 
 Deno.test('todo update requires an optimistic-lock version', () => {

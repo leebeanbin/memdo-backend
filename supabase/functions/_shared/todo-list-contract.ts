@@ -10,20 +10,114 @@ type SupabasePort = { from: (table: string) => any }
 // year of browsing in one call.
 export const MAX_VIRTUAL_WINDOW_DAYS = 366
 
-/** Computes event-mode occurrences for [from, to] that don't already have a
- * real materialized row, without touching the DB beyond two cheap reads.
- * Was previously inline in todos/index.ts's request handler, reachable only
- * through a live HTTP call -- moved here (mirroring the extraction done for
- * agent-cloud-chat's dispatch logic) so this recurrence-materialization
- * logic is unit-testable against a fake `supabase` port. */
+/** bd12: the clamp itself, extracted as a small pure function so it stays
+ * unit-tested even though ownership of *applying* it moved to the caller
+ * (todos/index.ts computes this once, before paging, rather than
+ * virtualOccurrencesInRange re-deriving it on every per-page sub-range). */
+export function clampVirtualWindowEnd(from: string, to: string): string {
+  const clamped = addDays(from, MAX_VIRTUAL_WINDOW_DAYS)
+  return clamped < to ? clamped : to
+}
+
+// bd12: page-extension safety valve -- a single calendar date with more
+// real todos than this (a pathological volume no realistic personal-app
+// day would hit) is allowed to split across two pages rather than
+// growing a query unboundedly. Shared with todos/index.ts's page loop.
+export const MAX_PAGE_EXTENSION = 500
+
+/** bd12: true when the page's overflow row -- the (limit+1)-th row from an
+ * over-fetch -- shares its date with the limit-th row, meaning that
+ * date's real todos aren't fully covered by this page yet. The caller
+ * should re-fetch with a larger limit (up to MAX_PAGE_EXTENSION) rather
+ * than split the date across pages -- splitting a date is exactly what
+ * breaks sort-equivalence between a paginated walk and a single unbounded
+ * fetch, since a same-date virtual/Google item can only be merge-sorted
+ * correctly with real todos that have already been fetched into the same
+ * page. Pulled out as its own pure function (rather than left inline in
+ * the handler's query loop) purely so this exact decision is unit-testable
+ * without a live Supabase client. */
+export function pageSplitsADate(
+  data: Record<string, unknown>[],
+  effectiveLimit: number,
+): boolean {
+  if (data.length <= effectiveLimit) return false
+  return data[effectiveLimit].scheduled_date === data[effectiveLimit - 1].scheduled_date
+}
+
+export interface VirtualRangeForPage {
+  /** MAX_VIRTUAL_WINDOW_DAYS-clamped end of the whole request's range --
+   * the same value on every page (computed from the original request
+   * from/to, not the per-page sub-range). */
+  clampedTo: string
+  virtualFrom: string
+  virtualTo: string
+  /** false exactly when virtualFrom > virtualTo -- nothing new to cover
+   * this page (only possible once a previous page's boundary already
+   * reached clampedTo). virtualTo/clampedTo are still meaningful in this
+   * case (see todos/index.ts: virtualTo is still written into the next
+   * cursor, stabilizing at clampedTo so the skip keeps firing on every
+   * later page too). */
+  shouldFetch: boolean
+}
+
+/** bd12: pure computation of the virtual/Google-mirror sub-range a single
+ * page should cover, and whether there's anything new to fetch at all.
+ * Isolated from the live Supabase calls (unlike virtualOccurrencesInRange/
+ * googleMirrorEventsInRange, which still need a DB port) so the exact
+ * interleaving/clamping invariants -- the resume-at-day-after-cursor
+ * boundary, the clampedTo ceiling, and (paired with pageSplitsADate
+ * upstream) the same-date sort-equivalence guarantee -- are directly
+ * unit-testable against plain values. */
+export function virtualRangeForPage(params: {
+  requestFrom: string
+  requestTo: string
+  cursorVirtualThroughDate: string | null | undefined
+  /** The current page's last real todo's scheduled_date -- but ONLY when a
+   * later page is coming to continue from it (i.e. the caller's hasMore is
+   * true). Pass null for an empty page OR the final page (hasMore false):
+   * with no later page able to pick up whatever comes after the last real
+   * todo, trailing dates within [from, clampedTo] that have no real todos
+   * of their own would otherwise never be covered by any page at all. When
+   * non-null, this date is always fully covered by real todos for it, by
+   * construction -- pageSplitsADate/the extension loop upstream never lets
+   * a non-final page end mid-date. */
+  pageBoundaryDate: string | null
+}): VirtualRangeForPage {
+  const clampedTo = clampVirtualWindowEnd(params.requestFrom, params.requestTo)
+  // The resume point is the day *after* the stored virtualThroughDate, not
+  // the same date -- makes each page's virtual range a true partition of
+  // [from, clampedTo], adjacent and non-overlapping, nothing skipped or
+  // duplicated across a page boundary.
+  const virtualFrom = params.cursorVirtualThroughDate
+    ? addDays(params.cursorVirtualThroughDate, 1)
+    : params.requestFrom
+  // Never exceeds clampedTo, enforced explicitly -- real todos aren't
+  // themselves window-clamped, so a huge range's last real todo could
+  // otherwise re-expand virtual computation past the exact window the
+  // clamp exists to bound.
+  const virtualTo = params.pageBoundaryDate && params.pageBoundaryDate < clampedTo
+    ? params.pageBoundaryDate
+    : clampedTo
+  return { clampedTo, virtualFrom, virtualTo, shouldFetch: virtualFrom <= virtualTo }
+}
+
+/** Computes event-mode occurrences for exactly [from, to] that don't already
+ * have a real materialized row, without touching the DB beyond two cheap
+ * reads. Was previously inline in todos/index.ts's request handler,
+ * reachable only through a live HTTP call -- moved here (mirroring the
+ * extraction done for agent-cloud-chat's dispatch logic) so this
+ * recurrence-materialization logic is unit-testable against a fake
+ * `supabase` port.
+ *
+ * bd12: a pure range-computation function with no clamping policy of its
+ * own -- MAX_VIRTUAL_WINDOW_DAYS clamping now happens once in the caller
+ * (todos/index.ts), before paging, since this is called with a different
+ * per-page sub-range on every page rather than the whole request range. */
 export async function virtualOccurrencesInRange(
   supabase: SupabasePort,
   from: string,
   to: string,
-): Promise<{ items: Record<string, unknown>[]; windowEnd: string }> {
-  const clampedTo = addDays(from, MAX_VIRTUAL_WINDOW_DAYS) < to
-    ? addDays(from, MAX_VIRTUAL_WINDOW_DAYS)
-    : to
+): Promise<Record<string, unknown>[]> {
   const [rules, existing] = await Promise.all([
     // bd21: a deleted rule is soft-deleted, not gone -- without this filter
     // it would keep generating virtual occurrences forever.
@@ -46,7 +140,7 @@ export async function virtualOccurrencesInRange(
       .not('schedule_rule_id', 'is', null)
       .eq('is_recurrence_exception', false)
       .gte('scheduled_date', from)
-      .lte('scheduled_date', clampedTo),
+      .lte('scheduled_date', to),
   ])
   if (rules.error) throw rules.error
   if (existing.error) throw existing.error
@@ -68,14 +162,14 @@ export async function virtualOccurrencesInRange(
         count: rule.occurrence_count as number | null,
       },
       from,
-      clampedTo,
+      to,
     )
     for (const date of dates) {
       if (materialized.has(`${rule.id}:${date}`)) continue
       pending.push(virtualOccurrenceDto(rule, date))
     }
   }
-  return { items: await Promise.all(pending), windowEnd: clampedTo }
+  return await Promise.all(pending)
 }
 
 // Same fixed KST assumption DEFAULT_TIMEZONE_OFFSET_MINUTES (agent-cloud-
