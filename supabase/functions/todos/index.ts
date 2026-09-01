@@ -380,9 +380,14 @@ export default {
         // different situation this used to misreport as "same request key
         // used for a different item" (it looks up idempotencyKey as an id,
         // finds nothing, and returns that message regardless) (be8).
+        // bd9: this is a duplicate/already-exists situation, not an
+        // optimistic-lock staleness situation -- VERSION_CONFLICT implies
+        // "you had a stale copy," which isn't what happened here (a real
+        // row already exists for that rule+date regardless of what the
+        // client sent). Message unchanged so no iOS change is required.
         if (error.message?.includes('todos_rule_occurrence_uidx')) {
           return apiError(
-            'VERSION_CONFLICT',
+            'OCCURRENCE_ALREADY_EXISTS',
             '이미 해당 날짜에 반복 일정이 있어요.',
             409,
             currentRequestId,
