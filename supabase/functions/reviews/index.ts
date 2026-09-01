@@ -41,7 +41,16 @@ export default {
           .order('review_date', { ascending: false })
           .limit(30)
         if (error) throw error
-        return success(data.map(reviewDto), 200, 'reviews.list', data.length)
+        // bd6: unified list envelope. Unlike calendars/rules/categories/
+        // workout-logs (which return every row unconditionally, so
+        // hasMore is always false), this query already has a real
+        // .limit(30) with no cursor to page past it -- claiming
+        // hasMore: false unconditionally would misreport a user with 31+
+        // days of review history as having everything. Deriving it from
+        // whether the fetch hit the cap is the honest signal available
+        // without building a new cursor mechanism (out of scope here).
+        const items = data.map(reviewDto)
+        return success({ items, hasMore: data.length === 30 }, 200, 'reviews.list', items.length)
       }
 
       if (request.method === 'GET' && dateParam) {
