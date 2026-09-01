@@ -44,6 +44,32 @@ export function pageSplitsADate(
   return data[effectiveLimit].scheduled_date === data[effectiveLimit - 1].scheduled_date
 }
 
+/** bd12: given data over-fetched at some larger limit, and a "frozen"
+ * splitDate (the one date whose rows this page is being extended to fully
+ * cover), returns the index of the first row whose date is strictly after
+ * splitDate -- the correct page cutoff once splitDate's own rows are fully
+ * covered -- or null if no such row exists yet in `data` (extension must
+ * grow further).
+ *
+ * Deliberately does NOT reuse pageSplitsADate's "does the *current*
+ * boundary split a date" check once extension has started: re-checking
+ * whatever date happens to land at each doubled boundary lets a LATER
+ * date (B, C, ...) that also has more rows than fit cascade the
+ * extension arbitrarily far past what splitDate itself needed -- fixing
+ * date A's split could otherwise keep growing the page through B, C, and
+ * beyond, up to MAX_PAGE_EXTENSION, even though A only needed a few more
+ * rows. Scanning specifically for the first row past the frozen splitDate
+ * means only splitDate's own row count determines how far this page
+ * extends; whatever comes after it (even another split date) is left
+ * entirely for a later page's own, independent extension decision. */
+export function firstIndexAfterDate(
+  data: Record<string, unknown>[],
+  splitDate: unknown,
+): number | null {
+  const index = data.findIndex((row) => (row.scheduled_date as string) > (splitDate as string))
+  return index === -1 ? null : index
+}
+
 export interface VirtualRangeForPage {
   /** MAX_VIRTUAL_WINDOW_DAYS-clamped end of the whole request's range --
    * the same value on every page (computed from the original request

@@ -26,6 +26,7 @@ import {
   todoUpdateSchema,
 } from '../_shared/todo-contract.ts'
 import {
+  firstIndexAfterDate,
   googleMirrorEventsInRange,
   MAX_PAGE_EXTENSION,
   pageSplitsADate,
@@ -93,21 +94,15 @@ export default {
 
         // bd12: over-fetch by one to detect hasMore (as before), but also
         // extend the effective page size -- re-fetching with a larger
-        // limit -- whenever the peeked (limit+1-th) row shares its date
-        // with the last row that would otherwise be returned. This
-        // guarantees a single calendar date's real todos are never split
-        // across two pages, which is what makes the per-page virtual/
-        // Google merge below sort-equivalent to a single unbounded fetch:
-        // every date's real+virtual+Google items always end up merge-
-        // sorted together within the same page's response, using the
-        // same (scheduledDate, sortOrder, id) comparator a single big
-        // fetch would use. A date with more real todos than
-        // MAX_PAGE_EXTENSION (a pathological volume) is the one
-        // documented exception -- extension stops and that one page may
-        // split that one date.
-        let effectiveLimit = parsed.data.limit
-        let data: Record<string, unknown>[] = []
-        while (true) {
+        // limit -- when the peeked (limit+1-th) row shares its date with
+        // the last row that would otherwise be returned. This guarantees a
+        // single calendar date's real todos are never split across two
+        // pages, which is what makes the per-page virtual/Google merge
+        // below sort-equivalent to a single unbounded fetch: every date's
+        // real+virtual+Google items always end up merge-sorted together
+        // within the same page's response, using the same (scheduledDate,
+        // sortOrder, id) comparator a single big fetch would use.
+        const fetchPage = async (limit: number): Promise<Record<string, unknown>[]> => {
           let query = context.supabase
             .from('todos')
             .select(todoSelect)
@@ -115,7 +110,7 @@ export default {
             .order('scheduled_date')
             .order('sort_order')
             .order('id')
-            .limit(effectiveLimit + 1)
+            .limit(limit + 1)
 
           if (parsed.data.from) query = query.gte('scheduled_date', parsed.data.from)
           if (parsed.data.to) query = query.lte('scheduled_date', parsed.data.to)
@@ -139,16 +134,42 @@ export default {
 
           const result = await query
           if (result.error) throw result.error
-          data = result.data
-
-          if (!pageSplitsADate(data, effectiveLimit)) break
-          const nextLimit = Math.min(effectiveLimit * 2, MAX_PAGE_EXTENSION)
-          if (nextLimit === effectiveLimit) break // safety valve -- accept the split
-          effectiveLimit = nextLimit
+          return result.data
         }
 
-        const hasMore = data.length > effectiveLimit
-        const items = data.slice(0, effectiveLimit)
+        let data = await fetchPage(parsed.data.limit)
+        // Defaults to the requested limit (no split) -- overwritten below
+        // only if the initial fetch actually split a date.
+        let cutIndex = parsed.data.limit
+
+        if (pageSplitsADate(data, parsed.data.limit)) {
+          // Freeze the split date -- only ITS OWN row count determines how
+          // far this page extends. Re-checking whatever date lands at each
+          // doubled boundary (pageSplitsADate again) would let a LATER date
+          // that also has more rows than fit cascade the extension past
+          // what this date alone needed, potentially all the way to
+          // MAX_PAGE_EXTENSION even when the original split was tiny.
+          // firstIndexAfterDate scans for the first row past this specific
+          // date instead, so a later date's own split (if any) is left
+          // entirely to its own page's independent extension decision.
+          const splitDate = data[parsed.data.limit - 1].scheduled_date
+          let growLimit = parsed.data.limit
+          let found: number | null = null
+          while (found === null) {
+            const nextLimit = Math.min(growLimit * 2, MAX_PAGE_EXTENSION)
+            if (nextLimit === growLimit) {
+              cutIndex = growLimit // safety valve -- accept the split
+              break
+            }
+            growLimit = nextLimit
+            data = await fetchPage(growLimit)
+            found = firstIndexAfterDate(data, splitDate)
+            if (found !== null) cutIndex = found
+          }
+        }
+
+        const hasMore = data.length > cutIndex
+        const items = data.slice(0, cutIndex)
 
         // event-mode recurring rules materialize nothing up front (see rules POST) --
         // occurrences are computed on demand for whatever range is queried, like

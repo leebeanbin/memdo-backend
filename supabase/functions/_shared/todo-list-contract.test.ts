@@ -1,10 +1,47 @@
 import {
   clampVirtualWindowEnd,
+  firstIndexAfterDate,
   googleMirrorEventsInRange,
   pageSplitsADate,
   virtualOccurrencesInRange,
   virtualRangeForPage,
 } from './todo-list-contract.ts'
+
+type Row = { scheduled_date: string; sort_order: number; id: string }
+
+/** Faithful in-memory simulation of todos/index.ts's own page-extension
+ * loop (initial fetch, then -- only if that fetch splits a date -- freeze
+ * that date and grow strictly until the first row past it appears)
+ * against an already-sorted array, sliced instead of queried. Kept as one
+ * shared helper so every test exercising the algorithm stays in sync with
+ * the real handler logic, rather than each test re-deriving its own
+ * (potentially drifted) copy of the loop. */
+function simulatePagination(
+  sortedRows: Row[],
+  limit: number,
+): { items: Row[]; hasMore: boolean; data: Row[] } {
+  let data = sortedRows.slice(0, limit + 1)
+  let cutIndex = limit
+
+  if (pageSplitsADate(data, limit)) {
+    const splitDate = data[limit - 1].scheduled_date
+    let growLimit = limit
+    let found: number | null = null
+    while (found === null) {
+      const nextLimit = Math.min(growLimit * 2, 500)
+      if (nextLimit === growLimit) {
+        cutIndex = growLimit
+        break
+      }
+      growLimit = nextLimit
+      data = sortedRows.slice(0, growLimit + 1)
+      found = firstIndexAfterDate(data, splitDate)
+      if (found !== null) cutIndex = found
+    }
+  }
+
+  return { items: data.slice(0, cutIndex), hasMore: data.length > cutIndex, data }
+}
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
@@ -189,20 +226,11 @@ Deno.test('bd12: same-date real todos that would span 3 pages at limit=2, plus a
   ]
   const googleItem = { scheduledDate: '2026-08-05', sortOrder: 0, id: 'g-11-30' }
 
-  // Simulate todos/index.ts's own page-extension loop against an in-memory
-  // table, ordered exactly the way the real Postgres query is.
   const ordered = [...realRows].sort((a, b) =>
     a.scheduled_date.localeCompare(b.scheduled_date) || a.sort_order - b.sort_order ||
     a.id.localeCompare(b.id)
   )
-  let effectiveLimit = 2
-  let data: typeof ordered = []
-  while (true) {
-    data = ordered.slice(0, effectiveLimit + 1)
-    if (!pageSplitsADate(data, effectiveLimit)) break
-    effectiveLimit *= 2
-  }
-  const items = data.slice(0, effectiveLimit)
+  const { items } = simulatePagination(ordered, 2)
 
   // All 6 real todos ended up on one page -- the date was never split
   // (would have been 3 pages of 2 before the fix).
@@ -247,31 +275,71 @@ Deno.test('bd12: same-date real todos that would span 3 pages at limit=2, plus a
 })
 
 Deno.test('bd12: MAX_PAGE_EXTENSION safety valve terminates for a pathological same-date volume', () => {
-  const hugeSameDate = (n: number) =>
-    Array.from(
-      { length: n },
-      (_, i) => ({ scheduled_date: '2026-08-05', sort_order: i, id: `id-${i}` }),
-    )
-  let effectiveLimit = 2
-  let iterations = 0
-  while (true) {
-    iterations++
-    assert(iterations < 100) // guards the test itself against a real infinite loop
-    const data = hugeSameDate(effectiveLimit + 1) // every peeked row still shares the date
-    if (!pageSplitsADate(data, effectiveLimit)) break
-    const nextLimit = Math.min(effectiveLimit * 2, 500)
-    if (nextLimit === effectiveLimit) break
-    effectiveLimit = nextLimit
-  }
-  assert(effectiveLimit === 500)
+  const hugeSameDate: Row[] = Array.from(
+    { length: 1000 },
+    (_, i) => ({
+      scheduled_date: '2026-08-05',
+      sort_order: i,
+      id: `id-${String(i).padStart(4, '0')}`,
+    }),
+  )
+  // No later date exists anywhere in the table, so firstIndexAfterDate can
+  // never find a cutoff -- extension must terminate via the safety valve,
+  // not loop forever or grow past MAX_PAGE_EXTENSION.
+  const { items, hasMore } = simulatePagination(hugeSameDate, 2)
+  assert(items.length === 500)
+  assert(hasMore)
 })
 
-Deno.test('bd12: the cursor after extension is derived from the actual extended last row, not the original limit boundary', () => {
-  // 6 rows on 08-05 (forces extension past limit=2), 2 more on 08-06 (still
-  // inside the extended page once it reaches 8), 2 more on 08-07 (belong to
-  // page 2) -- enough real overflow data that the loop's "no overflow row"
-  // exit can't fire just from running out of rows to peek.
-  const realRows = [
+Deno.test('bd12: extending to cover a split date does NOT cascade into absorbing a later date that also has more rows than the limit', () => {
+  // The exact regression from review: date A and date B each have more
+  // rows than the requested limit. Fixing A's split must not enlarge the
+  // page until it also swallows all of B (or C, ...) -- only A's own row
+  // count should determine how far this page grows.
+  const rows: Row[] = [
+    ...Array.from({ length: 5 }, (_, i) => ({
+      scheduled_date: '2026-08-05',
+      sort_order: i,
+      id: `a${i}`,
+    })), // date A: 5 rows
+    ...Array.from({ length: 5 }, (_, i) => ({
+      scheduled_date: '2026-08-06',
+      sort_order: i,
+      id: `b${i}`,
+    })), // date B: 5 rows, also > limit
+    ...Array.from({ length: 5 }, (_, i) => ({
+      scheduled_date: '2026-08-07',
+      sort_order: i,
+      id: `c${i}`,
+    })), // date C: 5 rows, also > limit
+    { scheduled_date: '2026-08-08', sort_order: 0, id: 'd0' },
+  ]
+  const { items, hasMore } = simulatePagination(rows, 2)
+
+  // Only date A's 5 rows -- B and C are left untouched for their own,
+  // independent pages, even though B and C individually would ALSO need
+  // extension once it's their turn.
+  assert(items.length === 5)
+  assert(items.every((i) => i.scheduled_date === '2026-08-05'))
+  assert(items.map((i) => i.id).join(',') === 'a0,a1,a2,a3,a4')
+  assert(hasMore)
+
+  // Page 2, resuming from this page's real cursor, independently extends
+  // for date B without ever re-touching A, and without cascading into C.
+  const page2 = simulatePagination(
+    rows.filter((r) => r.scheduled_date > '2026-08-05'),
+    2,
+  )
+  assert(page2.items.length === 5)
+  assert(page2.items.every((i) => i.scheduled_date === '2026-08-06'))
+  assert(page2.hasMore)
+})
+
+Deno.test('bd12: the cursor after extension is derived from the actual extended last row of the frozen split date, not the original limit boundary', () => {
+  // 6 rows on 08-05 (forces extension past limit=2); 2 more on 08-06 sit
+  // right after it in the same underlying fetch, but must NOT be absorbed
+  // (see the no-cascade test above) -- they belong to page 2.
+  const rows: Row[] = [
     { scheduled_date: '2026-08-05', sort_order: 1, id: 'r1' },
     { scheduled_date: '2026-08-05', sort_order: 2, id: 'r2' },
     { scheduled_date: '2026-08-05', sort_order: 3, id: 'r3' },
@@ -283,32 +351,25 @@ Deno.test('bd12: the cursor after extension is derived from the actual extended 
     { scheduled_date: '2026-08-07', sort_order: 0, id: 'r9' },
     { scheduled_date: '2026-08-07', sort_order: 1, id: 'r10' },
   ]
-  let effectiveLimit = 2
-  let data: typeof realRows = []
-  while (true) {
-    data = realRows.slice(0, effectiveLimit + 1)
-    if (!pageSplitsADate(data, effectiveLimit)) break
-    effectiveLimit *= 2
-  }
-  const items = data.slice(0, effectiveLimit)
+  const { items } = simulatePagination(rows, 2)
   const lastItem = items.at(-1)!
 
-  // Extension (2 -> 4 -> 8) lands with 08-06 (r7, r8) also fully inside this
-  // page -- the cursor must be built from THIS actual last row (r8), not
-  // the original limit=2 boundary (r2) or even the first split date's last
-  // row (r6), or rows already returned would repeat on the next page.
-  assert(effectiveLimit === 8)
-  assert(lastItem.id === 'r8')
-  assert(items.map((i) => i.id).join(',') === 'r1,r2,r3,r4,r5,r6,r7,r8')
+  // The cursor must be built from the ACTUAL last returned row after
+  // extension (r6, the last row of the frozen split date), not the
+  // original limit=2 boundary (r2) -- otherwise r3-r6 would be re-fetched
+  // (repeated) on the next page. It must also NOT be r8 (that would mean
+  // 08-06 was wrongly cascaded into this page).
+  assert(lastItem.id === 'r6')
+  assert(items.map((i) => i.id).join(',') === 'r1,r2,r3,r4,r5,r6')
 
   // Simulate "page 2" resuming from a cursor built off this last row: every
   // row strictly after (scheduled_date, sort_order) in sort order.
-  const page2 = realRows.filter((r) =>
+  const page2 = rows.filter((r) =>
     r.scheduled_date > lastItem.scheduled_date ||
     (r.scheduled_date === lastItem.scheduled_date && r.sort_order > lastItem.sort_order)
   )
   assert(!page2.some((r) => items.some((i) => i.id === r.id))) // no repeats from page 1
-  assert(page2.map((r) => r.id).join(',') === 'r9,r10')
+  assert(page2.map((r) => r.id).join(',') === 'r7,r8,r9,r10')
 })
 
 Deno.test('googleMirrorEventsInRange maps a mirror row into the shared list-item shape', async () => {
