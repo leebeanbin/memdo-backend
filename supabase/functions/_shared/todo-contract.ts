@@ -163,9 +163,20 @@ export async function fetchCategoriesByIds(
 }
 
 export const todoSelect =
-  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,category_id,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at,sync_seq'
+  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,category_id,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at,sync_seq,google_event_id,google_synced_at'
 
-export function todoInsert(input: TodoInput, userId: string, id: string, requestHash: string) {
+/** Non-null when this create is materializing a previously read-only
+ * google_calendar_mirror_events row (the user edited/deleted a Google-
+ * mirrored item in Memdo for the first time) -- links the new todos row
+ * back to the same Google event so future edits push updates instead of
+ * creating a second event. */
+export function todoInsert(
+  input: TodoInput,
+  userId: string,
+  id: string,
+  requestHash: string,
+  materializedGoogleEventId?: string | null,
+) {
   return {
     id,
     user_id: userId,
@@ -177,8 +188,15 @@ export function todoInsert(input: TodoInput, userId: string, id: string, request
     // A client materializing a virtual occurrence (touching it for the first
     // time) goes through this same create path -- keep its provenance
     // consistent with materializeRow() rather than falling through to the
-    // 'manual' column default.
-    source: input.scheduleRuleId ? 'recurring' : 'manual',
+    // 'manual' column default. Same reasoning extends to materializing a
+    // Google-mirrored item.
+    source: materializedGoogleEventId
+      ? 'google_calendar'
+      : input.scheduleRuleId
+      ? 'recurring'
+      : 'manual',
+    google_event_id: materializedGoogleEventId ?? null,
+    google_synced_at: materializedGoogleEventId ? new Date().toISOString() : null,
     creation_request_hash: requestHash,
   }
 }

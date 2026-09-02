@@ -2,8 +2,10 @@ import { apiError, json, logRequest, responseByteLength, withApi } from '../_sha
 import {
   deleteRefreshTokenSecret,
   readRefreshTokenSecret,
+  refreshAccessToken,
   revokeGoogleToken,
   serviceClient,
+  stopWatchChannel,
 } from '../_shared/google-calendar-contract.ts'
 
 function disconnectFailed(currentRequestId: string, error: unknown): Response {
@@ -26,7 +28,7 @@ export default {
 
     const { data: connection, error: findError } = await supabase
       .from('google_calendar_connections')
-      .select('id,refresh_token_secret_id')
+      .select('id,refresh_token_secret_id,watch_channel_id,watch_resource_id')
       .eq('user_id', userId)
       .maybeSingle()
 
@@ -37,9 +39,35 @@ export default {
         supabase,
         connection.refresh_token_secret_id as string,
       ).catch(() => null)
+
+      // Stop the push-notification channel before the token that
+      // authorizes stopping it is gone -- best-effort, an already-expired
+      // channel 404s harmlessly (stopWatchChannel swallows that itself).
+      if (refreshToken && connection.watch_channel_id && connection.watch_resource_id) {
+        const accessToken = await refreshAccessToken(refreshToken).catch(() => null)
+        if (accessToken) {
+          await stopWatchChannel(
+            accessToken.access_token,
+            connection.watch_channel_id as string,
+            connection.watch_resource_id as string,
+          )
+        }
+      }
+
       if (refreshToken) await revokeGoogleToken(refreshToken)
 
-      // Mirror rows cascade-delete via the connection FK.
+      // Don't delete the user's real Google events -- only unlink Memdo's
+      // side, so a future reconnect starts clean instead of risking a stale
+      // event id being reused against an unrelated future Google event.
+      const unlinked = await supabase
+        .from('todos')
+        .update({ google_event_id: null, google_synced_at: null })
+        .eq('user_id', userId)
+        .not('google_event_id', 'is', null)
+      if (unlinked.error) return disconnectFailed(currentRequestId, unlinked.error)
+
+      // Mirror rows and any queued google_calendar_push_queue rows
+      // cascade-delete via the connection FK.
       const deleted = await supabase
         .from('google_calendar_connections')
         .delete()

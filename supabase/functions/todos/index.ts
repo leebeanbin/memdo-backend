@@ -29,6 +29,21 @@ import {
   googleMirrorEventsInRange,
   virtualOccurrencesInRange,
 } from '../_shared/todo-list-contract.ts'
+import { type PushableTodo, queueAndPushGoogleSync } from '../_shared/google-calendar-contract.ts'
+
+function pushableTodo(row: Record<string, unknown>): PushableTodo {
+  return {
+    id: row.id as string,
+    title: row.title as string,
+    entry_kind: row.entry_kind as string,
+    is_all_day: row.is_all_day as boolean,
+    scheduled_date: row.scheduled_date as string,
+    start_at: row.start_at as string | null,
+    end_at: row.end_at as string | null,
+    note: row.note as string | null,
+    location_name: row.location_name as string | null,
+  }
+}
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -321,14 +336,83 @@ export default {
           })
         }
 
-        const hash = await sha256(parsed.data)
+        // The client materializes a Google-mirrored item the same way it
+        // already materializes a virtual recurring occurrence: a plain
+        // create using the item's own (already-known, from the GET
+        // response) id as the Idempotency-Key. If that id names an existing
+        // mirror row, this create is a materialize -- link the new todos
+        // row to the same Google event and consume the mirror row, rather
+        // than treating it as a brand-new item that would get pushed to
+        // Google as a *second* event.
+        const mirrorRow = await context.supabase
+          .from('google_calendar_mirror_events')
+          .select('id,google_event_id')
+          .eq('id', idempotencyKey)
+          .eq('user_id', context.userClaims!.id)
+          .maybeSingle()
+        if (mirrorRow.error) throw mirrorRow.error
+        const materializedGoogleEventId = mirrorRow.data?.google_event_id as string | undefined
+
+        // The client's posted calendarId for a mirrored item is the
+        // GET /calendars response's *synthetic* Google entry
+        // (calendars/index.ts sets its id to the connection's own id, not a
+        // real user_calendars row -- there is no backing row for
+        // todos_calendar_user_fkey to find). Route a materialized item to
+        // the user's real personal calendar instead of trusting that id.
+        let insertInput = parsed.data
+        if (materializedGoogleEventId) {
+          const personalCalendar = await context.supabase
+            .from('user_calendars')
+            .select('id')
+            .eq('user_id', context.userClaims!.id)
+            .eq('purpose', 'personal')
+            .is('deleted_at', null)
+            .maybeSingle()
+          if (personalCalendar.error) throw personalCalendar.error
+          if (!personalCalendar.data) {
+            return apiError(
+              'INTERNAL_ERROR',
+              '기본 캘린더를 찾을 수 없습니다.',
+              500,
+              currentRequestId,
+            )
+          }
+          insertInput = { ...parsed.data, calendarId: personalCalendar.data.id as string }
+        }
+
+        const hash = await sha256(insertInput)
         const { data, error } = await context.supabase
           .from('todos')
-          .insert(todoInsert(parsed.data, context.userClaims!.id, idempotencyKey, hash))
+          .insert(
+            todoInsert(
+              insertInput,
+              context.userClaims!.id,
+              idempotencyKey,
+              hash,
+              materializedGoogleEventId,
+            ),
+          )
           .select(todoSelect)
           .single()
 
         if (!error) {
+          if (materializedGoogleEventId) {
+            const deletedMirror = await context.supabase
+              .from('google_calendar_mirror_events')
+              .delete()
+              .eq('id', idempotencyKey)
+            if (deletedMirror.error) throw deletedMirror.error
+          } else {
+            // A genuinely new Memdo-origin item -- push it to Google.
+            // Materialized items skip this: their data came *from* Google
+            // moments ago, nothing has changed yet to push back.
+            await queueAndPushGoogleSync(context.supabase, {
+              userId: context.userClaims!.id,
+              todoId: data.id as string,
+              operation: 'create',
+              todo: pushableTodo(data),
+            })
+          }
           const categories = await fetchCategoriesByIds(context.supabase, [
             data.category_id as string | null,
           ])
@@ -464,6 +548,16 @@ export default {
           )
         }
 
+        if (data.google_event_id) {
+          await queueAndPushGoogleSync(context.supabase, {
+            userId: context.userClaims!.id,
+            todoId: data.id as string,
+            operation: 'update',
+            todo: pushableTodo(data),
+            googleEventId: data.google_event_id as string,
+          })
+        }
+
         // task-mode recurring rules keep exactly one materialized occurrence at a
         // time; completing it advances the series by materializing the next one.
         // Best-effort: the completion itself already succeeded, so a failure here
@@ -543,7 +637,7 @@ export default {
           .eq('id', itemId)
           .eq('version', parsed.data.version)
           .is('deleted_at', null)
-          .select('id')
+          .select('id,google_event_id')
           .maybeSingle()
         if (error) throw error
         if (!data) {
@@ -553,6 +647,14 @@ export default {
             409,
             currentRequestId,
           )
+        }
+        if (data.google_event_id) {
+          await queueAndPushGoogleSync(context.supabase, {
+            userId: context.userClaims!.id,
+            todoId: data.id as string,
+            operation: 'delete',
+            googleEventId: data.google_event_id as string,
+          })
         }
         return success({ id: data.id }, 200, 'todos.delete', 1)
       }

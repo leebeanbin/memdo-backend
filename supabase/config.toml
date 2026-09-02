@@ -94,6 +94,26 @@ import_map = "../deno.json"
 verify_jwt = false
 import_map = "../deno.json"
 
+[functions.google-calendar-push]
+# Called only by pg_cron with the shared GOOGLE_CALENDAR_SYNC_SECRET bearer
+# token (see google-calendar-sync above, the identical existing pattern) --
+# no end-user JWT is ever presented to this route.
+verify_jwt = false
+import_map = "../deno.json"
+
+[functions.google-calendar-webhook]
+# Called directly by Google's push-notification infrastructure -- no Memdo
+# JWT, no GOOGLE_CALENDAR_SYNC_SECRET either. Authenticated instead by the
+# per-channel X-Goog-Channel-Token this route verifies itself (see
+# google-calendar-webhook/index.ts).
+verify_jwt = false
+import_map = "../deno.json"
+
+[functions.google-calendar-watch-renew]
+# Same pg_cron + GOOGLE_CALENDAR_SYNC_SECRET pattern as google-calendar-push.
+verify_jwt = false
+import_map = "../deno.json"
+
 [functions.categories]
 verify_jwt = true
 import_map = "../deno.json"

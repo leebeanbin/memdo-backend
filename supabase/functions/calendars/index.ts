@@ -15,6 +15,29 @@ import {
   calendarUpdateSchema,
   calendarUpdateValues,
 } from '../_shared/calendar-contract.ts'
+import { serviceClient } from '../_shared/google-calendar-contract.ts'
+
+const GOOGLE_CONNECTION_SELECT = 'id,status,created_at,updated_at,color_token'
+
+// The "Google Calendar" entry shown alongside real user_calendars rows is
+// synthetic -- its id is really google_calendar_connections.id, reused so
+// the client's calendarsByID lookup resolves google_calendar_mirror_events'
+// calendarId. name/purpose/isVisible are fixed (there's no Memdo-owned
+// concept of renaming or hiding someone's actual Google calendar); only
+// colorToken is a real, persisted column on the connection row.
+function googleConnectionCalendarDto(row: Record<string, unknown>, sortOrder: number) {
+  return {
+    id: row.id,
+    name: 'Google Calendar',
+    purpose: 'external',
+    colorToken: row.color_token ?? null,
+    isVisible: true,
+    sortOrder,
+    provider: 'google',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -45,7 +68,7 @@ export default {
           // (see todos GET) so the client's calendarsByID lookup resolves them.
           context.supabase
             .from('google_calendar_connections')
-            .select('id,status,created_at,updated_at')
+            .select(GOOGLE_CONNECTION_SELECT)
             .eq('status', 'active')
             .maybeSingle(),
         ])
@@ -56,17 +79,7 @@ export default {
         const items = calendars.data.map(calendarDto)
 
         if (googleConnection.data) {
-          items.push({
-            id: googleConnection.data.id,
-            name: 'Google Calendar',
-            purpose: 'external',
-            colorToken: null,
-            isVisible: true,
-            sortOrder: items.length,
-            provider: 'google',
-            createdAt: googleConnection.data.created_at,
-            updatedAt: googleConnection.data.updated_at,
-          })
+          items.push(googleConnectionCalendarDto(googleConnection.data, items.length))
         }
 
         return success(items, 200, 'calendars.list', items.length)
@@ -121,11 +134,46 @@ export default {
           .select(calendarSelect)
           .maybeSingle()
         if (error) throw error
-        if (!data) {
+        if (data) {
+          return success(calendarDto(data), 200, 'calendars.update', 1)
+        }
+
+        // Not a real user_calendars row -- itemId may be the synthetic
+        // Google Calendar entry's id (the connection's own id). Only
+        // colorToken is a real column there; name/sortOrder/isVisible in
+        // the request are accepted (the client always sends a full form)
+        // but silently ignored, matching what's actually editable for it.
+        //
+        // google_calendar_connections only has a SELECT RLS policy (every
+        // other write to this table already goes through service-role
+        // functions -- OAuth callback, sync, disconnect) -- context.supabase
+        // (the user-scoped client) would match this row's WHERE clause but
+        // RLS silently filters it to zero rows, returning 200 with no
+        // update applied rather than an error. Use the service-role client
+        // instead, with the same ownership check RLS would have done
+        // (.eq('user_id', userId)) done explicitly here, matching this
+        // codebase's existing belt-and-suspenders convention for
+        // service-role writes (e.g. reschedule_todo re-checking user_id
+        // even under RLS).
+        const googleConnection = await serviceClient()
+          .from('google_calendar_connections')
+          .update({ color_token: parsed.data.colorToken ?? null })
+          .eq('id', itemId)
+          .eq('user_id', userId)
+          .eq('status', 'active')
+          .select(GOOGLE_CONNECTION_SELECT)
+          .maybeSingle()
+        if (googleConnection.error) throw googleConnection.error
+        if (!googleConnection.data) {
           return apiError('RESOURCE_NOT_FOUND', '캘린더를 찾을 수 없습니다.', 404, currentRequestId)
         }
 
-        return success(calendarDto(data), 200, 'calendars.update', 1)
+        return success(
+          googleConnectionCalendarDto(googleConnection.data, 0),
+          200,
+          'calendars.update',
+          1,
+        )
       }
 
       if (request.method === 'DELETE' && hasItemPath) {

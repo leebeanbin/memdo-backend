@@ -113,43 +113,55 @@ export async function googleMirrorEventsInRange(
   // review, be7).
   const { data, error } = await supabase
     .from('google_calendar_mirror_events')
-    .select('id,connection_id,title,is_all_day,start_at,end_at,location_name')
+    .select(
+      'id,connection_id,title,is_all_day,start_at,end_at,location_name,note,google_calendar_connections(color_token)',
+    )
     .lt('start_at', `${to}T23:59:59.999+09:00`)
     .gt('end_at', `${from}T00:00:00.000+09:00`)
   if (error) throw error
 
-  return (data as Record<string, unknown>[]).map((row) => ({
-    id: row.id,
-    scheduledDate: kstDateString(row.start_at as string),
-    calendarId: row.connection_id,
-    title: row.title,
-    entryKind: 'event',
-    isAllDay: row.is_all_day,
-    note: null,
-    meetingUrl: null,
-    categoryId: null,
-    emoji: null,
-    color: null,
-    startAt: row.start_at,
-    endAt: row.end_at,
-    dueAt: null,
-    location: row.location_name ? { name: row.location_name } : null,
-    timeBucket: 'anytime',
-    estimatedMinutes: null,
-    reminderOffsetMinutes: null,
-    sortOrder: 0,
-    status: 'planned',
-    progress: 0,
-    source: 'google_calendar',
-    isRecurrenceException: false,
-    dailyPlanId: null,
-    scheduleRuleId: null,
-    isVirtual: false,
-    rescheduledFromId: null,
-    version: 0,
-    completedAt: null,
-    deletedAt: null,
-    createdAt: null,
-    updatedAt: null,
-  }))
+  return (data as Record<string, unknown>[]).map((row) => {
+    // The Calendar Management color picker persists to the *connection*
+    // (google_calendar_connections.color_token), not per-event -- every
+    // mirrored item under one connection shares its color, same as a real
+    // user_calendars-backed calendar's items do via calendarId. Without
+    // this embed, every mirrored event's color was hardcoded null and the
+    // saved color never actually painted anything (only the settings
+    // screen reflected it).
+    const connection = row.google_calendar_connections as { color_token?: string | null } | null
+    return {
+      id: row.id,
+      scheduledDate: kstDateString(row.start_at as string),
+      calendarId: row.connection_id,
+      title: row.title,
+      entryKind: 'event',
+      isAllDay: row.is_all_day,
+      note: row.note ?? null,
+      meetingUrl: null,
+      categoryId: null,
+      emoji: null,
+      color: connection?.color_token ?? null,
+      startAt: row.start_at,
+      endAt: row.end_at,
+      dueAt: null,
+      location: row.location_name ? { name: row.location_name } : null,
+      timeBucket: 'anytime',
+      estimatedMinutes: null,
+      reminderOffsetMinutes: null,
+      sortOrder: 0,
+      status: 'planned',
+      progress: 0,
+      source: 'google_calendar',
+      isRecurrenceException: false,
+      dailyPlanId: null,
+      scheduleRuleId: null,
+      isVirtual: false,
+      rescheduledFromId: null,
+      version: 0,
+      completedAt: null,
+      deletedAt: null,
+      createdAt: null,
+      updatedAt: null,
+    }
+  })
 }
