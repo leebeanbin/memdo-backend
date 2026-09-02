@@ -42,6 +42,10 @@ import_map = "../deno.json"
 verify_jwt = true
 import_map = "../deno.json"
 
+[functions.google-calendar-synced-calendars]
+verify_jwt = true
+import_map = "../deno.json"
+
 [functions.days]
 verify_jwt = true
 import_map = "../deno.json"

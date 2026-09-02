@@ -18,6 +18,7 @@ import {
 import { serviceClient } from '../_shared/google-calendar-contract.ts'
 
 const GOOGLE_CONNECTION_SELECT = 'id,status,created_at,updated_at,color_token'
+const SYNCED_CALENDAR_SELECT = 'id,summary,color_token,created_at,updated_at'
 
 // The "Google Calendar" entry shown alongside real user_calendars rows is
 // synthetic -- its id is really google_calendar_connections.id, reused so
@@ -29,6 +30,26 @@ function googleConnectionCalendarDto(row: Record<string, unknown>, sortOrder: nu
   return {
     id: row.id,
     name: 'Google Calendar',
+    purpose: 'external',
+    colorToken: row.color_token ?? null,
+    isVisible: true,
+    sortOrder,
+    provider: 'google',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+// Same synthetic shape as the primary connection's own entry above, one per
+// additional calendar the user opted into (google-calendar-synced-calendars)
+// -- id doubles as google_calendar_mirror_events.synced_calendar_id so the
+// client's calendarsByID lookup resolves those rows too. name is Google's
+// own summary for that calendar (e.g. "대한민국의 휴일"), not renamable here
+// either, same reasoning as the primary entry.
+function googleSyncedCalendarDto(row: Record<string, unknown>, sortOrder: number) {
+  return {
+    id: row.id,
+    name: row.summary,
     purpose: 'external',
     colorToken: row.color_token ?? null,
     isVisible: true,
@@ -80,6 +101,20 @@ export default {
 
         if (googleConnection.data) {
           items.push(googleConnectionCalendarDto(googleConnection.data, items.length))
+
+          // Additional calendars (holiday calendars, a secondary personal
+          // calendar, ...) opted into via google-calendar-synced-calendars --
+          // only queried once a connection is actually active, since every
+          // row here belongs to one.
+          const syncedCalendars = await context.supabase
+            .from('google_calendar_synced_calendars')
+            .select(SYNCED_CALENDAR_SELECT)
+            .eq('connection_id', googleConnection.data.id)
+            .order('created_at')
+          if (syncedCalendars.error) throw syncedCalendars.error
+          for (const row of syncedCalendars.data ?? []) {
+            items.push(googleSyncedCalendarDto(row, items.length))
+          }
         }
 
         return success(items, 200, 'calendars.list', items.length)
@@ -164,12 +199,34 @@ export default {
           .select(GOOGLE_CONNECTION_SELECT)
           .maybeSingle()
         if (googleConnection.error) throw googleConnection.error
-        if (!googleConnection.data) {
+        if (googleConnection.data) {
+          return success(
+            googleConnectionCalendarDto(googleConnection.data, 0),
+            200,
+            'calendars.update',
+            1,
+          )
+        }
+
+        // Still not found -- itemId may be one of the additional synced
+        // calendars (google-calendar-synced-calendars) instead. Same
+        // RLS-write-restriction/ownership-check reasoning as the connection
+        // update just above; name isn't editable here either (Google's own
+        // calendar name, not Memdo's to rename).
+        const syncedCalendar = await serviceClient()
+          .from('google_calendar_synced_calendars')
+          .update({ color_token: parsed.data.colorToken ?? null })
+          .eq('id', itemId)
+          .eq('user_id', userId)
+          .select(SYNCED_CALENDAR_SELECT)
+          .maybeSingle()
+        if (syncedCalendar.error) throw syncedCalendar.error
+        if (!syncedCalendar.data) {
           return apiError('RESOURCE_NOT_FOUND', '캘린더를 찾을 수 없습니다.', 404, currentRequestId)
         }
 
         return success(
-          googleConnectionCalendarDto(googleConnection.data, 0),
+          googleSyncedCalendarDto(syncedCalendar.data, 0),
           200,
           'calendars.update',
           1,

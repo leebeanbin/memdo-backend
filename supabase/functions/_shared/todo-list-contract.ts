@@ -114,25 +114,34 @@ export async function googleMirrorEventsInRange(
   const { data, error } = await supabase
     .from('google_calendar_mirror_events')
     .select(
-      'id,connection_id,title,is_all_day,start_at,end_at,location_name,note,google_calendar_connections(color_token)',
+      'id,connection_id,synced_calendar_id,title,is_all_day,start_at,end_at,location_name,note,' +
+        'google_calendar_connections(color_token),google_calendar_synced_calendars(color_token)',
     )
     .lt('start_at', `${to}T23:59:59.999+09:00`)
     .gt('end_at', `${from}T00:00:00.000+09:00`)
   if (error) throw error
 
   return (data as Record<string, unknown>[]).map((row) => {
-    // The Calendar Management color picker persists to the *connection*
-    // (google_calendar_connections.color_token), not per-event -- every
-    // mirrored item under one connection shares its color, same as a real
-    // user_calendars-backed calendar's items do via calendarId. Without
-    // this embed, every mirrored event's color was hardcoded null and the
-    // saved color never actually painted anything (only the settings
-    // screen reflected it).
+    // The Calendar Management color picker persists per-calendar, not
+    // per-event -- the connection's own primary-calendar rows
+    // (synced_calendar_id null) via google_calendar_connections.color_token,
+    // an additional synced calendar's rows via its own
+    // google_calendar_synced_calendars.color_token, same as a real
+    // user_calendars-backed calendar's items share color via calendarId.
+    // calendarId mirrors that split too, so each additional calendar (e.g.
+    // a holiday calendar) resolves to its own synthetic Calendar Management
+    // entry instead of collapsing into the primary connection's.
+    const syncedCalendar = row.google_calendar_synced_calendars as
+      | { color_token?: string | null }
+      | null
     const connection = row.google_calendar_connections as { color_token?: string | null } | null
+    const color = row.synced_calendar_id
+      ? syncedCalendar?.color_token ?? null
+      : connection?.color_token ?? null
     return {
       id: row.id,
       scheduledDate: kstDateString(row.start_at as string),
-      calendarId: row.connection_id,
+      calendarId: row.synced_calendar_id ?? row.connection_id,
       title: row.title,
       entryKind: 'event',
       isAllDay: row.is_all_day,
@@ -140,7 +149,7 @@ export async function googleMirrorEventsInRange(
       meetingUrl: null,
       categoryId: null,
       emoji: null,
-      color: connection?.color_token ?? null,
+      color,
       startAt: row.start_at,
       endAt: row.end_at,
       dueAt: null,

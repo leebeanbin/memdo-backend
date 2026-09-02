@@ -247,3 +247,19 @@ Deno.test('mapGoogleEventToMirrorRow stores the plain-text-converted note, not r
   )
   assertEquals(row?.note, '어제 진행 상황 공유')
 })
+
+Deno.test('mapGoogleEventToMirrorRow defaults synced_calendar_id to null (primary calendar), sets it when given', () => {
+  const event = {
+    id: 'g2',
+    status: 'confirmed' as const,
+    summary: '팀 스탠드업',
+    start: { dateTime: '2026-09-05T09:00:00Z' },
+    end: { dateTime: '2026-09-05T09:15:00Z' },
+    updated: '2026-09-01T00:00:00Z',
+  }
+  assertEquals(mapGoogleEventToMirrorRow(event, 'conn-1', 'user-1')?.synced_calendar_id, null)
+  assertEquals(
+    mapGoogleEventToMirrorRow(event, 'conn-1', 'user-1', 'synced-1')?.synced_calendar_id,
+    'synced-1',
+  )
+})

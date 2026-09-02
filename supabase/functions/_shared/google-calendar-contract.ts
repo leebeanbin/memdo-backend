@@ -379,6 +379,7 @@ export async function deleteGoogleEvent(
 
 export type MirrorEventRow = {
   connection_id: string
+  synced_calendar_id: string | null
   user_id: string
   google_event_id: string
   title: string
@@ -428,6 +429,7 @@ export function mapGoogleEventToMirrorRow(
   event: GoogleEvent,
   connectionId: string,
   userId: string,
+  syncedCalendarId: string | null = null,
 ): MirrorEventRow | null {
   if (!event.start || !event.end || !event.updated) return null
   const isAllDay = Boolean(event.start.date)
@@ -436,6 +438,7 @@ export function mapGoogleEventToMirrorRow(
   const note = event.description ? plainTextFromGoogleDescription(event.description) : null
   return {
     connection_id: connectionId,
+    synced_calendar_id: syncedCalendarId,
     user_id: userId,
     google_event_id: event.id,
     title: event.summary?.trim() || '(제목 없음)',
@@ -452,6 +455,41 @@ export type EventsPage = {
   events: GoogleEvent[]
   nextPageToken?: string
   nextSyncToken?: string
+}
+
+export type GoogleCalendarListEntry = {
+  id: string
+  summary: string
+  primary: boolean
+}
+
+/** Lists every calendar on the user's Google account (their own secondary
+ * calendars, subscribed public calendars like "대한민국의 휴일", shared
+ * calendars, ...) -- the picker source for adding an additional synced
+ * calendar. https://developers.google.com/workspace/calendar/api/v3/reference/calendarList/list */
+export async function fetchAvailableGoogleCalendars(
+  accessToken: string,
+): Promise<GoogleCalendarListEntry[]> {
+  const response = await fetch(
+    'https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250',
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  )
+  if (!response.ok) {
+    throw new Error(
+      `google calendarList.list failed: ${response.status} ${await response.text()}`,
+    )
+  }
+  const body = await response.json()
+  return ((body.items ?? []) as Array<Record<string, unknown>>).map((item) => ({
+    id: item.id as string,
+    // summaryOverride is the user's own renamed label for a subscribed
+    // calendar (e.g. renaming "Holidays in South Korea" to "휴일") --
+    // Calendar's own UI shows that in preference to the calendar's original
+    // summary whenever the user has set one.
+    summary: (item.summaryOverride as string | undefined) ?? (item.summary as string) ??
+      item.id as string,
+    primary: item.primary === true,
+  }))
 }
 
 export async function fetchEventsPage(
@@ -532,14 +570,79 @@ export async function syncConnection(
     return
   }
 
-  let syncToken = connection.sync_token
+  await pullCalendarIntoMirror(supabase, {
+    accessToken: tokens.access_token,
+    userId: connection.user_id,
+    googleCalendarId: connection.google_calendar_id,
+    syncToken: connection.sync_token,
+    connectionId: connection.id,
+    syncedCalendarId: null,
+  })
+
+  // Additional calendars (holiday calendars, a secondary personal calendar,
+  // etc.) the user opted into via google_calendar_synced_calendars --
+  // pull-only, each with its own independent sync_token so one calendar's
+  // incremental sync never affects another's. Most connections have none of
+  // these, so this is a no-op for the common case.
+  const { data: extraCalendars, error: extraCalendarsError } = await supabase
+    .from('google_calendar_synced_calendars')
+    .select('id,google_calendar_id,sync_token')
+    .eq('connection_id', connection.id)
+  if (extraCalendarsError) throw extraCalendarsError
+  for (const extra of extraCalendars ?? []) {
+    try {
+      await pullCalendarIntoMirror(supabase, {
+        accessToken: tokens.access_token,
+        userId: connection.user_id,
+        googleCalendarId: extra.google_calendar_id as string,
+        syncToken: extra.sync_token as string | null,
+        connectionId: connection.id,
+        syncedCalendarId: extra.id as string,
+      })
+    } catch (error) {
+      // One additional calendar failing (revoked access, calendar deleted
+      // upstream, ...) must never take down the primary calendar's sync or
+      // any other additional calendar's -- isolated per-row, same fail-open
+      // shape as every other best-effort side effect in this file.
+      await supabase.from('google_calendar_synced_calendars').update({
+        last_error: serializeError(error).slice(0, 500),
+      }).eq('id', extra.id as string)
+    }
+  }
+}
+
+/** The actual per-calendar pull+upsert+cancel loop, extracted so both the
+ * connection's primary calendar and any additional google_calendar_synced_
+ * calendars rows can share it -- identical logic either way, only which
+ * calendarId/syncToken to read and which mirror-table key/target row to
+ * write back to differ. syncedCalendarId null means "this is the
+ * connection's own primary calendar" (writes back to
+ * google_calendar_connections, keeps the pre-existing (connection_id,
+ * google_event_id) mirror conflict target); non-null means "this is one of
+ * the additional calendars" (writes back to google_calendar_synced_
+ * calendars, uses the (synced_calendar_id, google_event_id) partial unique
+ * index instead, since several additional calendars could otherwise collide
+ * on connection_id alone). */
+async function pullCalendarIntoMirror(
+  supabase: SupabaseClient,
+  params: {
+    accessToken: string
+    userId: string
+    googleCalendarId: string
+    syncToken: string | null
+    connectionId: string
+    syncedCalendarId: string | null
+  },
+): Promise<void> {
+  const { accessToken, userId, googleCalendarId, connectionId, syncedCalendarId } = params
+  let syncToken = params.syncToken
   let pageToken: string | undefined
   let nextSyncToken: string | undefined
   let pages = 0
 
   const runPage = async () => {
     try {
-      return await fetchEventsPage(tokens.access_token, connection.google_calendar_id, {
+      return await fetchEventsPage(accessToken, googleCalendarId, {
         syncToken: syncToken ?? undefined,
         pageToken,
         timeMin: syncToken
@@ -553,7 +656,7 @@ export async function syncConnection(
       if ((error as Error & { code?: string }).code === 'SYNC_TOKEN_GONE') {
         syncToken = null
         pageToken = undefined
-        return await fetchEventsPage(tokens.access_token, connection.google_calendar_id, {
+        return await fetchEventsPage(accessToken, googleCalendarId, {
           timeMin: new Date(Date.now() - MIRROR_SYNC_WINDOW_PAST_DAYS * 86400000).toISOString(),
           timeMax: new Date(Date.now() + MIRROR_SYNC_WINDOW_FUTURE_DAYS * 86400000).toISOString(),
         })
@@ -595,7 +698,7 @@ export async function syncConnection(
       const { data: materialized, error: materializedError } = await supabase
         .from('todos')
         .select('id,google_event_id,version,google_synced_at')
-        .eq('user_id', connection.user_id)
+        .eq('user_id', userId)
         .in('google_event_id', externalEvents.map((event) => event.id))
         .is('deleted_at', null)
       if (materializedError) throw materializedError
@@ -612,7 +715,7 @@ export async function syncConnection(
     for (const event of externalEvents) {
       const materialized = materializedByEventId.get(event.id)
       if (!materialized) {
-        const row = mapGoogleEventToMirrorRow(event, connection.id, connection.user_id)
+        const row = mapGoogleEventToMirrorRow(event, connectionId, userId, syncedCalendarId)
         if (row) toUpsertMirror.push(row)
         continue
       }
@@ -626,7 +729,7 @@ export async function syncConnection(
         ? new Date(materialized.google_synced_at).getTime()
         : 0
       if (googleUpdatedAt <= lastSyncedAt) continue
-      const mirrorRow = mapGoogleEventToMirrorRow(event, connection.id, connection.user_id)
+      const mirrorRow = mapGoogleEventToMirrorRow(event, connectionId, userId, syncedCalendarId)
       if (!mirrorRow) continue
       // Bump version too, not just the content -- this is a real change to
       // the row (Google's edit overwriting Memdo's copy), and a client
@@ -654,16 +757,25 @@ export async function syncConnection(
     if (toUpsertMirror.length > 0) {
       const upserted = await supabase
         .from('google_calendar_mirror_events')
-        .upsert(toUpsertMirror, { onConflict: 'connection_id,google_event_id' })
+        .upsert(
+          toUpsertMirror,
+          syncedCalendarId
+            ? { onConflict: 'synced_calendar_id,google_event_id' }
+            : { onConflict: 'connection_id,google_event_id' },
+        )
       if (upserted.error) throw upserted.error
     }
     if (cancelledIds.length > 0) {
-      const deleted = await supabase
+      const deleteQuery = supabase
         .from('google_calendar_mirror_events')
         .delete()
-        .eq('connection_id', connection.id)
         .in('google_event_id', cancelledIds)
-      if (deleted.error) throw deleted.error
+      const deleted = await (syncedCalendarId
+        ? deleteQuery.eq('synced_calendar_id', syncedCalendarId)
+        : deleteQuery.eq('connection_id', connectionId).is('synced_calendar_id', null))
+      if (deleted.error) {
+        throw deleted.error
+      }
 
       // A cancelled event that had been materialized into a real todos row
       // (the user edited it in Memdo at some point) must be soft-deleted
@@ -671,10 +783,12 @@ export async function syncConnection(
       const { error: cancelMaterializedError } = await supabase
         .from('todos')
         .update({ deleted_at: new Date().toISOString() })
-        .eq('user_id', connection.user_id)
+        .eq('user_id', userId)
         .in('google_event_id', cancelledIds)
         .is('deleted_at', null)
-      if (cancelMaterializedError) throw cancelMaterializedError
+      if (cancelMaterializedError) {
+        throw cancelMaterializedError
+      }
     }
 
     if (page.nextSyncToken) nextSyncToken = page.nextSyncToken
@@ -682,12 +796,21 @@ export async function syncConnection(
     pageToken = page.nextPageToken
   }
 
-  await supabase.from('google_calendar_connections').update({
-    sync_token: nextSyncToken ?? syncToken,
-    status: 'active',
-    last_error: null,
-    last_synced_at: new Date().toISOString(),
-  }).eq('id', connection.id)
+  const finalSyncToken = nextSyncToken ?? syncToken
+  if (syncedCalendarId) {
+    await supabase.from('google_calendar_synced_calendars').update({
+      sync_token: finalSyncToken,
+      last_error: null,
+      last_synced_at: new Date().toISOString(),
+    }).eq('id', syncedCalendarId)
+  } else {
+    await supabase.from('google_calendar_connections').update({
+      sync_token: finalSyncToken,
+      status: 'active',
+      last_error: null,
+      last_synced_at: new Date().toISOString(),
+    }).eq('id', connectionId)
+  }
 }
 
 const GOOGLE_CHANNELS_STOP_URL = 'https://www.googleapis.com/calendar/v3/channels/stop'
