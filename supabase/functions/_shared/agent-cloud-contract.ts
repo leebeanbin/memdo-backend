@@ -11,6 +11,7 @@ import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts
 import { preferencesDto } from './preferences-contract.ts'
 import { ianaOffsetMinutes } from './rule-contract.ts'
 import { DEAD_STATUSES } from './todo-contract.ts'
+import { googleMirrorEventsInRange } from './todo-list-contract.ts'
 
 export { ianaOffsetMinutes }
 
@@ -566,7 +567,34 @@ async function fetchSchedules(
     .lte('scheduled_date', to)
     .limit(200)
   if (error) throw error
-  return data as ExistingScheduleRow[]
+  const rows = data as ExistingScheduleRow[]
+
+  // GET /todos merges google_calendar_mirror_events in alongside todos
+  // (see todo-list-contract.ts) so a connected user sees synced events in
+  // the app; this tool queried `todos` alone, so search_schedules and
+  // find_free_slots -- and therefore every "이번 달 일정 정리해줘"-style
+  // request -- were blind to Google-sourced events even once a request
+  // like that correctly called the tool. Never a materialized todos row
+  // (no google_event_id here), so a later propose_schedule_update/delete
+  // against one of these ids fails closed via fetchScheduleById's null
+  // return -- fine, since this tool is read/search, not edit.
+  try {
+    const googleItems = await googleMirrorEventsInRange(supabase, from, to)
+    for (const item of googleItems) {
+      rows.push({
+        id: item.id as string,
+        title: item.title as string,
+        scheduled_date: item.scheduledDate as string,
+        start_at: item.startAt as string | null,
+        end_at: item.endAt as string | null,
+        version: 0,
+      })
+    }
+  } catch {
+    // Fail open -- a Google-sync hiccup shouldn't break the whole tool call.
+  }
+
+  return rows.sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))
 }
 
 /** Single-row lookup for propose_schedule_update -- the model only ever

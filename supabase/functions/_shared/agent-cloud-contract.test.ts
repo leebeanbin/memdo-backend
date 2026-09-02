@@ -557,6 +557,57 @@ Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correc
   assert(state.dispatchedTools[1].result === freeSlotsResult)
 })
 
+// fetchSchedules() used to query only `todos`, so search_schedules/
+// find_free_slots -- and every "이번 달 일정 정리해줘"-style agent request --
+// were blind to Google-sourced events GET /todos otherwise merges in via
+// googleMirrorEventsInRange (todo-list-contract.ts). This fake supports
+// google_calendar_mirror_events's own chain shape (…select().lt().gt())
+// so that merge can actually be exercised here.
+function fakeSupabaseWithGoogleMirror(
+  rows: ExistingScheduleRow[],
+  mirrorRows: Record<string, unknown>[],
+): { from: (table: string) => any } {
+  return {
+    from: (table: string) => {
+      if (table === 'google_calendar_mirror_events') {
+        const chain: any = {
+          select: () => chain,
+          lt: () => chain,
+          gt: () => chain,
+          then: (resolve: (v: { data: Record<string, unknown>[]; error: null }) => void) =>
+            resolve({ data: mirrorRows, error: null }),
+        }
+        return chain
+      }
+      return fakeSupabase(rows).from(table)
+    },
+  }
+}
+
+Deno.test('search_schedules merges in google_calendar_mirror_events, not just todos', async () => {
+  const state = newToolDispatchState()
+  const mirrorRows = [{
+    id: 'g1',
+    connection_id: 'conn-1',
+    title: 'Google Skills',
+    is_all_day: false,
+    start_at: '2026-08-16T09:00:00.000Z',
+    end_at: '2026-08-16T09:15:00.000Z',
+    location_name: null,
+    note: null,
+  }]
+
+  const result: any = await dispatchToolCall(
+    fakeSupabaseWithGoogleMirror([], mirrorRows),
+    'search_schedules',
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(result.items.length === 1)
+  assert(result.items[0].title === 'Google Skills')
+})
+
 Deno.test('find_free_slots with no durationMinutes answers an availability question, not a duration slice', async () => {
   const state = newToolDispatchState()
 
