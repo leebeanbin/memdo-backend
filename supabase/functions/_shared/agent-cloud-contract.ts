@@ -629,12 +629,20 @@ async function searchSchedules(
   try {
     const rows = await fetchSchedules(supabase, args.from, args.to)
     return {
+      // find_free_slots always pre-formats times into local HH:mm text via
+      // formatSlot() before it ever reaches the model (see below) -- this
+      // used to hand the model raw UTC ISO instants (startAt/endAt) instead
+      // and expect it to convert them to KST itself. A lighter model doing
+      // that arithmetic in its head is exactly the kind of thing that goes
+      // quietly wrong (12:20-14:20 UTC read back as "낮 12:20~2:20", 9h off
+      // from the real 21:20-23:20 KST) -- so this now pre-formats the same
+      // way, removing the conversion from the model's hands entirely. null
+      // for an untimed task/all-day item, same as it always had no time.
       items: rows.map((r) => ({
         id: r.id,
         title: r.title,
         scheduledDate: r.scheduled_date,
-        startAt: r.start_at,
-        endAt: r.end_at,
+        time: r.start_at && r.end_at ? formatSlot(new Date(r.start_at), new Date(r.end_at)) : null,
       })),
     }
   } catch (error) {
@@ -733,7 +741,29 @@ async function fetchDayItems(supabase: SupabasePort, date: string): Promise<DayI
     .not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
     .limit(200)
   if (error) throw error
-  return data as DayItemRow[]
+  const rows = data as DayItemRow[]
+
+  // Same gap fetchSchedules had (see its own comment above) -- get_day_context
+  // only ever saw `todos`, never google_calendar_mirror_events, so "오늘 하루
+  // 어땠어?" was blind to Google-sourced events too. A mirror row is never
+  // completed/cancelled in Memdo's own sense, so it always counts as
+  // incomplete here, same as todo-list-contract.ts's DTO mapping treats it.
+  try {
+    const googleItems = await googleMirrorEventsInRange(supabase, date, date)
+    for (const item of googleItems) {
+      rows.push({
+        id: item.id as string,
+        title: item.title as string,
+        start_at: item.startAt as string | null,
+        end_at: item.endAt as string | null,
+        status: 'planned',
+      })
+    }
+  } catch {
+    // Fail open -- a Google-sync hiccup shouldn't break the whole tool call.
+  }
+
+  return rows
 }
 
 async function getDayContext(
@@ -776,8 +806,11 @@ async function getDayContext(
     incomplete: incomplete.map((row) => ({
       id: row.id,
       title: row.title,
-      startAt: row.start_at,
-      endAt: row.end_at,
+      // Pre-formatted local HH:mm-HH:mm, not raw UTC ISO -- see
+      // search_schedules' identical fix above for why.
+      time: row.start_at && row.end_at
+        ? formatSlot(new Date(row.start_at), new Date(row.end_at))
+        : null,
     })),
     hasReflection,
   }

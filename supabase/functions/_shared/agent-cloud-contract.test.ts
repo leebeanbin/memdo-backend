@@ -608,6 +608,61 @@ Deno.test('search_schedules merges in google_calendar_mirror_events, not just to
   assert(result.items[0].title === 'Google Skills')
 })
 
+Deno.test('search_schedules pre-formats time as local HH:mm-HH:mm, not raw UTC ISO', async () => {
+  // A real user report: the model read a raw UTC startAt/endAt back as if
+  // it were already local, stating "낮 12:20~2:20" for an event actually at
+  // 21:20-23:20 KST. find_free_slots already avoided this by pre-formatting
+  // via formatSlot() before the model ever sees it -- search_schedules now
+  // does the same, so there's no UTC->KST conversion left for the model to
+  // get wrong.
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: '2026-08-16T00:20:00.000Z',
+    end_at: '2026-08-16T01:20:00.000Z',
+    version: 1,
+  }]
+
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'search_schedules',
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(result.items[0].time === '9:20-10:20')
+  assert(result.items[0].startAt === undefined)
+  assert(result.items[0].endAt === undefined)
+})
+
+Deno.test('dispatchToolCall get_day_context merges in google_calendar_mirror_events, not just todos', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({
+      todos: [],
+      daily_reviews: [],
+      google_calendar_mirror_events: [{
+        id: 'g1',
+        connection_id: 'conn-1',
+        title: 'Google Skills',
+        is_all_day: false,
+        start_at: '2026-08-16T09:00:00.000Z',
+        end_at: '2026-08-16T09:15:00.000Z',
+        location_name: null,
+        note: null,
+      }],
+    }),
+    'get_day_context',
+    {},
+    state,
+    dispatchToday,
+  )
+  assert(result.incompleteCount === 1)
+  assert(result.incomplete[0].title === 'Google Skills')
+})
+
 Deno.test('find_free_slots with no durationMinutes answers an availability question, not a duration slice', async () => {
   const state = newToolDispatchState()
 
@@ -771,6 +826,8 @@ function fakeMultiTableSupabase(
         not: () => chain,
         gte: () => chain,
         lte: () => chain,
+        lt: () => chain,
+        gt: () => chain,
         order: () => chain,
         limit: (n: number) => {
           const filtered = rows.filter((row: any) =>
