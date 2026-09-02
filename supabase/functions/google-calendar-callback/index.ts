@@ -1,6 +1,7 @@
 import {
   deleteRefreshTokenSecret,
   exchangeCodeForTokens,
+  serializeError,
   serviceClient,
   storeRefreshTokenSecret,
   watchCalendar,
@@ -107,7 +108,7 @@ export default {
           JSON.stringify({
             operation: 'google_calendar.callback.watch',
             userId,
-            error: String(watchError),
+            error: serializeError(watchError),
           }),
         )
       }
@@ -119,7 +120,7 @@ export default {
               JSON.stringify({
                 operation: 'google_calendar.callback.cleanup',
                 userId,
-                error: String(cleanupError),
+                error: serializeError(cleanupError),
               }),
             )
           },
@@ -129,7 +130,11 @@ export default {
       return appRedirect('success')
     } catch (error) {
       console.error(
-        JSON.stringify({ operation: 'google_calendar.callback', userId, error: String(error) }),
+        JSON.stringify({
+          operation: 'google_calendar.callback',
+          userId,
+          error: serializeError(error),
+        }),
       )
       return appRedirect('error', 'exchange_failed')
     }

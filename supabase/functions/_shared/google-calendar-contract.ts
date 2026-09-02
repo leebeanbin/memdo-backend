@@ -44,6 +44,25 @@ export type GoogleCalendarErrorReason =
 
 const GOOGLE_ERROR_STATUS_PATTERN = /failed: (\d{3})/
 
+/** `String(error)` only produces a useful message for a real `Error`
+ * instance -- a Supabase/RPC error thrown as a plain object (`if (error)
+ * throw error`, several call sites below) stringifies to the useless
+ * literal "[object Object]" via Object.prototype.toString, silently
+ * discarding message/code/details/hint. Used everywhere this file logs or
+ * classifies a caught error so debugging never depends on which shape the
+ * particular failure happened to throw. */
+export function serializeError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'object' && error !== null) {
+    try {
+      return JSON.stringify(error)
+    } catch {
+      // Fall through -- a circular/non-serializable object.
+    }
+  }
+  return String(error)
+}
+
 export function classifyGoogleCalendarErrorReason(
   message: string | null,
 ): GoogleCalendarErrorReason {
@@ -504,7 +523,7 @@ export async function syncConnection(
   try {
     tokens = await refreshAccessToken(refreshToken)
   } catch (error) {
-    const message = String(error)
+    const message = serializeError(error)
     const revoked = message.includes('invalid_grant')
     await supabase.from('google_calendar_connections').update({
       status: revoked ? 'revoked' : 'error',
@@ -804,7 +823,7 @@ export async function queueAndPushGoogleSync(
       JSON.stringify({
         operation: 'google_calendar.push.inline',
         todoId: params.todoId,
-        error: String(error),
+        error: serializeError(error),
       }),
     )
   }

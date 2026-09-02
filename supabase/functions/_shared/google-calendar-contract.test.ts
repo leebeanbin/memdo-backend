@@ -6,6 +6,7 @@ import {
   MEMDO_TODO_ID_PROPERTY,
   memdoTodoIdFromEvent,
   plainTextFromGoogleDescription,
+  serializeError,
   toGoogleEventBody,
 } from './google-calendar-contract.ts'
 
@@ -18,6 +19,28 @@ function assertEquals(actual: unknown, expected: unknown): void {
     throw new Error(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
   }
 }
+
+// serializeError -- a real caught bug: `if (error) throw error` (several
+// call sites) throws a plain Supabase/RPC error object, not an Error
+// instance, and String(plainObject) silently collapses to the useless
+// literal "[object Object]" -- observed live in google_calendar.push.inline
+// logs, which is what this exists to prevent everywhere in this file.
+
+Deno.test("serializeError returns a real Error instance's message", () => {
+  assert(serializeError(new Error('boom')) === 'boom')
+})
+
+Deno.test('serializeError JSON-stringifies a plain error-shaped object instead of "[object Object]"', () => {
+  const result = serializeError({ message: 'permission denied', code: '42501' })
+  assert(result !== '[object Object]')
+  assert(result.includes('permission denied'))
+  assert(result.includes('42501'))
+})
+
+Deno.test('serializeError falls back to String() for a primitive', () => {
+  assert(serializeError('plain string reason') === 'plain string reason')
+  assert(serializeError(404) === '404')
+})
 
 Deno.test('classifyGoogleCalendarErrorReason maps a null message to unknown', () => {
   assert(classifyGoogleCalendarErrorReason(null) === 'unknown')
