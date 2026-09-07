@@ -1,4 +1,5 @@
 import {
+  applyClassifiedSyncFailure,
   type GoogleCalendarSyncConnection,
   serviceClient,
   syncConnection,
@@ -54,10 +55,11 @@ export default {
             error: String(syncError),
           }),
         )
-        await supabase.from('google_calendar_connections').update({
-          status: 'error',
-          last_error: String(syncError).slice(0, 500),
-        }).eq('id', (connection as GoogleCalendarSyncConnection).id)
+        await applyClassifiedSyncFailure(
+          supabase,
+          (connection as GoogleCalendarSyncConnection).id,
+          syncError,
+        )
       }
     }
 

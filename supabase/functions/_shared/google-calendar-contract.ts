@@ -83,6 +83,40 @@ export function classifyGoogleCalendarErrorReason(
   return 'unknown'
 }
 
+/** Shared by google-calendar-sync (15-min cron) and google-calendar-webhook
+ * (real-time push) -- both wrap syncConnection in a try/catch and used to
+ * unconditionally flip the connection to status: 'error' on ANY thrown
+ * error, including a transient 429 from Google's Calendar API mid-sync,
+ * unrelated to auth. A single rate-limit hit during any cycle would
+ * permanently lock the connection into a "needs reconnect"-looking state
+ * until the user manually reconnected, even though nothing about their
+ * auth was actually broken.
+ *
+ * Only auth_expired/calendar_not_found are genuinely actionable ("needs
+ * reconnect" or "pick a different calendar") and flip status to 'error'.
+ * rate_limited/unknown still record last_error (so google-calendar-status
+ * can surface the transient-error state -- see that endpoint's
+ * needsReconnect/lastError handling) but leave status untouched, so the
+ * next cron tick / webhook retries normally with no user-visible
+ * "broken" signal. On the next successful sync, syncConnection's own
+ * success-path update (status: 'active', last_error: null) already clears
+ * whatever this wrote -- no separate recovery step needed. */
+// Narrowed to just what this function calls (matches the SupabasePort
+// pattern already used in agent-cloud-contract.ts/todo-list-contract.ts/
+// todo-contract.ts) rather than the full SupabaseClient class -- lets this
+// one function actually be unit-tested with a fake, unlike syncConnection/
+// queueAndPushGoogleSync in this same file, which need the real client for
+// their Google-token/vault RPC calls.
+type ConnectionUpdatePort = {
+  from: (
+    table: string,
+  ) => {
+    update: (
+      values: Record<string, unknown>,
+    ) => { eq: (col: string, val: string) => PromiseLike<unknown> }
+  }
+}
+
 /** google-calendar-push's per-row decision for a caught push failure --
  * pulled out of that file's loop into a pure, testable function (that
  * file, like every other edge function entry point in this codebase, has
@@ -100,6 +134,25 @@ export function classifyPushFailure(error: unknown): PushFailureAction {
     return { kind: 'skip' }
   }
   return { kind: 'record', lastError: message.slice(0, 500) }
+}
+
+export async function applyClassifiedSyncFailure(
+  supabase: ConnectionUpdatePort,
+  connectionId: string,
+  error: unknown,
+): Promise<void> {
+  const message = serializeError(error)
+  const reason = classifyGoogleCalendarErrorReason(message)
+  if (reason === 'auth_expired' || reason === 'calendar_not_found') {
+    await supabase.from('google_calendar_connections').update({
+      status: 'error',
+      last_error: message.slice(0, 500),
+    }).eq('id', connectionId)
+  } else {
+    await supabase.from('google_calendar_connections').update({
+      last_error: message.slice(0, 500),
+    }).eq('id', connectionId)
+  }
 }
 
 export function serviceClient(): SupabaseClient {

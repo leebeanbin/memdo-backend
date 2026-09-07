@@ -1,4 +1,5 @@
 import {
+  applyClassifiedSyncFailure,
   classifyGoogleCalendarErrorReason,
   classifyPushFailure,
   createGoogleEvent,
@@ -319,6 +320,73 @@ Deno.test('mapGoogleEventToMirrorRow defaults synced_calendar_id to null (primar
   )
 })
 
+// applyClassifiedSyncFailure -- google-calendar-sync/google-calendar-webhook
+// used to unconditionally flip status to 'error' on ANY thrown syncConnection
+// error, including a transient 429 unrelated to auth. Only auth_expired/
+// calendar_not_found should ever flip status; rate_limited/unknown must
+// leave the connection 'active' (still recording last_error) so it keeps
+// retrying with no user-visible "broken" state.
+
+function fakeConnectionsSupabase(): {
+  from: (table: string) => any
+  lastUpdate: { table: string; values: Record<string, unknown> } | null
+} {
+  const state = { lastUpdate: null as { table: string; values: Record<string, unknown> } | null }
+  return {
+    from: (table: string) => ({
+      update: (values: Record<string, unknown>) => {
+        state.lastUpdate = { table, values }
+        return {
+          eq: () => Promise.resolve({ data: null, error: null }),
+        }
+      },
+    }),
+    get lastUpdate() {
+      return state.lastUpdate
+    },
+  } as any
+}
+
+Deno.test('applyClassifiedSyncFailure leaves status untouched for a rate-limited error, but records last_error', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(
+    supabase,
+    'conn-1',
+    new Error('google events.list failed: 429 too many requests'),
+  )
+  assert(supabase.lastUpdate !== null)
+  assertEquals(supabase.lastUpdate!.table, 'google_calendar_connections')
+  assert(!('status' in supabase.lastUpdate!.values))
+  assert(typeof supabase.lastUpdate!.values.last_error === 'string')
+})
+
+Deno.test('applyClassifiedSyncFailure leaves status untouched for an unclassified error, but records last_error', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(supabase, 'conn-1', new Error('some unexpected failure'))
+  assert(supabase.lastUpdate !== null)
+  assert(!('status' in supabase.lastUpdate!.values))
+  assert(typeof supabase.lastUpdate!.values.last_error === 'string')
+})
+
+Deno.test('applyClassifiedSyncFailure flips status to error for an auth failure', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(
+    supabase,
+    'conn-1',
+    new Error('google events.list failed: 401 unauthorized'),
+  )
+  assertEquals(supabase.lastUpdate!.values.status, 'error')
+})
+
+Deno.test('applyClassifiedSyncFailure flips status to error when the calendar is gone', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(
+    supabase,
+    'conn-1',
+    new Error('google events.list failed: 404 not found'),
+  )
+  assertEquals(supabase.lastUpdate!.values.status, 'error')
+})
 
 // classifyPushFailure -- google-calendar-push's per-row decision on a caught
 // push failure. A rate-limited failure must never count toward the queue

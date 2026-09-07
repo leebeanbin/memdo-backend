@@ -1,4 +1,5 @@
 import {
+  applyClassifiedSyncFailure,
   type GoogleCalendarSyncConnection,
   serviceClient,
   syncConnection,
@@ -69,10 +70,7 @@ export default {
           error: String(syncError),
         }),
       )
-      await supabase.from('google_calendar_connections').update({
-        status: 'error',
-        last_error: String(syncError).slice(0, 500),
-      }).eq('id', connection.id as string)
+      await applyClassifiedSyncFailure(supabase, connection.id as string, syncError)
       // Still 200 -- Google only cares that the notification was received,
       // not whether our own sync succeeded. The 15-min pull cron retries.
     }
