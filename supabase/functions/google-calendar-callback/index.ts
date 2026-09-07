@@ -1,6 +1,7 @@
 import {
   deleteRefreshTokenSecret,
   exchangeCodeForTokens,
+  GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS,
   serializeError,
   serviceClient,
   storeRefreshTokenSecret,
@@ -84,6 +85,31 @@ export default {
         .select('id,google_calendar_id')
         .single()
       if (upserted.error) throw upserted.error
+
+      // A fresh connect/reconnect (e.g. recovering from the stale
+      // readonly-scope case) should immediately unblock any of this user's
+      // pushes that already exhausted their retry ceiling under the old,
+      // broken connection -- without this, a stale-scope reconnect fixes
+      // future pushes but leaves past failures stuck until a separate
+      // manual "다시 시도" tap. Fail-open (best-effort, same as the watch
+      // registration below): never let a reset failure block the
+      // connection itself succeeding.
+      try {
+        await supabase
+          .from('google_calendar_push_queue')
+          .update({ attempts: 0, last_error: null })
+          .eq('user_id', userId)
+          .eq('connection_id', upserted.data.id as string)
+          .gte('attempts', GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS)
+      } catch (retryResetError) {
+        console.error(
+          JSON.stringify({
+            operation: 'google_calendar.callback.retry_reset',
+            userId,
+            error: serializeError(retryResetError),
+          }),
+        )
+      }
 
       // Real-time pull via push notifications -- fail-open, same as every
       // other best-effort side effect in this codebase (Apple token
