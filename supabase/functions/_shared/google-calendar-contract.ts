@@ -30,6 +30,12 @@ export const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
 export const MIRROR_SYNC_WINDOW_PAST_DAYS = 60
 export const MIRROR_SYNC_WINDOW_FUTURE_DAYS = 366
 
+// Single source of truth for the push queue's retry ceiling -- shared by
+// google-calendar-push (which enforces it) and google-calendar-status
+// (which needs the same threshold to report pendingCount vs failedCount),
+// so the two can never drift apart.
+export const GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS = 10
+
 // be12: google-calendar-status previously returned `last_error` verbatim --
 // raw upstream Google API/OAuth response text (see the `throw new Error`
 // call sites below and in google-calendar-sync/index.ts) leaked straight to
@@ -75,6 +81,25 @@ export function classifyGoogleCalendarErrorReason(
   if (status === 429) return 'rate_limited'
   if (status === 404) return 'calendar_not_found'
   return 'unknown'
+}
+
+/** google-calendar-push's per-row decision for a caught push failure --
+ * pulled out of that file's loop into a pure, testable function (that
+ * file, like every other edge function entry point in this codebase, has
+ * no test coverage of its own; the classification logic does). A
+ * rate-limited failure is transient and retried next tick for free,
+ * without ever counting toward the queue row's MAX_ATTEMPTS ceiling --
+ * everything else counts as a real attempt. */
+export type PushFailureAction =
+  | { kind: 'skip' }
+  | { kind: 'record'; lastError: string }
+
+export function classifyPushFailure(error: unknown): PushFailureAction {
+  const message = serializeError(error)
+  if (classifyGoogleCalendarErrorReason(message) === 'rate_limited') {
+    return { kind: 'skip' }
+  }
+  return { kind: 'record', lastError: message.slice(0, 500) }
 }
 
 export function serviceClient(): SupabaseClient {
@@ -256,12 +281,30 @@ function exclusiveEndDate(dateISO: string): string {
 }
 
 type GoogleEventBody = {
+  id: string
   summary: string
   description?: string
   location?: string
   start: { date?: string; dateTime?: string }
   end: { date?: string; dateTime?: string }
   extendedProperties: { private: Record<string, string> }
+}
+
+/** Google's own custom-id constraint for events.insert: lowercase base32hex
+ * (letters a-v, digits 0-9), length 5-1024.
+ * https://developers.google.com/workspace/calendar/api/v3/reference/events/insert
+ * A todo's UUID with hyphens stripped is 32 lowercase hex characters
+ * (0-9a-f) -- a strict subset of that alphabet -- and deterministic per
+ * todo. Using it as the event id (rather than letting Google assign one)
+ * is what makes createGoogleEvent idempotent: a retry after a create that
+ * actually succeeded on Google's side (but whose follow-up DB write
+ * failed) hits the exact same id again, and Google's own uniqueness
+ * constraint on event ids (409 on collision) is the recovery signal --
+ * see createGoogleEvent below. Without this, a retry would ask Google to
+ * mint a *new* id, silently creating a second, permanently orphaned event
+ * every time a create's follow-up write failed. */
+function deterministicGoogleEventId(todoId: string): string {
+  return todoId.replace(/-/g, '').toLowerCase()
 }
 
 /** Maps a todos row to a Google event body. Tasks (no fixed time) push as
@@ -278,6 +321,7 @@ export function toGoogleEventBody(todo: PushableTodo): GoogleEventBody {
     ? { date: exclusiveEndDate(todo.scheduled_date) }
     : { dateTime: todo.end_at }
   return {
+    id: deterministicGoogleEventId(todo.id),
     summary: todo.title,
     description: todo.note ?? undefined,
     location: todo.location_name ?? undefined,
@@ -317,6 +361,16 @@ async function googleEventsRequest(
     ;(insufficientScope as Error & { code: string }).code = 'INSUFFICIENT_SCOPE_OR_AUTH'
     throw insufficientScope
   }
+  if (method === 'POST' && response.status === 409) {
+    // Google's response when a client-supplied event id (see
+    // deterministicGoogleEventId above) already exists on this calendar --
+    // exactly the signal createGoogleEvent's retry-recovery path needs.
+    const alreadyExists = new Error(
+      `google events.insert failed: 409 ${await response.text()}`,
+    )
+    ;(alreadyExists as Error & { code: string }).code = 'ALREADY_EXISTS'
+    throw alreadyExists
+  }
   if (method === 'DELETE') {
     // Google returns 410 for an already-deleted event -- treat as success,
     // the desired end state (no event) already holds.
@@ -336,13 +390,21 @@ export async function createGoogleEvent(
   calendarId: string,
   todo: PushableTodo,
 ): Promise<{ id: string; updated?: string }> {
-  const result = await googleEventsRequest(
-    'POST',
-    accessToken,
-    calendarId,
-    '',
-    toGoogleEventBody(todo),
-  )
+  const body = toGoogleEventBody(todo)
+  let result: { id: string; updated?: string } | null
+  try {
+    result = await googleEventsRequest('POST', accessToken, calendarId, '', body)
+  } catch (error) {
+    if ((error as Error & { code?: string }).code === 'ALREADY_EXISTS') {
+      // A prior attempt already created this event on Google's side (this
+      // call is retrying after that attempt's own follow-up DB write
+      // failed) -- the deterministic id IS the existing event, no need to
+      // fetch it separately. Recovering here is what makes a create retry
+      // safe to call at all: it can never produce a second event.
+      return { id: body.id }
+    }
+    throw error
+  }
   if (!result) throw new Error('google events.insert returned no body')
   return result
 }
@@ -896,15 +958,33 @@ export async function queueAndPushGoogleSync(
       .maybeSingle()
     if (!connection) return
 
-    await supabase.rpc('enqueue_google_push', {
+    const enqueued = await supabase.rpc('enqueue_google_push', {
       p_todo_id: params.todoId,
       p_user_id: params.userId,
       p_connection_id: connection.id,
       p_operation: params.operation,
       p_google_event_id: params.googleEventId ?? null,
     })
+    if (enqueued.error) throw enqueued.error
 
-    const refreshToken = await readRefreshTokenSecret(supabase, connection.refresh_token_secret_id)
+    // Everything below is privileged work (reading the Vault-stored refresh
+    // token, writing todos.google_event_id, clearing the push queue) --
+    // context.supabase (the RLS-scoped, JWT-bound client this function was
+    // called with) can't actually do any of it: vault_read_secret's EXECUTE
+    // is service_role-only, and google_calendar_push_queue has RLS enabled
+    // with zero policies for `authenticated` (a hard, silent, zero-rows-
+    // affected deny, not an error). This inline "instant push" path threw
+    // at the vault call on every single invocation until this fix -- every
+    // push in production so far actually happened via the 1-minute
+    // google-calendar-push cron, never inline. service_role bypasses RLS
+    // entirely, so every query below still carries an explicit
+    // .eq('user_id', params.userId)/.eq('id', connection.id) as
+    // defense-in-depth, matching this codebase's established
+    // service-client-replacing-a-missing-RLS-check convention (see
+    // calendars/index.ts's PATCH fallback).
+    const service = serviceClient()
+
+    const refreshToken = await readRefreshTokenSecret(service, connection.refresh_token_secret_id)
     if (!refreshToken) return
     const tokens = await refreshAccessToken(refreshToken)
 
@@ -914,10 +994,17 @@ export async function queueAndPushGoogleSync(
         connection.google_calendar_id,
         params.todo,
       )
-      await supabase.from('todos').update({
+      const updated = await service.from('todos').update({
         google_event_id: result.id,
         google_synced_at: new Date().toISOString(),
-      }).eq('id', params.todoId)
+      }).eq('id', params.todoId).eq('user_id', params.userId).select('id').maybeSingle()
+      if (updated.error) throw updated.error
+      if (!updated.data) {
+        throw new Error(
+          `queueAndPushGoogleSync: todos.update matched no row for todo ${params.todoId} ` +
+            `after creating google event ${result.id} -- left queued for the cron to recover it`,
+        )
+      }
     } else if (params.operation === 'update' && params.todo && params.googleEventId) {
       await updateGoogleEvent(
         tokens.access_token,
@@ -925,9 +1012,16 @@ export async function queueAndPushGoogleSync(
         params.googleEventId,
         params.todo,
       )
-      await supabase.from('todos').update({
+      const updated = await service.from('todos').update({
         google_synced_at: new Date().toISOString(),
-      }).eq('id', params.todoId)
+      }).eq('id', params.todoId).eq('user_id', params.userId).select('id').maybeSingle()
+      if (updated.error) throw updated.error
+      if (!updated.data) {
+        throw new Error(
+          `queueAndPushGoogleSync: todos.update matched no row for todo ${params.todoId} ` +
+            `after updating google event ${params.googleEventId}`,
+        )
+      }
     } else if (params.operation === 'delete' && params.googleEventId) {
       await deleteGoogleEvent(
         tokens.access_token,
@@ -938,7 +1032,26 @@ export async function queueAndPushGoogleSync(
       return
     }
 
-    await supabase.from('google_calendar_push_queue').delete().eq('todo_id', params.todoId)
+    const dequeued = await service
+      .from('google_calendar_push_queue')
+      .delete()
+      .eq('todo_id', params.todoId)
+      .eq('user_id', params.userId)
+      .select('id')
+    if (dequeued.error) throw dequeued.error
+    // A zero-row delete here isn't itself fatal (create's own case above
+    // already throws if the todos write didn't land, and update/delete
+    // with nothing queued is a legitimate no-op -- e.g. the push already
+    // completed via the cron in a race with this inline attempt) -- just
+    // don't pretend it definitely happened when it might not have.
+    if (dequeued.data.length === 0) {
+      console.error(
+        JSON.stringify({
+          operation: 'google_calendar.push.inline.queue_delete_no_match',
+          todoId: params.todoId,
+        }),
+      )
+    }
   } catch (error) {
     // Leave it queued (enqueue_google_push already ran above) -- the
     // google-calendar-push cron retries on its own 1-minute tick.

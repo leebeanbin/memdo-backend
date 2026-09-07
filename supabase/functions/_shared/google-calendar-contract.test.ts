@@ -1,5 +1,7 @@
 import {
   classifyGoogleCalendarErrorReason,
+  classifyPushFailure,
+  createGoogleEvent,
   isMemdoAuthoredEvent,
   mapGoogleEventToMirrorRow,
   MEMDO_KIND_PROPERTY,
@@ -163,6 +165,59 @@ Deno.test('toGoogleEventBody tags every pushed event with memdoTodoId/memdoKind'
   assertEquals(body.extendedProperties.private[MEMDO_KIND_PROPERTY], 'task')
 })
 
+// toGoogleEventBody's id / createGoogleEvent idempotency -- a create retry
+// (e.g. after a successful Google insert whose follow-up DB write failed)
+// must never produce a second event on Google. The mechanism: a
+// deterministic, todo-derived event id, with Google's own 409-on-collision
+// as the recovery signal.
+
+Deno.test('toGoogleEventBody derives a deterministic Google event id from the todo UUID (hyphens stripped, lowercased)', () => {
+  const body = toGoogleEventBody({
+    id: 'A1B2C3D4-E5F6-4789-90AB-CDEF01234567',
+    title: '일정',
+    entry_kind: 'event',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: null,
+    end_at: null,
+    note: null,
+    location_name: null,
+  })
+  assertEquals(body.id, 'a1b2c3d4e5f6478990abcdef01234567')
+  // Google's events.insert custom-id constraint: lowercase base32hex
+  // (a-v, 0-9), length 5-1024 -- confirm the derived id actually satisfies
+  // it, not just that it "looks like" the todo id.
+  assert(/^[a-v0-9]{5,1024}$/.test(body.id))
+})
+
+Deno.test('createGoogleEvent recovers the same deterministic id on a 409 (already exists) instead of throwing', async () => {
+  const originalFetch = globalThis.fetch
+  let requestCount = 0
+  globalThis.fetch = (() => {
+    requestCount += 1
+    return Promise.resolve(
+      new Response('{"error":{"code":409,"message":"already exists"}}', { status: 409 }),
+    )
+  }) as typeof fetch
+  try {
+    const result = await createGoogleEvent('token', 'primary', {
+      id: 'A1B2C3D4-E5F6-4789-90AB-CDEF01234567',
+      title: '일정',
+      entry_kind: 'event',
+      is_all_day: false,
+      scheduled_date: '2026-09-05',
+      start_at: null,
+      end_at: null,
+      note: null,
+      location_name: null,
+    })
+    assertEquals(result.id, 'a1b2c3d4e5f6478990abcdef01234567')
+    assertEquals(requestCount, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 // isMemdoAuthoredEvent / memdoTodoIdFromEvent -- the echo-loop-prevention
 // check the pull side depends on to never re-mirror an event Memdo itself
 // pushed.
@@ -262,4 +317,23 @@ Deno.test('mapGoogleEventToMirrorRow defaults synced_calendar_id to null (primar
     mapGoogleEventToMirrorRow(event, 'conn-1', 'user-1', 'synced-1')?.synced_calendar_id,
     'synced-1',
   )
+})
+
+
+// classifyPushFailure -- google-calendar-push's per-row decision on a caught
+// push failure. A rate-limited failure must never count toward the queue
+// row's MAX_ATTEMPTS ceiling (retried next tick for free); everything else
+// counts as a real attempt.
+
+Deno.test('classifyPushFailure skips (no attempts burned) for a rate-limited error', () => {
+  const action = classifyPushFailure(
+    new Error('google events POST failed: 429 too many requests'),
+  )
+  assertEquals(action.kind, 'skip')
+})
+
+Deno.test('classifyPushFailure records (attempts burned) for a non-rate-limited error', () => {
+  const action = classifyPushFailure(new Error('google events POST failed: 403 forbidden'))
+  assert(action.kind === 'record')
+  assert(action.lastError.includes('403'))
 })
