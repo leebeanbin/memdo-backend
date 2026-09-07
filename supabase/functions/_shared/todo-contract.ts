@@ -307,5 +307,16 @@ export function todoDto(row: TodoRow, category: TodoCategory | null = null) {
     deletedAt: row.deleted_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // Surfaced so the client can show a real "synced to Google Calendar"
+    // signal instead of the previous static, always-shown "내 일정" label,
+    // which read as "this only lives locally" even once two-way push made
+    // that untrue for every Memdo-origin item with an active connection --
+    // a real reported point of confusion. Presence of googleEventId is
+    // proof of at least one successful push; it says nothing about a
+    // pending/failed push still sitting in google_calendar_push_queue, so
+    // the client only ever renders a positive "synced" state from this,
+    // never a "sync failed" one it can't actually back up.
+    googleEventId: row.google_event_id ?? null,
+    googleSyncedAt: row.google_synced_at ?? null,
   }
 }

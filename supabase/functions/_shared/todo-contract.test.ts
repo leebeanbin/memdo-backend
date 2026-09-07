@@ -187,6 +187,23 @@ Deno.test('todoDto falls back to null with no category and no override (bd18)', 
   assert(dto.categoryId === null)
 })
 
+Deno.test('todoDto surfaces googleEventId/googleSyncedAt, and defaults both to null when absent', () => {
+  const synced = todoDto({
+    id: '1',
+    category_id: null,
+    emoji: null,
+    color: null,
+    google_event_id: 'g-abc123',
+    google_synced_at: '2026-09-01T00:00:00Z',
+  })
+  assert(synced.googleEventId === 'g-abc123')
+  assert(synced.googleSyncedAt === '2026-09-01T00:00:00Z')
+
+  const unsynced = todoDto({ id: '2', category_id: null, emoji: null, color: null })
+  assert(unsynced.googleEventId === null)
+  assert(unsynced.googleSyncedAt === null)
+})
+
 Deno.test('fetchCategoriesByIds dedupes ids and skips a query when there are none (bd18)', async () => {
   let calls = 0
   const fakeSupabase = {
