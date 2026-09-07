@@ -94,7 +94,10 @@ async function handleList(
   if (error) throw error
 
   const items = (data ?? []).map(toDTO)
-  return success({ items }, 200, 'workout_logs.list', items.length)
+  // bd6: unified list envelope -- no cursor/limit exists for this
+  // endpoint (it returns every row in the date range unconditionally),
+  // so hasMore is always false, not a real pagination signal yet.
+  return success({ items, hasMore: false }, 200, 'workout_logs.list', items.length)
 }
 
 // ── POST /workout-logs ────────────────────────────────────────────────────────
