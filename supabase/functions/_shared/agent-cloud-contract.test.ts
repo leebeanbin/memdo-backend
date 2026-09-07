@@ -9,6 +9,7 @@ import {
   expandScope,
   findConflict,
   ianaOffsetMinutes,
+  isOpenRouterRateLimited,
   newToolDispatchState,
   resolveDate,
   resolveOpenRouterModel,
@@ -1505,6 +1506,30 @@ Deno.test('resolveRateLimitPerHour: a non-eval user is unaffected even with the 
       evalRateLimitPerHour: '250',
     }) === 30,
   )
+})
+
+// isOpenRouterRateLimited -- the mid-stream catch block in agent-cloud-chat
+// used to collapse every failure (a transient OpenRouter 429, a real bug)
+// into the same generic INTERNAL_ERROR. Prefers the structured `.status`
+// callOpenRouterStreamed now attaches to its thrown error; falls back to a
+// string match only for an error shape that doesn't carry it.
+
+Deno.test('isOpenRouterRateLimited is true for a structured .status of 429', () => {
+  const error = new Error('openrouter 429: rate limited')
+  ;(error as Error & { status: number }).status = 429
+  assert(isOpenRouterRateLimited(error))
+})
+
+Deno.test('isOpenRouterRateLimited is false for a structured .status that is not 429', () => {
+  const error = new Error('openrouter 500: internal error')
+  ;(error as Error & { status: number }).status = 500
+  assert(!isOpenRouterRateLimited(error))
+})
+
+Deno.test('isOpenRouterRateLimited falls back to a string match when .status is absent', () => {
+  assert(isOpenRouterRateLimited(new Error('openrouter 429: rate limited')))
+  assert(!isOpenRouterRateLimited(new Error('openrouter 500: internal error')))
+  assert(!isOpenRouterRateLimited('some unrelated string'))
 })
 
 Deno.test('ALLOWED_OPENROUTER_MODELS is exactly selectableModelIds(MODEL_REGISTRY)', () => {

@@ -119,6 +119,22 @@ export function resolveRateLimitPerHour(
   return parsed
 }
 
+/** agent-cloud-chat's mid-stream catch block used to collapse every failure
+ * (a transient OpenRouter rate limit, a real bug, a network blip) into the
+ * identical generic INTERNAL_ERROR -- confirmed live: OpenRouter's shared
+ * qwen3.7-flash pool 429s repeatedly, and the user got the exact same
+ * unhelpful message and retry button as for an actual failure, with no way
+ * to tell "retry now, it'll probably work" from "something's actually
+ * broken." Prefers the structured `.status` callOpenRouterStreamed now
+ * attaches to its thrown error; falls back to a string match on the
+ * message only for an error shape that doesn't carry it (defensive, not
+ * the primary path). */
+export function isOpenRouterRateLimited(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status
+  if (typeof status === 'number') return status === 429
+  return String(error).includes('openrouter 429')
+}
+
 export const chatRequestSchema = z.object({
   message: z.string().trim().min(1).max(2000),
   // Client-managed history (this endpoint is stateless, matching every other
