@@ -365,6 +365,39 @@ export default {
         if (mirrorRow.error) throw mirrorRow.error
         const materializedGoogleEventId = mirrorRow.data?.google_event_id as string | undefined
 
+        // No mirror row doesn't necessarily mean this was never a
+        // materialize -- an earlier, successful attempt at this exact
+        // idempotencyKey already deletes the mirror row on success (below).
+        // A retry arriving after that (a client double-tap, or a retry
+        // after the first response looked slow/failed) would otherwise fall
+        // through to inserting with the client's now-stale
+        // synthetic-Google-calendar id from parsed.data and hit
+        // todos_calendar_user_fkey instead of just replaying the
+        // already-created row -- found live: two such 23503s right after
+        // two successful materializes for the same items.
+        if (!materializedGoogleEventId) {
+          const alreadyMaterialized = await context.supabase
+            .from('todos')
+            .select(todoSelect)
+            .eq('id', idempotencyKey)
+            .maybeSingle()
+          if (alreadyMaterialized.error) throw alreadyMaterialized.error
+          if (alreadyMaterialized.data) {
+            const categories = await fetchCategoriesByIds(context.supabase, [
+              alreadyMaterialized.data.category_id as string | null,
+            ])
+            return success(
+              todoDto(
+                alreadyMaterialized.data,
+                categories.get(alreadyMaterialized.data.category_id as string) ?? null,
+              ),
+              201,
+              'todos.create',
+              1,
+            )
+          }
+        }
+
         // The client's posted calendarId for a mirrored item is the
         // GET /calendars response's *synthetic* Google entry
         // (calendars/index.ts sets its id to the connection's own id, not a
