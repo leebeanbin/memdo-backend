@@ -682,6 +682,20 @@ export async function syncConnection(
       status: revoked ? 'revoked' : 'error',
       last_error: message.slice(0, 500),
     }).eq('id', connection.id)
+    if (revoked) {
+      // A revoked token means the user has to fully reconnect -- this
+      // connection's mirror rows are dead for good, not transiently stale
+      // the way an 'error' status might be. GET /calendars already never
+      // shows a non-active connection's synthetic entry, so leaving these
+      // rows around just means /todos keeps returning items whose
+      // calendarId can never resolve on the client (found live: this
+      // bricked list loading for every item, not just the Google-origin
+      // ones -- see todo-list-contract.ts's matching !inner/status filter).
+      await supabase.from('google_calendar_mirror_events').delete().eq(
+        'connection_id',
+        connection.id,
+      )
+    }
     return
   }
 
