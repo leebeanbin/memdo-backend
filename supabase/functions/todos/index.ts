@@ -373,12 +373,17 @@ export default {
         // the user's real personal calendar instead of trusting that id.
         let insertInput = parsed.data
         if (materializedGoogleEventId) {
+          // user_calendars has no deleted_at column (it's hard-deleted, not
+          // soft-deleted, unlike todos) -- an .is('deleted_at', null) filter
+          // here threw 42703 (undefined_column) on every single call,
+          // 500-ing this entire materialize path (found live: completing a
+          // not-yet-materialized Google-mirrored item via swipe/checkbox
+          // always failed).
           const personalCalendar = await context.supabase
             .from('user_calendars')
             .select('id')
             .eq('user_id', context.userClaims!.id)
             .eq('purpose', 'personal')
-            .is('deleted_at', null)
             .maybeSingle()
           if (personalCalendar.error) throw personalCalendar.error
           if (!personalCalendar.data) {
