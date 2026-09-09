@@ -33,6 +33,7 @@ import {
   enqueueGooglePush,
   type PushableTodo,
   pushGoogleEventInline,
+  serviceClient,
 } from '../_shared/google-calendar-contract.ts'
 
 // Supabase's Edge Function runtime (not vanilla Deno) exposes this global for
@@ -447,7 +448,19 @@ export default {
 
         if (!error) {
           if (materializedGoogleEventId) {
-            const deletedMirror = await context.supabase
+            // google_calendar_mirror_events has only a SELECT policy for
+            // authenticated (owner-scoped read) -- no DELETE policy at all.
+            // Using context.supabase (the RLS-scoped client) here always
+            // silently deleted 0 rows: no error, no effect, every single
+            // materialize. The mirror row was never actually consumed, so
+            // /todos GET kept merging it back in alongside the now-real
+            // todos row with the same id -- a client-visible duplicate id
+            // that crashes SwiftUI's ForEach/Dictionary(uniqueKeysWithValues:)
+            // (found live). service_role bypasses RLS; the explicit
+            // .eq('id', idempotencyKey) is the only scope this delete needs
+            // since idempotencyKey is already validated against this exact
+            // user's mirror row by the mirrorRow lookup above.
+            const deletedMirror = await serviceClient()
               .from('google_calendar_mirror_events')
               .delete()
               .eq('id', idempotencyKey)
