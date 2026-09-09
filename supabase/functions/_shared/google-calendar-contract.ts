@@ -105,7 +105,7 @@ export function classifyGoogleCalendarErrorReason(
 // pattern already used in agent-cloud-contract.ts/todo-list-contract.ts/
 // todo-contract.ts) rather than the full SupabaseClient class -- lets this
 // one function actually be unit-tested with a fake, unlike syncConnection/
-// queueAndPushGoogleSync in this same file, which need the real client for
+// pushGoogleEventInline in this same file, which need the real client for
 // their Google-token/vault RPC calls.
 type ConnectionUpdatePort = {
   from: (
@@ -1006,8 +1006,74 @@ export async function stopWatchChannel(
   }).catch(() => undefined)
 }
 
-export async function queueAndPushGoogleSync(
+type GoogleCalendarConnectionForPush = {
+  id: string
+  google_calendar_id: string
+  refresh_token_secret_id: string
+}
+
+/// The durable half of a push: looks up the user's active connection and
+/// inserts into `google_calendar_push_queue` via the ownership-checked RPC.
+/// Callers must `await` this before responding to the client -- it's the
+/// step that makes the write durable (the 1-minute google-calendar-push cron
+/// will pick up the queued row even if nothing else ever runs). Returns the
+/// connection row so the caller can hand it to `pushGoogleEventInline`
+/// without a second lookup, or `null` if there's no active connection (no
+/// push queued, nothing to attempt inline).
+export async function enqueueGooglePush(
   supabase: SupabaseClient,
+  params: {
+    userId: string
+    todoId: string
+    operation: 'create' | 'update' | 'delete'
+    googleEventId?: string | null
+  },
+): Promise<GoogleCalendarConnectionForPush | null> {
+  const { data: connection } = await supabase
+    .from('google_calendar_connections')
+    .select('id,google_calendar_id,refresh_token_secret_id,status')
+    .eq('user_id', params.userId)
+    .eq('status', 'active')
+    .maybeSingle()
+  if (!connection) return null
+
+  const enqueued = await supabase.rpc('enqueue_google_push', {
+    p_todo_id: params.todoId,
+    p_user_id: params.userId,
+    p_connection_id: connection.id,
+    p_operation: params.operation,
+    p_google_event_id: params.googleEventId ?? null,
+  })
+  if (enqueued.error) throw enqueued.error
+
+  return connection
+}
+
+/// The best-effort half of a push: the actual Vault read, Google OAuth
+/// refresh, and Google Calendar API call. Callers must hand this to
+/// `EdgeRuntime.waitUntil(...)` rather than `await` it directly -- Google's
+/// API latency (worse under rate limiting) has no place in a client-facing
+/// todos response's critical path. `enqueueGooglePush` has already made the
+/// write durable by the time this runs, so if the Edge Function instance is
+/// recycled before this finishes, or it throws, the still-queued row is
+/// simply picked up by the 1-minute google-calendar-push cron -- this is
+/// purely a latency optimization layered on top of that guarantee, matching
+/// the "즉시 반영 시도" (best-effort instant push) it was always meant to be,
+/// not a second source of truth for whether the push happened.
+///
+/// Everything here is privileged work (reading the Vault-stored refresh
+/// token, writing todos.google_event_id, clearing the push queue) -- the
+/// RLS-scoped, JWT-bound client callers otherwise use can't do any of it:
+/// vault_read_secret's EXECUTE is service_role-only, and
+/// google_calendar_push_queue has RLS enabled with zero policies for
+/// `authenticated` (a hard, silent, zero-rows-affected deny, not an error).
+/// service_role bypasses RLS entirely, so every query below still carries an
+/// explicit .eq('user_id', params.userId)/.eq('id', connection.id) as
+/// defense-in-depth, matching this codebase's established
+/// service-client-replacing-a-missing-RLS-check convention (see
+/// calendars/index.ts's PATCH fallback).
+export async function pushGoogleEventInline(
+  connection: GoogleCalendarConnectionForPush,
   params: {
     userId: string
     todoId: string
@@ -1017,38 +1083,6 @@ export async function queueAndPushGoogleSync(
   },
 ): Promise<void> {
   try {
-    const { data: connection } = await supabase
-      .from('google_calendar_connections')
-      .select('id,google_calendar_id,refresh_token_secret_id,status')
-      .eq('user_id', params.userId)
-      .eq('status', 'active')
-      .maybeSingle()
-    if (!connection) return
-
-    const enqueued = await supabase.rpc('enqueue_google_push', {
-      p_todo_id: params.todoId,
-      p_user_id: params.userId,
-      p_connection_id: connection.id,
-      p_operation: params.operation,
-      p_google_event_id: params.googleEventId ?? null,
-    })
-    if (enqueued.error) throw enqueued.error
-
-    // Everything below is privileged work (reading the Vault-stored refresh
-    // token, writing todos.google_event_id, clearing the push queue) --
-    // context.supabase (the RLS-scoped, JWT-bound client this function was
-    // called with) can't actually do any of it: vault_read_secret's EXECUTE
-    // is service_role-only, and google_calendar_push_queue has RLS enabled
-    // with zero policies for `authenticated` (a hard, silent, zero-rows-
-    // affected deny, not an error). This inline "instant push" path threw
-    // at the vault call on every single invocation until this fix -- every
-    // push in production so far actually happened via the 1-minute
-    // google-calendar-push cron, never inline. service_role bypasses RLS
-    // entirely, so every query below still carries an explicit
-    // .eq('user_id', params.userId)/.eq('id', connection.id) as
-    // defense-in-depth, matching this codebase's established
-    // service-client-replacing-a-missing-RLS-check convention (see
-    // calendars/index.ts's PATCH fallback).
     const service = serviceClient()
 
     const refreshToken = await readRefreshTokenSecret(service, connection.refresh_token_secret_id)
@@ -1068,7 +1102,7 @@ export async function queueAndPushGoogleSync(
       if (updated.error) throw updated.error
       if (!updated.data) {
         throw new Error(
-          `queueAndPushGoogleSync: todos.update matched no row for todo ${params.todoId} ` +
+          `pushGoogleEventInline: todos.update matched no row for todo ${params.todoId} ` +
             `after creating google event ${result.id} -- left queued for the cron to recover it`,
         )
       }
@@ -1085,7 +1119,7 @@ export async function queueAndPushGoogleSync(
       if (updated.error) throw updated.error
       if (!updated.data) {
         throw new Error(
-          `queueAndPushGoogleSync: todos.update matched no row for todo ${params.todoId} ` +
+          `pushGoogleEventInline: todos.update matched no row for todo ${params.todoId} ` +
             `after updating google event ${params.googleEventId}`,
         )
       }

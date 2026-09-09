@@ -11,11 +11,13 @@ import {
 } from '../_shared/google-calendar-contract.ts'
 import { constantTimeEquals } from '../_shared/http.ts'
 
-// Fallback for the inline best-effort push attempted synchronously by every
-// todos write (see queueAndPushGoogleSync in _shared/google-calendar-contract.ts).
-// This cron sweeps whatever that attempt didn't manage to deliver -- offline
-// Google API, a token needing refresh, a rate limit -- on a 1-minute tick,
-// deliberately much tighter than the pull side's 15 minutes since push
+// Fallback for the inline best-effort push every todos write kicks off in the
+// background via EdgeRuntime.waitUntil (see enqueueGooglePush/
+// pushGoogleEventInline in _shared/google-calendar-contract.ts). This cron
+// sweeps whatever that attempt didn't manage to deliver -- offline Google
+// API, a token needing refresh, a rate limit, the Edge Function instance
+// getting recycled before the background task finished -- on a 1-minute
+// tick, deliberately much tighter than the pull side's 15 minutes since push
 // responsiveness is the thing users actually notice.
 const MAX_QUEUE_ROWS_PER_RUN = 100
 

@@ -29,7 +29,19 @@ import {
   googleMirrorEventsInRange,
   virtualOccurrencesInRange,
 } from '../_shared/todo-list-contract.ts'
-import { type PushableTodo, queueAndPushGoogleSync } from '../_shared/google-calendar-contract.ts'
+import {
+  enqueueGooglePush,
+  type PushableTodo,
+  pushGoogleEventInline,
+} from '../_shared/google-calendar-contract.ts'
+
+// Supabase's Edge Function runtime (not vanilla Deno) exposes this global for
+// scheduling work that keeps running after the response is already sent --
+// see https://supabase.com/docs/guides/functions/background-tasks. No
+// published type declares it, so it's declared locally where it's used: a
+// Google Calendar push must never add Google's latency to this endpoint's
+// response time (see enqueueGooglePush/pushGoogleEventInline's doc comments).
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
 
 function pushableTodo(row: Record<string, unknown>): PushableTodo {
   return {
@@ -406,12 +418,16 @@ export default {
             // A genuinely new Memdo-origin item -- push it to Google.
             // Materialized items skip this: their data came *from* Google
             // moments ago, nothing has changed yet to push back.
-            await queueAndPushGoogleSync(context.supabase, {
+            const pushParams = {
               userId: context.userClaims!.id,
               todoId: data.id as string,
-              operation: 'create',
+              operation: 'create' as const,
               todo: pushableTodo(data),
-            })
+            }
+            const connection = await enqueueGooglePush(context.supabase, pushParams)
+            if (connection) {
+              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            }
           }
           const categories = await fetchCategoriesByIds(context.supabase, [
             data.category_id as string | null,
@@ -549,13 +565,17 @@ export default {
         }
 
         if (data.google_event_id) {
-          await queueAndPushGoogleSync(context.supabase, {
+          const pushParams = {
             userId: context.userClaims!.id,
             todoId: data.id as string,
-            operation: 'update',
+            operation: 'update' as const,
             todo: pushableTodo(data),
             googleEventId: data.google_event_id as string,
-          })
+          }
+          const connection = await enqueueGooglePush(context.supabase, pushParams)
+          if (connection) {
+            EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+          }
         }
 
         // task-mode recurring rules keep exactly one materialized occurrence at a
@@ -649,12 +669,16 @@ export default {
           )
         }
         if (data.google_event_id) {
-          await queueAndPushGoogleSync(context.supabase, {
+          const pushParams = {
             userId: context.userClaims!.id,
             todoId: data.id as string,
-            operation: 'delete',
+            operation: 'delete' as const,
             googleEventId: data.google_event_id as string,
-          })
+          }
+          const connection = await enqueueGooglePush(context.supabase, pushParams)
+          if (connection) {
+            EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+          }
         }
         return success({ id: data.id }, 200, 'todos.delete', 1)
       }

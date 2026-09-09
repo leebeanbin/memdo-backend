@@ -11,6 +11,15 @@ max_rows = 1000
 port = 54322
 major_version = 17
 
+[edge_runtime]
+# "per_worker" keeps a function instance alive after it responds, so
+# EdgeRuntime.waitUntil(...) background work (the Google Calendar inline
+# push -- see enqueueGooglePush/pushGoogleEventInline) actually finishes
+# during local `supabase functions serve` instead of being killed the
+# instant the response is sent. Production doesn't need this -- Supabase's
+# hosted runtime already does this.
+policy = "per_worker"
+
 [studio]
 enabled = true
 port = 54323
