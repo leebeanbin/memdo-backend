@@ -111,12 +111,21 @@ export async function googleMirrorEventsInRange(
   // +09:00 offset instead of implicit UTC, and scheduledDate is derived
   // from the KST-shifted instant (found via founder-dogfooding code
   // review, be7).
+  // !inner + the status filter below: calendarId (line ~144) resolves
+  // against GET /calendars, which only ever appends a synthetic entry for
+  // an active connection -- a revoked/disconnected-but-not-yet-cleaned-up
+  // connection's mirror rows would otherwise carry a calendarId the client
+  // can never resolve, and ScheduleRepository.load()/loadRange() throw on
+  // the very first unresolvable item, taking the entire list down (found
+  // live: a revoked connection's leftover mirror rows bricked load() for
+  // every item, not just the Google-origin ones).
   const { data, error } = await supabase
     .from('google_calendar_mirror_events')
     .select(
       'id,connection_id,synced_calendar_id,title,is_all_day,start_at,end_at,location_name,note,' +
-        'google_calendar_connections(color_token),google_calendar_synced_calendars(color_token)',
+        'google_calendar_connections!inner(color_token,status),google_calendar_synced_calendars(color_token)',
     )
+    .eq('google_calendar_connections.status', 'active')
     .lt('start_at', `${to}T23:59:59.999+09:00`)
     .gt('end_at', `${from}T00:00:00.000+09:00`)
   if (error) throw error

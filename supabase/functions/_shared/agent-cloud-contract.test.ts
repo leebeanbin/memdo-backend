@@ -562,7 +562,7 @@ Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correc
 // find_free_slots -- and every "이번 달 일정 정리해줘"-style agent request --
 // were blind to Google-sourced events GET /todos otherwise merges in via
 // googleMirrorEventsInRange (todo-list-contract.ts). This fake supports
-// google_calendar_mirror_events's own chain shape (…select().lt().gt())
+// google_calendar_mirror_events's own chain shape (…select().eq().lt().gt())
 // so that merge can actually be exercised here.
 function fakeSupabaseWithGoogleMirror(
   rows: ExistingScheduleRow[],
@@ -573,6 +573,7 @@ function fakeSupabaseWithGoogleMirror(
       if (table === 'google_calendar_mirror_events') {
         const chain: any = {
           select: () => chain,
+          eq: () => chain,
           lt: () => chain,
           gt: () => chain,
           then: (resolve: (v: { data: Record<string, unknown>[]; error: null }) => void) =>
@@ -653,6 +654,11 @@ Deno.test('dispatchToolCall get_day_context merges in google_calendar_mirror_eve
         end_at: '2026-08-16T09:15:00.000Z',
         location_name: null,
         note: null,
+        // fakeMultiTableSupabase's eqFilters match flat keys, not a real
+        // embedded-join shape -- this is the flattened stand-in for
+        // google_calendar_connections.status = 'active' (the query's
+        // !inner join filter, see todo-list-contract.ts).
+        'google_calendar_connections.status': 'active',
       }],
     }),
     'get_day_context',
