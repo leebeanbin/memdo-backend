@@ -1,13 +1,24 @@
 # Memdo Backend
 
-Supabase 기반 Memdo 백엔드의 독립 저장소다. 일정 CRUD부터 반복 일정, Google Calendar 읽기 전용 미러,
-사용자 BYOK 기반 클라우드 Agent까지 개발을 완료했다.
+Supabase 기반 Memdo 백엔드의 독립 저장소다. 일정 CRUD부터 반복 일정, Google Calendar **양방향**
+동기화(push queue, materialize-on-edit, 실시간 webhook pull), 사용자 BYOK 기반 클라우드 Agent까지
+구현했다.
 
-## 정확한 위치와 문서 순서
+## Tech Stack
 
-저장소 절대 경로: `/Users/leebeanbin/Documents/Codex/2026-07-30/wlrma/memdo-backend`
+- **런타임**: Supabase Edge Functions (Deno), TypeScript
+- **DB**: PostgreSQL — RLS 전 테이블 적용, `SECURITY DEFINER` RPC는 `search_path` 고정 + 소유권 검증
+- **인증**: Supabase Auth (Apple·Google·GitHub OAuth + 익명 세션), Supabase Vault (refresh token·API
+  키 저장)
+- **검증**: Zod 스키마 (`_shared/*-contract.ts`)
+- **외부 연동**: Google Calendar API(OAuth, push notification webhook), OpenRouter(BYOK, SSE
+  streaming)
+- **CI/배포**: GitHub Actions — PR마다 `deno check`+`deno fmt`+테스트, `main` push 시 자동
+  `supabase db push` + `functions deploy`
 
-작업을 따라갈 때는 아래 순서로 읽는다.
+## 문서 순서
+
+이 저장소는 그 폴더 자체가 독립 git 저장소다. 작업을 따라갈 때는 아래 순서로 읽는다.
 
 1. [`docs/README.md`](docs/README.md): 현재 상태와 파일 지도
 2. [`docs/auth-social-login.md`](docs/auth-social-login.md): Google·GitHub 로그인 구성
@@ -35,13 +46,24 @@ Supabase 기반 Memdo 백엔드의 독립 저장소다. 일정 CRUD부터 반복
 - `schedule_rules` 반복 일정과 on-demand virtual occurrence 생성 (B5)
 - `GET/PUT/DELETE /functions/v1/reviews`, `GET /functions/v1/summaries` 하루 리뷰·기간 요약 (B6)
 - `GET /functions/v1/search`의 pg_trgm 일정 검색 (B7)
-- Google Calendar 읽기 전용 미러: OAuth 연결·해제·상태 조회, incremental sync token, `410 Gone` 전체
-  재동기화 (B8) — `google-calendar-{start,callback,status,disconnect,sync}`
+- **Google Calendar 양방향 동기화** (B8, 2026-09-02 확장):
+  - Pull: OAuth 연결·해제·상태 조회, incremental sync token, `410 Gone` 전체 재동기화, 실시간 push
+    notification webhook, 추가 캘린더(공휴일 등) 구독 —
+    `google-calendar-{start,callback,status,
+    disconnect,sync,webhook,watch-renew,synced-calendars}`
+  - Push: `todos` 수정 시 즉시 반영 시도 + 1분 주기 재시도 큐(`google-calendar-push`), 결정론적
+    event id로 재시도해도 중복 생성되지 않음, 연결 상태를 `active/error/rate_limited/revoked`로
+    분류해 일시적 오류로 재연결을 요구하지 않음
+  - `enqueue_google_push` RPC는 호출자가 todo·connection을 실제로 소유하는지 검증한다 (다른 사용자의
+    일정을 임의로 큐에 넣을 수 없음)
 - `GET/PUT /functions/v1/categories` 사용자 정의 카테고리 (iOS와 동기화)
 - `workout-logs` 운동 기록 (원래 migration 없이 배포됐던 것을 버전 관리로 rescue)
 - `agent-key`(OpenRouter BYOK 키 vault 저장)와 `agent-cloud-chat`(SSE streaming, tool calling, 서버
-  측 conflict reflection, hourly rate limit)로 클라우드 Agent 경로 완료 (B10)
+  측 conflict reflection, hourly rate limit, upstream rate-limit을 구조화된 에러로 구분)로 클라우드
+  Agent 경로 완료 (B10)
 - iOS 온디바이스 Agent(Apple FoundationModels)는 이 백엔드를 거치지 않고 기기에서 직접 실행
+- 현재 라이브에 배포된 Edge Function은 28개다 (정확한 목록은 [`docs/README.md`](docs/README.md)의
+  코드 지도 참고)
 
 B9(뉴스 브리핑)는 서버 pgmq 파이프라인 대신 iOS가 RSS를 직접 수집해 온디바이스로 요약하는 방식으로
 구현했다. B11(Slack)은 OAuth 앱 설치 대신 사용자가 발급한 Incoming Webhook URL을 iOS Keychain에
@@ -105,9 +127,21 @@ Content-Type: application/json
 Idempotency-Key: <UUID> # POST command
 ```
 
-## 개발 종료 상태 (2026-08-17)
+## 현재 상태
 
-Apple·Google·GitHub 로그인, 일정 CRUD·재예약·증분 동기화·오프라인 outbox, 반복 일정, 검색, 하루
-리뷰·기간 요약, Google Calendar 읽기 전용 미러, 사용자 정의 카테고리, 운동 기록, BYOK 클라우드
-Agent까지 계획한 범위를 모두 구현·배포·검증하고 이 시점에서 개발을 마쳤다. 남은 항목과 원래 설계
-대비 실제 구현 차이는 [`docs/roadmap.md`](docs/roadmap.md)를 따른다.
+2026-08-17에 계획된 B0~B11 범위를 모두 구현·배포·검증하고 한 번 개발을 마쳤으나, 이후 세 차례에 걸쳐
+작업이 재개됐다.
+
+- **2026-08-21~09-01 — Agent 견고성·평가 체계**: PR 기반 워크플로로 47개 PR 병합 (Epic F-2 다중 모델
+  비교, Epic G 모델 capability registry, Epic H Agent 감사 로그, 반복 일정·동기화·검색 정합성 버그
+  다수 수정). 개별 변경 내역은 각 PR 설명이 기록이다 — 여기 다시 옮기지 않는다.
+  [병합된 PR 목록](https://github.com/leebeanbin/memdo-backend/pulls?q=is%3Apr+is%3Amerged).
+- **2026-09-02 — Google Calendar 양방향 동기화**: 위 "현재 범위"의 push queue·webhook·추가 캘린더
+  구독이 이때 추가됐다. 자세한 배경은 `docs/work-log.md`의 해당 날짜 항목.
+- **2026-09-07~09 — 보안/신뢰성 리뷰 + 배포 인프라 복구**: `enqueue_google_push` 소유권 검증, Google
+  이벤트 생성 멱등화, 연결 상태 분류(`revoked`/`error`/`rate_limited`), 실패한 push 재시도 노출,
+  OpenRouter rate-limit 구분, 배포 파이프라인 복구(무관한 `deno fmt` 실패로 며칠간 자동 배포가 안
+  되고 있었음), 마이그레이션 히스토리 정합성 복구, DB 인덱스 정리. 자세한 배경은
+  `docs/work-log.md`의 해당 날짜 항목.
+
+남은 항목과 원래 설계 대비 실제 구현 차이는 [`docs/roadmap.md`](docs/roadmap.md)를 따른다.
