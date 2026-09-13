@@ -8,6 +8,10 @@ import {
   watchCalendar,
 } from '../_shared/google-calendar-contract.ts'
 
+// Supabase Edge Functions runtime global (not vanilla Deno) -- schedules
+// background work that continues after the response is sent.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
+
 function webhookAddress(): string {
   return `${Deno.env.get('SUPABASE_URL')}/functions/v1/google-calendar-webhook`
 }
@@ -116,28 +120,35 @@ export default {
       // revocation on account deletion is the precedent): a failed watch
       // registration must never block the connection itself succeeding.
       // The 15-min pull cron (google-calendar-sync) covers this connection
-      // regardless of whether this registration succeeds.
-      try {
-        const channel = await watchCalendar(
-          tokens.access_token,
-          upserted.data.google_calendar_id as string,
-          webhookAddress(),
-        )
-        await supabase.from('google_calendar_connections').update({
-          watch_channel_id: channel.channelId,
-          watch_resource_id: channel.resourceId,
-          watch_expiration: channel.expiration,
-          watch_token: channel.token,
-        }).eq('id', upserted.data.id as string)
-      } catch (watchError) {
-        console.error(
-          JSON.stringify({
-            operation: 'google_calendar.callback.watch',
-            userId,
-            error: serializeError(watchError),
-          }),
-        )
-      }
+      // regardless of whether this registration succeeds. Backgrounded
+      // (not awaited before redirecting) -- this is a real Google API call
+      // sitting between "code exchanged" and the "connected!" redirect the
+      // user is staring at.
+      EdgeRuntime.waitUntil(
+        (async () => {
+          try {
+            const channel = await watchCalendar(
+              tokens.access_token,
+              upserted.data.google_calendar_id as string,
+              webhookAddress(),
+            )
+            await supabase.from('google_calendar_connections').update({
+              watch_channel_id: channel.channelId,
+              watch_resource_id: channel.resourceId,
+              watch_expiration: channel.expiration,
+              watch_token: channel.token,
+            }).eq('id', upserted.data.id as string)
+          } catch (watchError) {
+            console.error(
+              JSON.stringify({
+                operation: 'google_calendar.callback.watch',
+                userId,
+                error: serializeError(watchError),
+              }),
+            )
+          }
+        })(),
+      )
 
       if (existing?.refresh_token_secret_id) {
         await deleteRefreshTokenSecret(supabase, existing.refresh_token_secret_id).catch(

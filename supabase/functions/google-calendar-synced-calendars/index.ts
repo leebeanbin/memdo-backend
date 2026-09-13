@@ -28,6 +28,12 @@ const addSyncedCalendarSchema = z.object({
   summary: z.string().trim().min(1).max(200),
 })
 
+// Supabase Edge Functions runtime global (not vanilla Deno) -- schedules
+// background work that continues after the response is sent. Same use as
+// todos/index.ts: decouples the client-facing response from a slow external
+// (Google Calendar) API call.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
+
 const SYNCED_CALENDAR_SELECT = 'id,google_calendar_id,summary,color_token,last_synced_at,last_error'
 
 function syncedCalendarDto(row: Record<string, unknown>) {
@@ -160,30 +166,38 @@ export default {
         // Best-effort immediate first pull, same "never let a side effect
         // block the primary write" pattern as queueAndPushGoogleSync -- the
         // 15-min google-calendar-sync cron covers it either way if this
-        // fails or the connection has a lot to page through.
-        try {
-          const refreshToken = await readRefreshTokenSecret(
-            supabase,
-            connection.refresh_token_secret_id,
-          )
-          if (refreshToken) {
-            await syncConnection(supabase, {
-              id: connection.id,
-              user_id: userId,
-              google_calendar_id: connection.google_calendar_id as string,
-              refresh_token_secret_id: connection.refresh_token_secret_id,
-              sync_token: connection.sync_token as string | null,
-            })
-          }
-        } catch (error) {
-          console.error(
-            JSON.stringify({
-              requestId: currentRequestId,
-              operation: 'google_calendar_synced_calendars.initial_pull',
-              error: serializeError(error),
-            }),
-          )
-        }
+        // fails or the connection has a lot to page through. Backgrounded
+        // (not awaited before responding) -- syncConnection can page up to
+        // 20x250 Google Calendar events, and unlike todos/index.ts's
+        // create/update/delete this endpoint had no fast-durable/
+        // slow-background split at all until now.
+        EdgeRuntime.waitUntil(
+          (async () => {
+            try {
+              const refreshToken = await readRefreshTokenSecret(
+                supabase,
+                connection.refresh_token_secret_id,
+              )
+              if (refreshToken) {
+                await syncConnection(supabase, {
+                  id: connection.id,
+                  user_id: userId,
+                  google_calendar_id: connection.google_calendar_id as string,
+                  refresh_token_secret_id: connection.refresh_token_secret_id,
+                  sync_token: connection.sync_token as string | null,
+                })
+              }
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'google_calendar_synced_calendars.initial_pull',
+                  error: serializeError(error),
+                }),
+              )
+            }
+          })(),
+        )
 
         return success(
           syncedCalendarDto(inserted.data),
