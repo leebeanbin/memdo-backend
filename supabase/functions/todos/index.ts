@@ -33,6 +33,7 @@ import {
   enqueueGooglePush,
   type PushableTodo,
   pushGoogleEventInline,
+  serializeError,
   serviceClient,
 } from '../_shared/google-calendar-contract.ts'
 
@@ -469,15 +470,37 @@ export default {
             // A genuinely new Memdo-origin item -- push it to Google.
             // Materialized items skip this: their data came *from* Google
             // moments ago, nothing has changed yet to push back.
-            const pushParams = {
-              userId: context.userClaims!.id,
-              todoId: data.id as string,
-              operation: 'create' as const,
-              todo: pushableTodo(data),
-            }
-            const connection = await enqueueGooglePush(context.supabase, pushParams)
-            if (connection) {
-              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            //
+            // Best-effort, like every other side effect in this file --
+            // never let it fail the response for a write that already
+            // committed. Found live: enqueue_google_push's ownership check
+            // (WHERE ... AND deleted_at IS NULL) can lose a race against a
+            // concurrent request for the same item (e.g. two overlapping
+            // materialize-then-delete attempts for the same not-yet-touched
+            // Google item) and throw "todo not found for this user" --
+            // which, unguarded, turned an already-successful create into a
+            // generic 500 the client had no way to distinguish from a real
+            // failure, corrupting its view of whether the write happened.
+            try {
+              const pushParams = {
+                userId: context.userClaims!.id,
+                todoId: data.id as string,
+                operation: 'create' as const,
+                todo: pushableTodo(data),
+              }
+              const connection = await enqueueGooglePush(context.supabase, pushParams)
+              if (connection) {
+                EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+              }
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'todos.create.enqueue_google_push',
+                  todoId: data.id,
+                  error: serializeError(error),
+                }),
+              )
             }
           }
           const categories = await fetchCategoriesByIds(context.supabase, [
@@ -616,16 +639,30 @@ export default {
         }
 
         if (data.google_event_id) {
-          const pushParams = {
-            userId: context.userClaims!.id,
-            todoId: data.id as string,
-            operation: 'update' as const,
-            todo: pushableTodo(data),
-            googleEventId: data.google_event_id as string,
-          }
-          const connection = await enqueueGooglePush(context.supabase, pushParams)
-          if (connection) {
-            EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+          // Best-effort, same as the create path above: the update itself
+          // already committed, so a push-enqueue failure must never turn
+          // into an error response for a write the user already got.
+          try {
+            const pushParams = {
+              userId: context.userClaims!.id,
+              todoId: data.id as string,
+              operation: 'update' as const,
+              todo: pushableTodo(data),
+              googleEventId: data.google_event_id as string,
+            }
+            const connection = await enqueueGooglePush(context.supabase, pushParams)
+            if (connection) {
+              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            }
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                requestId: currentRequestId,
+                operation: 'todos.update.enqueue_google_push',
+                todoId: data.id,
+                error: serializeError(error),
+              }),
+            )
           }
         }
 
@@ -720,15 +757,30 @@ export default {
           )
         }
         if (data.google_event_id) {
-          const pushParams = {
-            userId: context.userClaims!.id,
-            todoId: data.id as string,
-            operation: 'delete' as const,
-            googleEventId: data.google_event_id as string,
-          }
-          const connection = await enqueueGooglePush(context.supabase, pushParams)
-          if (connection) {
-            EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+          // Best-effort, same as create/update above -- the delete itself
+          // already committed (soft-deleted, just above), so a
+          // push-enqueue failure must never turn into an error response for
+          // a delete the user already got.
+          try {
+            const pushParams = {
+              userId: context.userClaims!.id,
+              todoId: data.id as string,
+              operation: 'delete' as const,
+              googleEventId: data.google_event_id as string,
+            }
+            const connection = await enqueueGooglePush(context.supabase, pushParams)
+            if (connection) {
+              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            }
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                requestId: currentRequestId,
+                operation: 'todos.delete.enqueue_google_push',
+                todoId: data.id,
+                error: serializeError(error),
+              }),
+            )
           }
         }
         return success({ id: data.id }, 200, 'todos.delete', 1)
