@@ -461,11 +461,30 @@ export default {
             // .eq('id', idempotencyKey) is the only scope this delete needs
             // since idempotencyKey is already validated against this exact
             // user's mirror row by the mirrorRow lookup above.
-            const deletedMirror = await serviceClient()
-              .from('google_calendar_mirror_events')
-              .delete()
-              .eq('id', idempotencyKey)
-            if (deletedMirror.error) throw deletedMirror.error
+            //
+            // Best-effort, like the enqueueGooglePush call below -- the
+            // todos row insert above already committed, so a failure here
+            // must not turn that already-successful create into a generic
+            // 500. Worst case on failure: the mirror row lingers and /todos
+            // GET merges it back in alongside the real row -- the exact
+            // "duplicate mirror row" symptom this delete exists to prevent,
+            // not a corrupted client view of whether the create happened.
+            try {
+              const deletedMirror = await serviceClient()
+                .from('google_calendar_mirror_events')
+                .delete()
+                .eq('id', idempotencyKey)
+              if (deletedMirror.error) throw deletedMirror.error
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'todos.create.delete_mirror_row',
+                  todoId: data.id,
+                  error: serializeError(error),
+                }),
+              )
+            }
           } else {
             // A genuinely new Memdo-origin item -- push it to Google.
             // Materialized items skip this: their data came *from* Google
