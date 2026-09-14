@@ -841,6 +841,14 @@ async function pullCalendarIntoMirror(
     }
 
     const toUpsertMirror = []
+    // Each materialized-event overwrite below targets a distinct todos row
+    // with its own optimistic-lock version -- nothing depends on another
+    // iteration's result, so collect the promises and await them together
+    // instead of one `await` per event inside the loop (up to 20 pages of
+    // events per calendar per connection, per sync run). This also means a
+    // version conflict on one row no longer blocks every later row's
+    // legitimate update from even being attempted in the same pass.
+    const overwritePromises: PromiseLike<{ error: unknown }>[] = []
     for (const event of externalEvents) {
       const materialized = materializedByEventId.get(event.id)
       if (!materialized) {
@@ -865,22 +873,28 @@ async function pullCalendarIntoMirror(
       // still holding the pre-overwrite version must see a VERSION_CONFLICT
       // on its next PATCH rather than silently clobbering this update, the
       // same guarantee every other write path on this table provides.
-      const { error: overwriteError } = await supabase
-        .from('todos')
-        .update({
-          title: mirrorRow.title,
-          is_all_day: mirrorRow.is_all_day,
-          start_at: mirrorRow.start_at,
-          end_at: mirrorRow.end_at,
-          scheduled_date: mirrorRow.start_at.slice(0, 10),
-          location_name: mirrorRow.location_name,
-          note: mirrorRow.note,
-          google_synced_at: new Date().toISOString(),
-          version: materialized.version + 1,
-        })
-        .eq('id', materialized.id)
-        .eq('version', materialized.version)
-      if (overwriteError) throw overwriteError
+      overwritePromises.push(
+        supabase
+          .from('todos')
+          .update({
+            title: mirrorRow.title,
+            is_all_day: mirrorRow.is_all_day,
+            start_at: mirrorRow.start_at,
+            end_at: mirrorRow.end_at,
+            scheduled_date: mirrorRow.start_at.slice(0, 10),
+            location_name: mirrorRow.location_name,
+            note: mirrorRow.note,
+            google_synced_at: new Date().toISOString(),
+            version: materialized.version + 1,
+          })
+          .eq('id', materialized.id)
+          .eq('version', materialized.version),
+      )
+    }
+    if (overwritePromises.length > 0) {
+      const overwriteResults = await Promise.all(overwritePromises)
+      const firstError = overwriteResults.find((result) => result.error)?.error
+      if (firstError) throw firstError
     }
 
     if (toUpsertMirror.length > 0) {
