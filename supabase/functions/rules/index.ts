@@ -53,12 +53,18 @@ export default {
       const hasItemPath = z.uuid().safeParse(ruleId).success
 
       if (request.method === 'GET' && !hasItemPath) {
+        // No cursor -- a user's rule count is naturally bounded (distinct
+        // recurring patterns, not per-day history like todos/reviews), so
+        // a flat cap (matching reviews/index.ts's own .limit(30)) is
+        // enough of a safety net without a cursor scheme this list will
+        // realistically never need.
         const { data, error } = await context.supabase
           .from('schedule_rules')
           .select(ruleSelect)
           .is('deleted_at', null)
           .order('created_at', { ascending: false })
           .order('id')
+          .limit(200)
         if (error) throw error
         return success(data.map(ruleDto), 200, 'rules.list', data.length)
       }
