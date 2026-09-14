@@ -1,4 +1,3 @@
-import { z } from 'zod'
 import {
   apiError,
   normalizeZodIssues,
@@ -40,15 +39,12 @@ export default {
       }
 
       if (request.method === 'PUT') {
-        const idempotencyKey = request.headers.get('Idempotency-Key')
-        if (!idempotencyKey || !z.uuid().safeParse(idempotencyKey).success) {
-          return apiError(
-            'INVALID_REQUEST',
-            'Idempotency-Key UUID가 필요합니다.',
-            400,
-            currentRequestId,
-          )
-        }
+        // bd11: user_preferences is a singleton keyed by user_id (always
+        // updated, never inserted with a client-chosen id -- see bd19's
+        // optimistic-lock update below), so there is no id an Idempotency-Key
+        // could double as. The header was validated here but never read
+        // again anywhere in this handler; dropped rather than kept as dead
+        // validation.
         const parsed = preferencesInputSchema.safeParse(await request.json().catch(() => undefined))
         if (!parsed.success) {
           return apiError('INVALID_REQUEST', '설정 값을 확인해 주세요.', 400, currentRequestId, {
