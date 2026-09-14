@@ -15,6 +15,7 @@ import {
   syncQuerySchema,
 } from '../_shared/sync-contract.ts'
 import { fetchCategoriesByIds, todoSelect } from '../_shared/todo-contract.ts'
+import { workoutLogSelect } from '../_shared/workout-log-contract.ts'
 
 type SyncRow = Record<string, unknown>
 
@@ -73,7 +74,11 @@ export default {
       // workout-logs/index.ts's own established pattern for this table.
       let workoutQuery = serviceClient()
         .from('workout_log_full')
-        .select('*')
+        // syncItem's 'workout' branch reads updated_at (response
+        // updatedAt) in addition to workoutLogDto's fields, and
+        // encodeSyncCursor reads sync_seq -- both appended beyond the
+        // shared DTO select since neither is otherwise needed downstream.
+        .select(`${workoutLogSelect},updated_at,sync_seq`)
         .eq('user_id', userId)
         .order('sync_seq')
         .limit(parsed.data.limit + 1)

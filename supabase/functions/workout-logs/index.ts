@@ -11,6 +11,7 @@ import { serviceClient } from '../_shared/google-calendar-contract.ts'
 import {
   workoutLogCreateSchema,
   workoutLogDto as toDTO,
+  workoutLogSelect,
   workoutLogUpdateDetailsSchema,
 } from '../_shared/workout-log-contract.ts'
 
@@ -86,7 +87,7 @@ async function handleList(
 
   const { data, error } = await supabase
     .from('workout_log_full')
-    .select('*')
+    .select(workoutLogSelect)
     .eq('user_id', userId)
     .gte('scheduled_date', from)
     .lte('scheduled_date', to)
@@ -140,7 +141,7 @@ async function handleCreate(
   if (hkUuid) {
     const { data: existing } = await supabase
       .from('workout_log_full')
-      .select('*')
+      .select(workoutLogSelect)
       .eq('user_id', userId)
       .eq('hk_uuid', hkUuid)
       .maybeSingle()
@@ -172,7 +173,7 @@ async function handleCreate(
     if (logError.code === POSTGRES_UNIQUE_VIOLATION && hkUuid) {
       const { data: existing } = await supabase
         .from('workout_log_full')
-        .select('*')
+        .select(workoutLogSelect)
         .eq('user_id', userId)
         .eq('hk_uuid', hkUuid)
         .maybeSingle()
@@ -200,7 +201,7 @@ async function handleCreate(
 
   const { data: full, error: readError } = await supabase
     .from('workout_log_full')
-    .select('*')
+    .select(workoutLogSelect)
     .eq('id', log.id)
     .single()
   if (readError) throw readError
@@ -253,7 +254,7 @@ async function handleUpdateDetails(
 
   const { data: full, error: readError } = await supabase
     .from('workout_log_full')
-    .select('*')
+    .select(workoutLogSelect)
     .eq('id', workoutId)
     .single()
   if (readError) throw readError
