@@ -49,10 +49,23 @@ Deno.test('todo cursor round trips', () => {
     scheduled_date: '2026-08-02',
     sort_order: 3,
     id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
-  })
+  }, '2026-08-02')
 
   assert(decodeTodoCursor(cursor)?.sortOrder === 3)
+  assert(decodeTodoCursor(cursor)?.virtualThroughDate === '2026-08-02')
   assert(decodeTodoCursor('invalid') === null)
+})
+
+// bd12: virtualThroughDate is nullable/absent on the first page -- must
+// still round trip cleanly (not rejected, not coerced to a string).
+Deno.test('todo cursor round trips with a null virtualThroughDate', () => {
+  const cursor = encodeTodoCursor({
+    scheduled_date: '2026-08-02',
+    sort_order: 3,
+    id: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+  }, null)
+
+  assert(decodeTodoCursor(cursor)?.virtualThroughDate == null)
 })
 
 Deno.test('todo update requires an optimistic-lock version', () => {
@@ -137,6 +150,86 @@ Deno.test('todoUpdate clears completed_at when status leaves completed', () => {
   assert(todoUpdate(input, 'completed').completed_at === null)
 })
 
+// ── bd13/be16: progress invariant table ───────────────────────────────────
+
+function progressUpdateInput(status: string, progress?: number) {
+  return todoUpdateSchema.parse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    version: 1,
+    status,
+    ...(progress === undefined ? {} : { progress }),
+  })
+}
+
+Deno.test('todoUpdate: completed forces progress to 100 regardless of client input', () => {
+  assert(todoUpdate(progressUpdateInput('completed'), 'in_progress').progress === 100)
+})
+
+Deno.test('todoUpdate: planned forces progress to 0 regardless of client input', () => {
+  // planned is NOT in the client-editable set, even though a naive design
+  // might group it with in_progress/partial -- "not started" and "0% done"
+  // are the same fact, not two independently-settable ones.
+  assert(todoUpdate(progressUpdateInput('planned', 42), 'in_progress').progress === 0)
+  assert(todoUpdate(progressUpdateInput('planned'), 'in_progress').progress === 0)
+})
+
+for (const exitStatus of ['skipped', 'rescheduled', 'cancelled']) {
+  Deno.test(`todoUpdate: ${exitStatus} forces progress to 0 regardless of client input`, () => {
+    assert(todoUpdate(progressUpdateInput(exitStatus, 73), 'in_progress').progress === 0)
+    assert(todoUpdate(progressUpdateInput(exitStatus), 'in_progress').progress === 0)
+  })
+}
+
+for (const activeStatus of ['in_progress', 'partial']) {
+  Deno.test(`todoUpdate: ${activeStatus} accepts an explicit 0-99 progress value`, () => {
+    assert(todoUpdate(progressUpdateInput(activeStatus, 42), 'planned').progress === 42)
+    assert(todoUpdate(progressUpdateInput(activeStatus, 0), 'planned').progress === 0)
+    assert(todoUpdate(progressUpdateInput(activeStatus, 99), 'planned').progress === 99)
+  })
+
+  Deno.test(`todoUpdate: ${activeStatus} falls back to 0 when progress is omitted`, () => {
+    assert(todoUpdate(progressUpdateInput(activeStatus), 'planned').progress === 0)
+  })
+}
+
+Deno.test('todoUpdateSchema rejects progress: 100 outright -- a contradictory state can never even parse', () => {
+  // Regardless of status: the schema enforces the invariant itself, not
+  // just todoUpdate()'s branching -- a client can't request the completed-
+  // only value by pairing it with a different status either.
+  const result = todoUpdateSchema.safeParse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    version: 1,
+    status: 'in_progress',
+    progress: 100,
+  })
+  assert(!result.success)
+})
+
+Deno.test('todoUpdateSchema rejects a negative progress value', () => {
+  const result = todoUpdateSchema.safeParse({
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '디자인 검토',
+    entryKind: 'task',
+    isAllDay: false,
+    timeBucket: 'anytime',
+    version: 1,
+    status: 'in_progress',
+    progress: -1,
+  })
+  assert(!result.success)
+})
+
 Deno.test('reschedule requires paired timing', () => {
   const result = todoRescheduleSchema.safeParse({
     baseVersion: 2,
@@ -185,6 +278,23 @@ Deno.test('todoDto falls back to null with no category and no override (bd18)', 
   assert(dto.emoji === null)
   assert(dto.color === null)
   assert(dto.categoryId === null)
+})
+
+Deno.test('todoDto surfaces googleEventId/googleSyncedAt, and defaults both to null when absent', () => {
+  const synced = todoDto({
+    id: '1',
+    category_id: null,
+    emoji: null,
+    color: null,
+    google_event_id: 'g-abc123',
+    google_synced_at: '2026-09-01T00:00:00Z',
+  })
+  assert(synced.googleEventId === 'g-abc123')
+  assert(synced.googleSyncedAt === '2026-09-01T00:00:00Z')
+
+  const unsynced = todoDto({ id: '2', category_id: null, emoji: null, color: null })
+  assert(unsynced.googleEventId === null)
+  assert(unsynced.googleSyncedAt === null)
 })
 
 Deno.test('fetchCategoriesByIds dedupes ids and skips a query when there are none (bd18)', async () => {

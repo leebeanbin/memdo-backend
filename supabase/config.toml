@@ -11,6 +11,15 @@ max_rows = 1000
 port = 54322
 major_version = 17
 
+[edge_runtime]
+# "per_worker" keeps a function instance alive after it responds, so
+# EdgeRuntime.waitUntil(...) background work (the Google Calendar inline
+# push -- see enqueueGooglePush/pushGoogleEventInline) actually finishes
+# during local `supabase functions serve` instead of being killed the
+# instant the response is sent. Production doesn't need this -- Supabase's
+# hosted runtime already does this.
+policy = "per_worker"
+
 [studio]
 enabled = true
 port = 54323
@@ -39,6 +48,10 @@ verify_jwt = true
 import_map = "../deno.json"
 
 [functions.calendars]
+verify_jwt = true
+import_map = "../deno.json"
+
+[functions.google-calendar-synced-calendars]
 verify_jwt = true
 import_map = "../deno.json"
 
@@ -91,6 +104,26 @@ verify_jwt = true
 import_map = "../deno.json"
 
 [functions.google-calendar-sync]
+verify_jwt = false
+import_map = "../deno.json"
+
+[functions.google-calendar-push]
+# Called only by pg_cron with the shared GOOGLE_CALENDAR_SYNC_SECRET bearer
+# token (see google-calendar-sync above, the identical existing pattern) --
+# no end-user JWT is ever presented to this route.
+verify_jwt = false
+import_map = "../deno.json"
+
+[functions.google-calendar-webhook]
+# Called directly by Google's push-notification infrastructure -- no Memdo
+# JWT, no GOOGLE_CALENDAR_SYNC_SECRET either. Authenticated instead by the
+# per-channel X-Goog-Channel-Token this route verifies itself (see
+# google-calendar-webhook/index.ts).
+verify_jwt = false
+import_map = "../deno.json"
+
+[functions.google-calendar-watch-renew]
+# Same pg_cron + GOOGLE_CALENDAR_SYNC_SECRET pattern as google-calendar-push.
 verify_jwt = false
 import_map = "../deno.json"
 

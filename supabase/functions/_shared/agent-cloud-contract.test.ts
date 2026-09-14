@@ -9,6 +9,7 @@ import {
   expandScope,
   findConflict,
   ianaOffsetMinutes,
+  isOpenRouterRateLimited,
   newToolDispatchState,
   resolveDate,
   resolveOpenRouterModel,
@@ -557,6 +558,118 @@ Deno.test('dispatchToolCall search_schedules and find_free_slots delegate correc
   assert(state.dispatchedTools[1].result === freeSlotsResult)
 })
 
+// fetchSchedules() used to query only `todos`, so search_schedules/
+// find_free_slots -- and every "이번 달 일정 정리해줘"-style agent request --
+// were blind to Google-sourced events GET /todos otherwise merges in via
+// googleMirrorEventsInRange (todo-list-contract.ts). This fake supports
+// google_calendar_mirror_events's own chain shape (…select().eq().lt().gt())
+// so that merge can actually be exercised here.
+function fakeSupabaseWithGoogleMirror(
+  rows: ExistingScheduleRow[],
+  mirrorRows: Record<string, unknown>[],
+): { from: (table: string) => any } {
+  return {
+    from: (table: string) => {
+      if (table === 'google_calendar_mirror_events') {
+        const chain: any = {
+          select: () => chain,
+          eq: () => chain,
+          lt: () => chain,
+          gt: () => chain,
+          then: (resolve: (v: { data: Record<string, unknown>[]; error: null }) => void) =>
+            resolve({ data: mirrorRows, error: null }),
+        }
+        return chain
+      }
+      return fakeSupabase(rows).from(table)
+    },
+  }
+}
+
+Deno.test('search_schedules merges in google_calendar_mirror_events, not just todos', async () => {
+  const state = newToolDispatchState()
+  const mirrorRows = [{
+    id: 'g1',
+    connection_id: 'conn-1',
+    title: 'Google Skills',
+    is_all_day: false,
+    start_at: '2026-08-16T09:00:00.000Z',
+    end_at: '2026-08-16T09:15:00.000Z',
+    location_name: null,
+    note: null,
+  }]
+
+  const result: any = await dispatchToolCall(
+    fakeSupabaseWithGoogleMirror([], mirrorRows),
+    'search_schedules',
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(result.items.length === 1)
+  assert(result.items[0].title === 'Google Skills')
+})
+
+Deno.test('search_schedules pre-formats time as local HH:mm-HH:mm, not raw UTC ISO', async () => {
+  // A real user report: the model read a raw UTC startAt/endAt back as if
+  // it were already local, stating "낮 12:20~2:20" for an event actually at
+  // 21:20-23:20 KST. find_free_slots already avoided this by pre-formatting
+  // via formatSlot() before the model ever sees it -- search_schedules now
+  // does the same, so there's no UTC->KST conversion left for the model to
+  // get wrong.
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: '2026-08-16T00:20:00.000Z',
+    end_at: '2026-08-16T01:20:00.000Z',
+    version: 1,
+  }]
+
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'search_schedules',
+    { from: '2026-08-16', to: '2026-08-16' },
+    state,
+    dispatchToday,
+  )
+  assert(result.items[0].time === '9:20-10:20')
+  assert(result.items[0].startAt === undefined)
+  assert(result.items[0].endAt === undefined)
+})
+
+Deno.test('dispatchToolCall get_day_context merges in google_calendar_mirror_events, not just todos', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeMultiTableSupabase({
+      todos: [],
+      daily_reviews: [],
+      google_calendar_mirror_events: [{
+        id: 'g1',
+        connection_id: 'conn-1',
+        title: 'Google Skills',
+        is_all_day: false,
+        start_at: '2026-08-16T09:00:00.000Z',
+        end_at: '2026-08-16T09:15:00.000Z',
+        location_name: null,
+        note: null,
+        // fakeMultiTableSupabase's eqFilters match flat keys, not a real
+        // embedded-join shape -- this is the flattened stand-in for
+        // google_calendar_connections.status = 'active' (the query's
+        // !inner join filter, see todo-list-contract.ts).
+        'google_calendar_connections.status': 'active',
+      }],
+    }),
+    'get_day_context',
+    {},
+    state,
+    dispatchToday,
+  )
+  assert(result.incompleteCount === 1)
+  assert(result.incomplete[0].title === 'Google Skills')
+})
+
 Deno.test('find_free_slots with no durationMinutes answers an availability question, not a duration slice', async () => {
   const state = newToolDispatchState()
 
@@ -720,6 +833,8 @@ function fakeMultiTableSupabase(
         not: () => chain,
         gte: () => chain,
         lte: () => chain,
+        lt: () => chain,
+        gt: () => chain,
         order: () => chain,
         limit: (n: number) => {
           const filtered = rows.filter((row: any) =>
@@ -1397,6 +1512,30 @@ Deno.test('resolveRateLimitPerHour: a non-eval user is unaffected even with the 
       evalRateLimitPerHour: '250',
     }) === 30,
   )
+})
+
+// isOpenRouterRateLimited -- the mid-stream catch block in agent-cloud-chat
+// used to collapse every failure (a transient OpenRouter 429, a real bug)
+// into the same generic INTERNAL_ERROR. Prefers the structured `.status`
+// callOpenRouterStreamed now attaches to its thrown error; falls back to a
+// string match only for an error shape that doesn't carry it.
+
+Deno.test('isOpenRouterRateLimited is true for a structured .status of 429', () => {
+  const error = new Error('openrouter 429: rate limited')
+  ;(error as Error & { status: number }).status = 429
+  assert(isOpenRouterRateLimited(error))
+})
+
+Deno.test('isOpenRouterRateLimited is false for a structured .status that is not 429', () => {
+  const error = new Error('openrouter 500: internal error')
+  ;(error as Error & { status: number }).status = 500
+  assert(!isOpenRouterRateLimited(error))
+})
+
+Deno.test('isOpenRouterRateLimited falls back to a string match when .status is absent', () => {
+  assert(isOpenRouterRateLimited(new Error('openrouter 429: rate limited')))
+  assert(!isOpenRouterRateLimited(new Error('openrouter 500: internal error')))
+  assert(!isOpenRouterRateLimited('some unrelated string'))
 })
 
 Deno.test('ALLOWED_OPENROUTER_MODELS is exactly selectableModelIds(MODEL_REGISTRY)', () => {

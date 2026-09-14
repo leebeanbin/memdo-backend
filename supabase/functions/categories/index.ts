@@ -39,8 +39,11 @@ export default {
             currentRequestId,
           )
         }
+        // bd6: unified list envelope -- no cursor/limit exists for this
+        // endpoint (it returns every category unconditionally), so
+        // hasMore is always false, not a real pagination signal yet.
         const items = data.map(categoryDto)
-        return success({ items }, 200, 'categories.list', items.length)
+        return success({ items, hasMore: false }, 200, 'categories.list', items.length)
       }
 
       if (request.method === 'PUT') {
@@ -80,8 +83,11 @@ export default {
           )
         }
 
+        // bd6: unified list envelope -- a full-replace call always
+        // succeeds in full (no partial application), so hasMore is
+        // always false here too.
         return success(
-          { items: parsed.data.categories },
+          { items: parsed.data.categories, hasMore: false },
           200,
           'categories.replace',
           parsed.data.categories.length,

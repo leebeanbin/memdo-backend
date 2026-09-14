@@ -71,6 +71,15 @@ export const workoutLogUpdateDetailsSchema = z.object({
   exercises: exercisesSchema,
 })
 
+// Matches exactly what workoutLogDto(row) reads below -- workout_log_full
+// (a view joining workout_logs + workout_log_details) was queried with
+// .select('*') at both call sites even though neither DTO uses user_id/
+// created_at/detail_updated_at. A caller needing extra columns
+// (sync/index.ts needs updated_at + sync_seq for its cursor) appends them
+// via a template literal rather than falling back to '*'.
+export const workoutLogSelect =
+  'id,hk_uuid,source,activity_type,started_at,ended_at,duration_sec,distance_m,calories,avg_heart_rate,route_image_url,photo_url,scheduled_date,location_name,notes,exercises'
+
 // bd26: extracted from workout-logs/index.ts's private toDTO so
 // sync-contract.ts's entityType:'workout' path (workout_log_full rows,
 // same shape) can reuse it instead of duplicating the mapping.

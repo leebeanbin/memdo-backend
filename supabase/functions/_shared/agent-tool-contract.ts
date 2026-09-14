@@ -45,7 +45,11 @@ export const dateExpressionWithYesterdaySchema = z.enum(['today', 'tomorrow', 'y
 export const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 
 export const proposeScheduleArgsSchema = z.object({
-  title: z.string().trim().min(1).max(200),
+  // bd4: was max(200) -- todoInputSchema (the real save-time limit) caps at
+  // 120, so a 121-200 char title staged fine and then failed to save on
+  // approval. Matched to the real limit so a staged proposal can never
+  // fail this specific check that a save would also fail.
+  title: z.string().trim().min(1).max(120),
   date: dateExpressionSchema,
   startTime: timeSchema.optional(),
   endTime: timeSchema.optional(),

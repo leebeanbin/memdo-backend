@@ -1,34 +1,14 @@
--- be17: DELETE /rules/{id} and PUT /categories each did two sequential,
--- unguarded Supabase calls with a real inconsistent-state window between
--- them if the process crashed or errored mid-way -- rules DELETE could
--- soft-delete a rule's future todos but leave the rule itself active;
--- categories PUT could commit new/updated categories but never prune the
--- stale ones. Wrapped in a single plpgsql function each, called via
--- .rpc(...), for the same single-transaction atomicity reschedule_todo
--- already relies on (20260830034727_reschedule_todo_replay_lock.sql) --
--- neither function declares security definer/invoker (defaults to
--- invoker, RLS applies), and both repeat `user_id = (select auth.uid())`
--- explicitly on every statement as defense-in-depth on top of RLS, not
--- reliance on RLS alone -- the same belt-and-suspenders pattern
--- reschedule_todo's own locking select already uses.
-
--- Ordering matters here, not just wrapping the two statements: existence,
--- ownership, and not-already-deleted are confirmed and the row locked
--- BEFORE any child todo is touched. A second update matching zero rows is
--- not a SQL error, so it would NOT roll back an earlier todos update inside
--- the same function body -- an ordering that mutated todos first would let
--- a request against someone else's rule, or an already-deleted rule, still
--- silently soft-delete that rule's future todos as an undetected side
--- effect of a call that appears, from the outside, to have done nothing
--- (still returns the existing 404).
-create or replace function public.delete_schedule_rule_atomic(
-  p_rule_id uuid,
-  p_today date
-)
+-- Reconstructed from the live database (2026-09-08): this migration's
+-- original file was never committed to this checkout, even though its
+-- effect is applied and has been running in production since 2026-09-01.
+-- Content below is byte-identical to pg_get_functiondef() against the live
+-- functions, so this file only documents history -- it changes nothing
+-- that isn't already live.
+create or replace function public.delete_schedule_rule_atomic(p_rule_id uuid, p_today date)
 returns table(id uuid)
 language plpgsql
-set search_path = ''
-as $$
+set search_path to ''
+as $function$
 declare
   v_rule_id uuid;
 begin
@@ -65,26 +45,13 @@ begin
 
   return query select v_rule_id;
 end;
-$$;
+$function$;
 
--- No p_user_id parameter -- every row this writes uses (select auth.uid())
--- directly (the upsert's user_id column value and the prune's user_id
--- filter), so there is no client-suppliable user_id value to spoof in the
--- first place, not just a check to remember.
---
--- HTTP-semantics: PUT /categories always returns 200 on success today, with
--- no existing not-found/partial-success branch to preserve -- an empty
--- categories:[] array already succeeds, pruning everything. This function
--- preserves exactly that: it either applies both halves atomically or
--- raises (caught by the caller's existing try/catch -> 500), never a
--- partial state.
-create or replace function public.replace_user_categories_atomic(
-  p_rows jsonb
-)
+create or replace function public.replace_user_categories_atomic(p_rows jsonb)
 returns void
 language plpgsql
-set search_path = ''
-as $$
+set search_path to ''
+as $function$
 declare
   v_ids uuid[];
 begin
@@ -130,4 +97,4 @@ begin
     and deleted_at is null
     and not (id = any(coalesce(v_ids, array[]::uuid[])));
 end;
-$$;
+$function$;

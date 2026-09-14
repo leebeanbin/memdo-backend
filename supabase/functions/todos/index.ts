@@ -26,9 +26,42 @@ import {
   todoUpdateSchema,
 } from '../_shared/todo-contract.ts'
 import {
+  firstIndexAfterDate,
   googleMirrorEventsInRange,
+  MAX_PAGE_EXTENSION,
+  pageSplitsADate,
   virtualOccurrencesInRange,
+  virtualRangeForPage,
 } from '../_shared/todo-list-contract.ts'
+import {
+  enqueueGooglePush,
+  type PushableTodo,
+  pushGoogleEventInline,
+  serializeError,
+  serviceClient,
+} from '../_shared/google-calendar-contract.ts'
+
+// Supabase's Edge Function runtime (not vanilla Deno) exposes this global for
+// scheduling work that keeps running after the response is already sent --
+// see https://supabase.com/docs/guides/functions/background-tasks. No
+// published type declares it, so it's declared locally where it's used: a
+// Google Calendar push must never add Google's latency to this endpoint's
+// response time (see enqueueGooglePush/pushGoogleEventInline's doc comments).
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
+
+function pushableTodo(row: Record<string, unknown>): PushableTodo {
+  return {
+    id: row.id as string,
+    title: row.title as string,
+    entry_kind: row.entry_kind as string,
+    is_all_day: row.is_all_day as boolean,
+    scheduled_date: row.scheduled_date as string,
+    start_at: row.start_at as string | null,
+    end_at: row.end_at as string | null,
+    note: row.note as string | null,
+    location_name: row.location_name as string | null,
+  }
+}
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -88,72 +121,143 @@ export default {
           return apiError('INVALID_REQUEST', '조회 커서를 확인해 주세요.', 400, currentRequestId)
         }
 
-        let query = context.supabase
-          .from('todos')
-          .select(todoSelect)
-          .is('deleted_at', null)
-          .order('scheduled_date')
-          .order('sort_order')
-          .order('id')
-          .limit(parsed.data.limit + 1)
+        // bd12: over-fetch by one to detect hasMore (as before), but also
+        // extend the effective page size -- re-fetching with a larger
+        // limit -- when the peeked (limit+1-th) row shares its date with
+        // the last row that would otherwise be returned. This guarantees a
+        // single calendar date's real todos are never split across two
+        // pages, which is what makes the per-page virtual/Google merge
+        // below sort-equivalent to a single unbounded fetch: every date's
+        // real+virtual+Google items always end up merge-sorted together
+        // within the same page's response, using the same (scheduledDate,
+        // sortOrder, id) comparator a single big fetch would use.
+        const fetchPage = async (limit: number): Promise<Record<string, unknown>[]> => {
+          let query = context.supabase
+            .from('todos')
+            .select(todoSelect)
+            .is('deleted_at', null)
+            .order('scheduled_date')
+            .order('sort_order')
+            .order('id')
+            .limit(limit + 1)
 
-        if (parsed.data.from) query = query.gte('scheduled_date', parsed.data.from)
-        if (parsed.data.to) query = query.lte('scheduled_date', parsed.data.to)
-        // Default view excludes dead statuses (matching ScheduleDetail.isActive
-        // and the Agent's own DB reads -- founder-dogfooding fix, this used to
-        // be the one reader of `todos` that left the filtering to the client,
-        // so it disagreed with GET /days and search_schedules for the same
-        // day). An explicit ?status= filter is a deliberate ask for exactly
-        // those statuses (e.g. a future "rescheduled/cancelled history" view)
-        // and overrides the default rather than being ANDed with it.
-        if (parsed.data.status?.length) {
-          query = query.in('status', parsed.data.status)
-        } else {
-          query = query.not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
+          if (parsed.data.from) query = query.gte('scheduled_date', parsed.data.from)
+          if (parsed.data.to) query = query.lte('scheduled_date', parsed.data.to)
+          // Default view excludes dead statuses (matching ScheduleDetail.isActive
+          // and the Agent's own DB reads -- founder-dogfooding fix, this used to
+          // be the one reader of `todos` that left the filtering to the client,
+          // so it disagreed with GET /days and search_schedules for the same
+          // day). An explicit ?status= filter is a deliberate ask for exactly
+          // those statuses (e.g. a future "rescheduled/cancelled history" view)
+          // and overrides the default rather than being ANDed with it.
+          if (parsed.data.status?.length) {
+            query = query.in('status', parsed.data.status)
+          } else {
+            query = query.not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
+          }
+          if (cursor) {
+            query = query.or(
+              `scheduled_date.gt.${cursor.scheduledDate},and(scheduled_date.eq.${cursor.scheduledDate},sort_order.gt.${cursor.sortOrder}),and(scheduled_date.eq.${cursor.scheduledDate},sort_order.eq.${cursor.sortOrder},id.gt.${cursor.id})`,
+            )
+          }
+
+          const result = await query
+          if (result.error) throw result.error
+          return result.data
         }
-        if (cursor) {
-          query = query.or(
-            `scheduled_date.gt.${cursor.scheduledDate},and(scheduled_date.eq.${cursor.scheduledDate},sort_order.gt.${cursor.sortOrder}),and(scheduled_date.eq.${cursor.scheduledDate},sort_order.eq.${cursor.sortOrder},id.gt.${cursor.id})`,
-          )
+
+        let data = await fetchPage(parsed.data.limit)
+        // Defaults to the requested limit (no split) -- overwritten below
+        // only if the initial fetch actually split a date.
+        let cutIndex = parsed.data.limit
+
+        if (pageSplitsADate(data, parsed.data.limit)) {
+          // Freeze the split date -- only ITS OWN row count determines how
+          // far this page extends. Re-checking whatever date lands at each
+          // doubled boundary (pageSplitsADate again) would let a LATER date
+          // that also has more rows than fit cascade the extension past
+          // what this date alone needed, potentially all the way to
+          // MAX_PAGE_EXTENSION even when the original split was tiny.
+          // firstIndexAfterDate scans for the first row past this specific
+          // date instead, so a later date's own split (if any) is left
+          // entirely to its own page's independent extension decision.
+          const splitDate = data[parsed.data.limit - 1].scheduled_date
+          let growLimit = parsed.data.limit
+          let found: number | null = null
+          while (found === null) {
+            const nextLimit = Math.min(growLimit * 2, MAX_PAGE_EXTENSION)
+            if (nextLimit === growLimit) {
+              cutIndex = growLimit // safety valve -- accept the split
+              break
+            }
+            growLimit = nextLimit
+            data = await fetchPage(growLimit)
+            found = firstIndexAfterDate(data, splitDate)
+            if (found !== null) cutIndex = found
+          }
         }
 
-        const { data, error } = await query
-        if (error) throw error
-
-        const hasMore = data.length > parsed.data.limit
-        const items = data.slice(0, parsed.data.limit)
+        const hasMore = data.length > cutIndex
+        const items = data.slice(0, cutIndex)
 
         // event-mode recurring rules materialize nothing up front (see rules POST) --
         // occurrences are computed on demand for whatever range is queried, like
-        // Google Calendar/Outlook treat recurring events. Only done on the first
-        // page of a from/to query: virtual occurrences don't participate in the
-        // real-row cursor, so they'd either be skipped or duplicated on later pages.
+        // Google Calendar/Outlook treat recurring events. Scoped to the date range
+        // this specific page covers (not the whole request), and computed on every
+        // page now, not just the first -- see clampedTo/virtualFrom/virtualTo below.
         let virtualItems: Record<string, unknown>[] = []
-        // Virtual occurrences are only ever computed up to this date, even if the
-        // caller asked for a wider range (see MAX_VIRTUAL_WINDOW_DAYS) -- surfaced
-        // in appliedFilters below so a truncated response is distinguishable from
-        // "the rule genuinely has no more occurrences."
-        let virtualWindowEnd: string | null = null
+        let googleItems: Record<string, unknown>[] = []
+        // Surfaced in appliedFilters below so a truncated response is
+        // distinguishable from "the rule genuinely has no more occurrences."
+        let clampedTo: string | null = null
+        // Carried into nextCursor -- the date through which virtual/Google
+        // items have been returned, inclusive. Stays null when virtual
+        // computation never applies to this query at all (no date range, or
+        // the status filter excludes 'planned').
+        let virtualThroughDateForCursor: string | null = null
         // Virtual occurrences are always synthesized as status 'planned' -- if the
         // caller filtered to statuses that exclude it, none of them can match, so
         // don't bother generating (and don't leak unfiltered ones into a filtered
         // response either).
         const statusAllowsVirtual = !parsed.data.status?.length ||
           parsed.data.status.includes('planned')
-        let googleItems: Record<string, unknown>[] = []
-        if (!cursor && parsed.data.from && parsed.data.to && statusAllowsVirtual) {
-          const virtual = await virtualOccurrencesInRange(
-            context.supabase,
-            parsed.data.from,
-            parsed.data.to,
-          )
-          virtualItems = virtual.items
-          virtualWindowEnd = virtual.windowEnd
-          googleItems = await googleMirrorEventsInRange(
-            context.supabase,
-            parsed.data.from,
-            parsed.data.to,
-          )
+        if (parsed.data.from && parsed.data.to && statusAllowsVirtual) {
+          // Bounding virtualTo by the last real todo's date is only correct
+          // when a LATER page is coming to pick up whatever comes after it --
+          // on the final page (hasMore false) there is no later page, so
+          // trailing dates past the last real todo (with no real todos of
+          // their own) must be covered here or they're dropped entirely.
+          // Passing null on the last page makes virtualRangeForPage fall
+          // through to the full clampedTo, regardless of where the last real
+          // todo landed. items.at(-1) is guaranteed fully covered by real
+          // todos for its date on a non-last page (the page-extension loop
+          // above never splits a date across pages), so it's always safe to
+          // treat as the boundary there -- no deferral needed.
+          const pageBoundaryDate = hasMore ? (items.at(-1)!.scheduled_date as string) : null
+          const range = virtualRangeForPage({
+            requestFrom: parsed.data.from,
+            requestTo: parsed.data.to,
+            cursorVirtualThroughDate: cursor?.virtualThroughDate,
+            pageBoundaryDate,
+          })
+          clampedTo = range.clampedTo
+          // virtualOccurrencesInRange reads schedule_rules/todos;
+          // googleMirrorEventsInRange reads google_calendar_mirror_events
+          // (joined with google_calendar_connections) -- disjoint tables,
+          // no data dependency between them, so run concurrently instead
+          // of paying both round trips' latency on essentially every
+          // normal calendar-view load. Same shape sync/index.ts already
+          // uses for its own independent-table fan-out.
+          if (range.shouldFetch) {
+            ;[virtualItems, googleItems] = await Promise.all([
+              virtualOccurrencesInRange(context.supabase, range.virtualFrom, range.virtualTo),
+              googleMirrorEventsInRange(context.supabase, range.virtualFrom, range.virtualTo),
+            ])
+          }
+          // Written even when skipped -- stabilizes at clampedTo, so every later
+          // page's virtualFrom also exceeds virtualTo and this skip keeps
+          // firing, with no separate "we're done" flag needed.
+          virtualThroughDateForCursor = range.virtualTo
         }
 
         const categories = await fetchCategoriesByIds(
@@ -171,10 +275,10 @@ export default {
             String(a.scheduledDate).localeCompare(String(b.scheduledDate)) ||
             Number(a.sortOrder) - Number(b.sortOrder) || String(a.id).localeCompare(String(b.id))
           ),
-          nextCursor: hasMore ? encodeTodoCursor(items.at(-1)!) : null,
+          nextCursor: hasMore ? encodeTodoCursor(items.at(-1)!, virtualThroughDateForCursor) : null,
           hasMore,
-          appliedFilters: virtualWindowEnd && virtualWindowEnd < parsed.data.to!
-            ? { ...parsed.data, recurringOccurrencesThrough: virtualWindowEnd }
+          appliedFilters: clampedTo && clampedTo < parsed.data.to!
+            ? { ...parsed.data, recurringOccurrencesThrough: clampedTo }
             : parsed.data,
         }
         return success(
@@ -321,14 +425,178 @@ export default {
           })
         }
 
-        const hash = await sha256(parsed.data)
+        // The client materializes a Google-mirrored item the same way it
+        // already materializes a virtual recurring occurrence: a plain
+        // create using the item's own (already-known, from the GET
+        // response) id as the Idempotency-Key. If that id names an existing
+        // mirror row, this create is a materialize -- link the new todos
+        // row to the same Google event and consume the mirror row, rather
+        // than treating it as a brand-new item that would get pushed to
+        // Google as a *second* event.
+        const mirrorRow = await context.supabase
+          .from('google_calendar_mirror_events')
+          .select('id,google_event_id')
+          .eq('id', idempotencyKey)
+          .eq('user_id', context.userClaims!.id)
+          .maybeSingle()
+        if (mirrorRow.error) throw mirrorRow.error
+        const materializedGoogleEventId = mirrorRow.data?.google_event_id as string | undefined
+
+        // No mirror row doesn't necessarily mean this was never a
+        // materialize -- an earlier, successful attempt at this exact
+        // idempotencyKey already deletes the mirror row on success (below).
+        // A retry arriving after that (a client double-tap, or a retry
+        // after the first response looked slow/failed) would otherwise fall
+        // through to inserting with the client's now-stale
+        // synthetic-Google-calendar id from parsed.data and hit
+        // todos_calendar_user_fkey instead of just replaying the
+        // already-created row -- found live: two such 23503s right after
+        // two successful materializes for the same items.
+        if (!materializedGoogleEventId) {
+          const alreadyMaterialized = await context.supabase
+            .from('todos')
+            .select(todoSelect)
+            .eq('id', idempotencyKey)
+            .maybeSingle()
+          if (alreadyMaterialized.error) throw alreadyMaterialized.error
+          if (alreadyMaterialized.data) {
+            const categories = await fetchCategoriesByIds(context.supabase, [
+              alreadyMaterialized.data.category_id as string | null,
+            ])
+            return success(
+              todoDto(
+                alreadyMaterialized.data,
+                categories.get(alreadyMaterialized.data.category_id as string) ?? null,
+              ),
+              201,
+              'todos.create',
+              1,
+            )
+          }
+        }
+
+        // The client's posted calendarId for a mirrored item is the
+        // GET /calendars response's *synthetic* Google entry
+        // (calendars/index.ts sets its id to the connection's own id, not a
+        // real user_calendars row -- there is no backing row for
+        // todos_calendar_user_fkey to find). Route a materialized item to
+        // the user's real personal calendar instead of trusting that id.
+        let insertInput = parsed.data
+        if (materializedGoogleEventId) {
+          // user_calendars has no deleted_at column (it's hard-deleted, not
+          // soft-deleted, unlike todos) -- an .is('deleted_at', null) filter
+          // here threw 42703 (undefined_column) on every single call,
+          // 500-ing this entire materialize path (found live: completing a
+          // not-yet-materialized Google-mirrored item via swipe/checkbox
+          // always failed).
+          const personalCalendar = await context.supabase
+            .from('user_calendars')
+            .select('id')
+            .eq('user_id', context.userClaims!.id)
+            .eq('purpose', 'personal')
+            .maybeSingle()
+          if (personalCalendar.error) throw personalCalendar.error
+          if (!personalCalendar.data) {
+            return apiError(
+              'INTERNAL_ERROR',
+              '기본 캘린더를 찾을 수 없습니다.',
+              500,
+              currentRequestId,
+            )
+          }
+          insertInput = { ...parsed.data, calendarId: personalCalendar.data.id as string }
+        }
+
+        const hash = await sha256(insertInput)
         const { data, error } = await context.supabase
           .from('todos')
-          .insert(todoInsert(parsed.data, context.userClaims!.id, idempotencyKey, hash))
+          .insert(
+            todoInsert(
+              insertInput,
+              context.userClaims!.id,
+              idempotencyKey,
+              hash,
+              materializedGoogleEventId,
+            ),
+          )
           .select(todoSelect)
           .single()
 
         if (!error) {
+          if (materializedGoogleEventId) {
+            // google_calendar_mirror_events has only a SELECT policy for
+            // authenticated (owner-scoped read) -- no DELETE policy at all.
+            // Using context.supabase (the RLS-scoped client) here always
+            // silently deleted 0 rows: no error, no effect, every single
+            // materialize. The mirror row was never actually consumed, so
+            // /todos GET kept merging it back in alongside the now-real
+            // todos row with the same id -- a client-visible duplicate id
+            // that crashes SwiftUI's ForEach/Dictionary(uniqueKeysWithValues:)
+            // (found live). service_role bypasses RLS; the explicit
+            // .eq('id', idempotencyKey) is the only scope this delete needs
+            // since idempotencyKey is already validated against this exact
+            // user's mirror row by the mirrorRow lookup above.
+            //
+            // Best-effort, like the enqueueGooglePush call below -- the
+            // todos row insert above already committed, so a failure here
+            // must not turn that already-successful create into a generic
+            // 500. Worst case on failure: the mirror row lingers and /todos
+            // GET merges it back in alongside the real row -- the exact
+            // "duplicate mirror row" symptom this delete exists to prevent,
+            // not a corrupted client view of whether the create happened.
+            try {
+              const deletedMirror = await serviceClient()
+                .from('google_calendar_mirror_events')
+                .delete()
+                .eq('id', idempotencyKey)
+              if (deletedMirror.error) throw deletedMirror.error
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'todos.create.delete_mirror_row',
+                  todoId: data.id,
+                  error: serializeError(error),
+                }),
+              )
+            }
+          } else {
+            // A genuinely new Memdo-origin item -- push it to Google.
+            // Materialized items skip this: their data came *from* Google
+            // moments ago, nothing has changed yet to push back.
+            //
+            // Best-effort, like every other side effect in this file --
+            // never let it fail the response for a write that already
+            // committed. Found live: enqueue_google_push's ownership check
+            // (WHERE ... AND deleted_at IS NULL) can lose a race against a
+            // concurrent request for the same item (e.g. two overlapping
+            // materialize-then-delete attempts for the same not-yet-touched
+            // Google item) and throw "todo not found for this user" --
+            // which, unguarded, turned an already-successful create into a
+            // generic 500 the client had no way to distinguish from a real
+            // failure, corrupting its view of whether the write happened.
+            try {
+              const pushParams = {
+                userId: context.userClaims!.id,
+                todoId: data.id as string,
+                operation: 'create' as const,
+                todo: pushableTodo(data),
+              }
+              const connection = await enqueueGooglePush(context.supabase, pushParams)
+              if (connection) {
+                EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+              }
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'todos.create.enqueue_google_push',
+                  todoId: data.id,
+                  error: serializeError(error),
+                }),
+              )
+            }
+          }
           const categories = await fetchCategoriesByIds(context.supabase, [
             data.category_id as string | null,
           ])
@@ -380,9 +648,14 @@ export default {
         // different situation this used to misreport as "same request key
         // used for a different item" (it looks up idempotencyKey as an id,
         // finds nothing, and returns that message regardless) (be8).
+        // bd9: this is a duplicate/already-exists situation, not an
+        // optimistic-lock staleness situation -- VERSION_CONFLICT implies
+        // "you had a stale copy," which isn't what happened here (a real
+        // row already exists for that rule+date regardless of what the
+        // client sent). Message unchanged so no iOS change is required.
         if (error.message?.includes('todos_rule_occurrence_uidx')) {
           return apiError(
-            'VERSION_CONFLICT',
+            'OCCURRENCE_ALREADY_EXISTS',
             '이미 해당 날짜에 반복 일정이 있어요.',
             409,
             currentRequestId,
@@ -464,6 +737,34 @@ export default {
           )
         }
 
+        if (data.google_event_id) {
+          // Best-effort, same as the create path above: the update itself
+          // already committed, so a push-enqueue failure must never turn
+          // into an error response for a write the user already got.
+          try {
+            const pushParams = {
+              userId: context.userClaims!.id,
+              todoId: data.id as string,
+              operation: 'update' as const,
+              todo: pushableTodo(data),
+              googleEventId: data.google_event_id as string,
+            }
+            const connection = await enqueueGooglePush(context.supabase, pushParams)
+            if (connection) {
+              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            }
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                requestId: currentRequestId,
+                operation: 'todos.update.enqueue_google_push',
+                todoId: data.id,
+                error: serializeError(error),
+              }),
+            )
+          }
+        }
+
         // task-mode recurring rules keep exactly one materialized occurrence at a
         // time; completing it advances the series by materializing the next one.
         // Best-effort: the completion itself already succeeded, so a failure here
@@ -543,7 +844,7 @@ export default {
           .eq('id', itemId)
           .eq('version', parsed.data.version)
           .is('deleted_at', null)
-          .select('id')
+          .select('id,google_event_id')
           .maybeSingle()
         if (error) throw error
         if (!data) {
@@ -553,6 +854,33 @@ export default {
             409,
             currentRequestId,
           )
+        }
+        if (data.google_event_id) {
+          // Best-effort, same as create/update above -- the delete itself
+          // already committed (soft-deleted, just above), so a
+          // push-enqueue failure must never turn into an error response for
+          // a delete the user already got.
+          try {
+            const pushParams = {
+              userId: context.userClaims!.id,
+              todoId: data.id as string,
+              operation: 'delete' as const,
+              googleEventId: data.google_event_id as string,
+            }
+            const connection = await enqueueGooglePush(context.supabase, pushParams)
+            if (connection) {
+              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            }
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                requestId: currentRequestId,
+                operation: 'todos.delete.enqueue_google_push',
+                todoId: data.id,
+                error: serializeError(error),
+              }),
+            )
+          }
         }
         return success({ id: data.id }, 200, 'todos.delete', 1)
       }

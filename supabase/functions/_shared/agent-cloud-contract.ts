@@ -11,6 +11,7 @@ import { MODEL_REGISTRY, selectableModelIds } from './model-registry-contract.ts
 import { preferencesDto } from './preferences-contract.ts'
 import { ianaOffsetMinutes } from './rule-contract.ts'
 import { DEAD_STATUSES } from './todo-contract.ts'
+import { googleMirrorEventsInRange } from './todo-list-contract.ts'
 
 export { ianaOffsetMinutes }
 
@@ -116,6 +117,22 @@ export function resolveRateLimitPerHour(
   const parsed = env.evalRateLimitPerHour ? Number(env.evalRateLimitPerHour) : NaN
   if (!Number.isInteger(parsed) || parsed <= RATE_LIMIT_PER_HOUR) return RATE_LIMIT_PER_HOUR
   return parsed
+}
+
+/** agent-cloud-chat's mid-stream catch block used to collapse every failure
+ * (a transient OpenRouter rate limit, a real bug, a network blip) into the
+ * identical generic INTERNAL_ERROR -- confirmed live: OpenRouter's shared
+ * qwen3.7-flash pool 429s repeatedly, and the user got the exact same
+ * unhelpful message and retry button as for an actual failure, with no way
+ * to tell "retry now, it'll probably work" from "something's actually
+ * broken." Prefers the structured `.status` callOpenRouterStreamed now
+ * attaches to its thrown error; falls back to a string match on the
+ * message only for an error shape that doesn't carry it (defensive, not
+ * the primary path). */
+export function isOpenRouterRateLimited(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status
+  if (typeof status === 'number') return status === 429
+  return String(error).includes('openrouter 429')
 }
 
 export const chatRequestSchema = z.object({
@@ -566,7 +583,34 @@ async function fetchSchedules(
     .lte('scheduled_date', to)
     .limit(200)
   if (error) throw error
-  return data as ExistingScheduleRow[]
+  const rows = data as ExistingScheduleRow[]
+
+  // GET /todos merges google_calendar_mirror_events in alongside todos
+  // (see todo-list-contract.ts) so a connected user sees synced events in
+  // the app; this tool queried `todos` alone, so search_schedules and
+  // find_free_slots -- and therefore every "이번 달 일정 정리해줘"-style
+  // request -- were blind to Google-sourced events even once a request
+  // like that correctly called the tool. Never a materialized todos row
+  // (no google_event_id here), so a later propose_schedule_update/delete
+  // against one of these ids fails closed via fetchScheduleById's null
+  // return -- fine, since this tool is read/search, not edit.
+  try {
+    const googleItems = await googleMirrorEventsInRange(supabase, from, to)
+    for (const item of googleItems) {
+      rows.push({
+        id: item.id as string,
+        title: item.title as string,
+        scheduled_date: item.scheduledDate as string,
+        start_at: item.startAt as string | null,
+        end_at: item.endAt as string | null,
+        version: 0,
+      })
+    }
+  } catch {
+    // Fail open -- a Google-sync hiccup shouldn't break the whole tool call.
+  }
+
+  return rows.sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))
 }
 
 /** Single-row lookup for propose_schedule_update -- the model only ever
@@ -601,12 +645,20 @@ async function searchSchedules(
   try {
     const rows = await fetchSchedules(supabase, args.from, args.to)
     return {
+      // find_free_slots always pre-formats times into local HH:mm text via
+      // formatSlot() before it ever reaches the model (see below) -- this
+      // used to hand the model raw UTC ISO instants (startAt/endAt) instead
+      // and expect it to convert them to KST itself. A lighter model doing
+      // that arithmetic in its head is exactly the kind of thing that goes
+      // quietly wrong (12:20-14:20 UTC read back as "낮 12:20~2:20", 9h off
+      // from the real 21:20-23:20 KST) -- so this now pre-formats the same
+      // way, removing the conversion from the model's hands entirely. null
+      // for an untimed task/all-day item, same as it always had no time.
       items: rows.map((r) => ({
         id: r.id,
         title: r.title,
         scheduledDate: r.scheduled_date,
-        startAt: r.start_at,
-        endAt: r.end_at,
+        time: r.start_at && r.end_at ? formatSlot(new Date(r.start_at), new Date(r.end_at)) : null,
       })),
     }
   } catch (error) {
@@ -705,7 +757,29 @@ async function fetchDayItems(supabase: SupabasePort, date: string): Promise<DayI
     .not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
     .limit(200)
   if (error) throw error
-  return data as DayItemRow[]
+  const rows = data as DayItemRow[]
+
+  // Same gap fetchSchedules had (see its own comment above) -- get_day_context
+  // only ever saw `todos`, never google_calendar_mirror_events, so "오늘 하루
+  // 어땠어?" was blind to Google-sourced events too. A mirror row is never
+  // completed/cancelled in Memdo's own sense, so it always counts as
+  // incomplete here, same as todo-list-contract.ts's DTO mapping treats it.
+  try {
+    const googleItems = await googleMirrorEventsInRange(supabase, date, date)
+    for (const item of googleItems) {
+      rows.push({
+        id: item.id as string,
+        title: item.title as string,
+        start_at: item.startAt as string | null,
+        end_at: item.endAt as string | null,
+        status: 'planned',
+      })
+    }
+  } catch {
+    // Fail open -- a Google-sync hiccup shouldn't break the whole tool call.
+  }
+
+  return rows
 }
 
 async function getDayContext(
@@ -748,8 +822,11 @@ async function getDayContext(
     incomplete: incomplete.map((row) => ({
       id: row.id,
       title: row.title,
-      startAt: row.start_at,
-      endAt: row.end_at,
+      // Pre-formatted local HH:mm-HH:mm, not raw UTC ISO -- see
+      // search_schedules' identical fix above for why.
+      time: row.start_at && row.end_at
+        ? formatSlot(new Date(row.start_at), new Date(row.end_at))
+        : null,
     })),
     hasReflection,
   }

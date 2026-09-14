@@ -1,8 +1,49 @@
-import { classifyGoogleCalendarErrorReason } from './google-calendar-contract.ts'
+import {
+  applyClassifiedSyncFailure,
+  classifyGoogleCalendarErrorReason,
+  classifyPushFailure,
+  createGoogleEvent,
+  isMemdoAuthoredEvent,
+  mapGoogleEventToMirrorRow,
+  MEMDO_KIND_PROPERTY,
+  MEMDO_TODO_ID_PROPERTY,
+  memdoTodoIdFromEvent,
+  plainTextFromGoogleDescription,
+  serializeError,
+  toGoogleEventBody,
+} from './google-calendar-contract.ts'
 
 function assert(condition: unknown): asserts condition {
   if (!condition) throw new Error('assertion failed')
 }
+
+function assertEquals(actual: unknown, expected: unknown): void {
+  if (actual !== expected) {
+    throw new Error(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
+  }
+}
+
+// serializeError -- a real caught bug: `if (error) throw error` (several
+// call sites) throws a plain Supabase/RPC error object, not an Error
+// instance, and String(plainObject) silently collapses to the useless
+// literal "[object Object]" -- observed live in google_calendar.push.inline
+// logs, which is what this exists to prevent everywhere in this file.
+
+Deno.test("serializeError returns a real Error instance's message", () => {
+  assert(serializeError(new Error('boom')) === 'boom')
+})
+
+Deno.test('serializeError JSON-stringifies a plain error-shaped object instead of "[object Object]"', () => {
+  const result = serializeError({ message: 'permission denied', code: '42501' })
+  assert(result !== '[object Object]')
+  assert(result.includes('permission denied'))
+  assert(result.includes('42501'))
+})
+
+Deno.test('serializeError falls back to String() for a primitive', () => {
+  assert(serializeError('plain string reason') === 'plain string reason')
+  assert(serializeError(404) === '404')
+})
 
 Deno.test('classifyGoogleCalendarErrorReason maps a null message to unknown', () => {
   assert(classifyGoogleCalendarErrorReason(null) === 'unknown')
@@ -53,4 +94,314 @@ Deno.test('classifyGoogleCalendarErrorReason never leaks the raw message text ba
   ])
   const raw = 'some unexpected upstream failure: 500 internal server error <html>...</html>'
   assert(reasons.has(classifyGoogleCalendarErrorReason(raw)))
+})
+
+// toGoogleEventBody / all-day exclusive end-date -- the single easiest-to-get-
+// backwards piece of the whole push feature (Google's own convention: a
+// single-day all-day event's end.date is the day AFTER start.date).
+
+Deno.test('toGoogleEventBody pushes a task as a single-day all-day event with an exclusive end.date', () => {
+  const body = toGoogleEventBody({
+    id: 'todo-1',
+    title: '30분 산책',
+    entry_kind: 'task',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: null,
+    end_at: null,
+    note: null,
+    location_name: null,
+  })
+  assertEquals(body.start.date, '2026-09-05')
+  assertEquals(body.end.date, '2026-09-06')
+  assertEquals(body.start.dateTime, undefined)
+})
+
+Deno.test('toGoogleEventBody exclusive end-date rolls over a month/year boundary correctly', () => {
+  const body = toGoogleEventBody({
+    id: 'todo-2',
+    title: '연말 정리',
+    entry_kind: 'task',
+    is_all_day: false,
+    scheduled_date: '2026-12-31',
+    start_at: null,
+    end_at: null,
+    note: null,
+    location_name: null,
+  })
+  assertEquals(body.start.date, '2026-12-31')
+  assertEquals(body.end.date, '2027-01-01')
+})
+
+Deno.test('toGoogleEventBody pushes a timed event with real start/end dateTime, not all-day', () => {
+  const body = toGoogleEventBody({
+    id: 'todo-3',
+    title: '팀 회의',
+    entry_kind: 'event',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: '2026-09-05T09:00:00Z',
+    end_at: '2026-09-05T10:00:00Z',
+    note: null,
+    location_name: null,
+  })
+  assertEquals(body.start.dateTime, '2026-09-05T09:00:00Z')
+  assertEquals(body.end.dateTime, '2026-09-05T10:00:00Z')
+  assertEquals(body.start.date, undefined)
+})
+
+Deno.test('toGoogleEventBody tags every pushed event with memdoTodoId/memdoKind', () => {
+  const body = toGoogleEventBody({
+    id: 'todo-4',
+    title: '아무 일정',
+    entry_kind: 'task',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: null,
+    end_at: null,
+    note: null,
+    location_name: null,
+  })
+  assertEquals(body.extendedProperties.private[MEMDO_TODO_ID_PROPERTY], 'todo-4')
+  assertEquals(body.extendedProperties.private[MEMDO_KIND_PROPERTY], 'task')
+})
+
+// toGoogleEventBody's id / createGoogleEvent idempotency -- a create retry
+// (e.g. after a successful Google insert whose follow-up DB write failed)
+// must never produce a second event on Google. The mechanism: a
+// deterministic, todo-derived event id, with Google's own 409-on-collision
+// as the recovery signal.
+
+Deno.test('toGoogleEventBody derives a deterministic Google event id from the todo UUID (hyphens stripped, lowercased)', () => {
+  const body = toGoogleEventBody({
+    id: 'A1B2C3D4-E5F6-4789-90AB-CDEF01234567',
+    title: '일정',
+    entry_kind: 'event',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: null,
+    end_at: null,
+    note: null,
+    location_name: null,
+  })
+  assertEquals(body.id, 'a1b2c3d4e5f6478990abcdef01234567')
+  // Google's events.insert custom-id constraint: lowercase base32hex
+  // (a-v, 0-9), length 5-1024 -- confirm the derived id actually satisfies
+  // it, not just that it "looks like" the todo id.
+  assert(/^[a-v0-9]{5,1024}$/.test(body.id))
+})
+
+Deno.test('createGoogleEvent recovers the same deterministic id on a 409 (already exists) instead of throwing', async () => {
+  const originalFetch = globalThis.fetch
+  let requestCount = 0
+  globalThis.fetch = (() => {
+    requestCount += 1
+    return Promise.resolve(
+      new Response('{"error":{"code":409,"message":"already exists"}}', { status: 409 }),
+    )
+  }) as typeof fetch
+  try {
+    const result = await createGoogleEvent('token', 'primary', {
+      id: 'A1B2C3D4-E5F6-4789-90AB-CDEF01234567',
+      title: '일정',
+      entry_kind: 'event',
+      is_all_day: false,
+      scheduled_date: '2026-09-05',
+      start_at: null,
+      end_at: null,
+      note: null,
+      location_name: null,
+    })
+    assertEquals(result.id, 'a1b2c3d4e5f6478990abcdef01234567')
+    assertEquals(requestCount, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+// isMemdoAuthoredEvent / memdoTodoIdFromEvent -- the echo-loop-prevention
+// check the pull side depends on to never re-mirror an event Memdo itself
+// pushed.
+
+Deno.test('isMemdoAuthoredEvent is true only when the memdoTodoId private property is present', () => {
+  assert(
+    isMemdoAuthoredEvent({
+      id: 'g1',
+      status: 'confirmed',
+      extendedProperties: { private: { [MEMDO_TODO_ID_PROPERTY]: 'todo-1' } },
+    }),
+  )
+  assert(!isMemdoAuthoredEvent({ id: 'g2', status: 'confirmed' }))
+  assert(!isMemdoAuthoredEvent({ id: 'g3', status: 'confirmed', extendedProperties: {} }))
+  assert(
+    !isMemdoAuthoredEvent({
+      id: 'g4',
+      status: 'confirmed',
+      extendedProperties: { private: { someOtherApp: 'x' } },
+    }),
+  )
+})
+
+Deno.test('memdoTodoIdFromEvent extracts the tagged todo id, or null when absent', () => {
+  assertEquals(
+    memdoTodoIdFromEvent({
+      id: 'g1',
+      status: 'confirmed',
+      extendedProperties: { private: { [MEMDO_TODO_ID_PROPERTY]: 'todo-7' } },
+    }),
+    'todo-7',
+  )
+  assertEquals(memdoTodoIdFromEvent({ id: 'g2', status: 'confirmed' }), null)
+})
+
+// plainTextFromGoogleDescription -- Google Calendar's own rich-text editor
+// emits HTML descriptions; Memdo's memo field doesn't render HTML, so this
+// must come out as clean plain text, not raw markup.
+
+Deno.test('plainTextFromGoogleDescription strips paragraph tags and decodes entities (real Calendar output)', () => {
+  const html =
+    '<p>오늘 체크리스트: https://docs.google.com/spreadsheets/d/1v7PKmpy9Xe-BuWybR_Wv9p-XDQpu3TRU7hONNkG2LyE/edit#gid=1608798922&amp;range=A2:N2</p>\n' +
+    '<p>필수 3개(강의·학습 / 실습·복기 / 시험 공부·회고)를 모두 체크하면 완료입니다.\n기본 120분, 선택 확장 60분으로 최대 180분입니다.</p>'
+  const text = plainTextFromGoogleDescription(html)
+  assert(!text.includes('<p>'))
+  assert(!text.includes('</p>'))
+  assert(!text.includes('&amp;'))
+  assert(
+    text.includes(
+      '오늘 체크리스트: https://docs.google.com/spreadsheets/d/1v7PKmpy9Xe-BuWybR_Wv9p-XDQpu3TRU7hONNkG2LyE/edit#gid=1608798922&range=A2:N2',
+    ),
+  )
+  assert(
+    text.includes('필수 3개(강의·학습 / 실습·복기 / 시험 공부·회고)를 모두 체크하면 완료입니다.'),
+  )
+})
+
+Deno.test('plainTextFromGoogleDescription converts <br> to a newline and strips inline formatting tags', () => {
+  const text = plainTextFromGoogleDescription(
+    '<b>중요</b><br>두 번째 줄 <a href="https://x.com">링크</a>',
+  )
+  assertEquals(text, '중요\n두 번째 줄 링크')
+})
+
+Deno.test('plainTextFromGoogleDescription leaves plain (non-HTML) text untouched', () => {
+  assertEquals(plainTextFromGoogleDescription('그냥 평문 메모'), '그냥 평문 메모')
+})
+
+Deno.test('mapGoogleEventToMirrorRow stores the plain-text-converted note, not raw HTML', () => {
+  const row = mapGoogleEventToMirrorRow(
+    {
+      id: 'g1',
+      status: 'confirmed',
+      summary: '팀 스탠드업',
+      description: '<p>어제 진행 상황 공유</p>',
+      start: { dateTime: '2026-09-05T09:00:00Z' },
+      end: { dateTime: '2026-09-05T09:15:00Z' },
+      updated: '2026-09-01T00:00:00Z',
+    },
+    'conn-1',
+    'user-1',
+  )
+  assertEquals(row?.note, '어제 진행 상황 공유')
+})
+
+Deno.test('mapGoogleEventToMirrorRow defaults synced_calendar_id to null (primary calendar), sets it when given', () => {
+  const event = {
+    id: 'g2',
+    status: 'confirmed' as const,
+    summary: '팀 스탠드업',
+    start: { dateTime: '2026-09-05T09:00:00Z' },
+    end: { dateTime: '2026-09-05T09:15:00Z' },
+    updated: '2026-09-01T00:00:00Z',
+  }
+  assertEquals(mapGoogleEventToMirrorRow(event, 'conn-1', 'user-1')?.synced_calendar_id, null)
+  assertEquals(
+    mapGoogleEventToMirrorRow(event, 'conn-1', 'user-1', 'synced-1')?.synced_calendar_id,
+    'synced-1',
+  )
+})
+
+// applyClassifiedSyncFailure -- google-calendar-sync/google-calendar-webhook
+// used to unconditionally flip status to 'error' on ANY thrown syncConnection
+// error, including a transient 429 unrelated to auth. Only auth_expired/
+// calendar_not_found should ever flip status; rate_limited/unknown must
+// leave the connection 'active' (still recording last_error) so it keeps
+// retrying with no user-visible "broken" state.
+
+function fakeConnectionsSupabase(): {
+  from: (table: string) => any
+  lastUpdate: { table: string; values: Record<string, unknown> } | null
+} {
+  const state = { lastUpdate: null as { table: string; values: Record<string, unknown> } | null }
+  return {
+    from: (table: string) => ({
+      update: (values: Record<string, unknown>) => {
+        state.lastUpdate = { table, values }
+        return {
+          eq: () => Promise.resolve({ data: null, error: null }),
+        }
+      },
+    }),
+    get lastUpdate() {
+      return state.lastUpdate
+    },
+  } as any
+}
+
+Deno.test('applyClassifiedSyncFailure leaves status untouched for a rate-limited error, but records last_error', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(
+    supabase,
+    'conn-1',
+    new Error('google events.list failed: 429 too many requests'),
+  )
+  assert(supabase.lastUpdate !== null)
+  assertEquals(supabase.lastUpdate!.table, 'google_calendar_connections')
+  assert(!('status' in supabase.lastUpdate!.values))
+  assert(typeof supabase.lastUpdate!.values.last_error === 'string')
+})
+
+Deno.test('applyClassifiedSyncFailure leaves status untouched for an unclassified error, but records last_error', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(supabase, 'conn-1', new Error('some unexpected failure'))
+  assert(supabase.lastUpdate !== null)
+  assert(!('status' in supabase.lastUpdate!.values))
+  assert(typeof supabase.lastUpdate!.values.last_error === 'string')
+})
+
+Deno.test('applyClassifiedSyncFailure flips status to error for an auth failure', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(
+    supabase,
+    'conn-1',
+    new Error('google events.list failed: 401 unauthorized'),
+  )
+  assertEquals(supabase.lastUpdate!.values.status, 'error')
+})
+
+Deno.test('applyClassifiedSyncFailure flips status to error when the calendar is gone', async () => {
+  const supabase = fakeConnectionsSupabase()
+  await applyClassifiedSyncFailure(
+    supabase,
+    'conn-1',
+    new Error('google events.list failed: 404 not found'),
+  )
+  assertEquals(supabase.lastUpdate!.values.status, 'error')
+})
+
+// classifyPushFailure -- google-calendar-push's per-row decision on a caught
+// push failure. A rate-limited failure must never count toward the queue
+// row's MAX_ATTEMPTS ceiling (retried next tick for free); everything else
+// counts as a real attempt.
+
+Deno.test('classifyPushFailure skips (no attempts burned) for a rate-limited error', () => {
+  const action = classifyPushFailure(
+    new Error('google events POST failed: 429 too many requests'),
+  )
+  assertEquals(action.kind, 'skip')
+})
+
+Deno.test('classifyPushFailure records (attempts burned) for a non-rate-limited error', () => {
+  const action = classifyPushFailure(new Error('google events POST failed: 403 forbidden'))
+  assert(action.kind === 'record')
+  assert(action.lastError.includes('403'))
 })
