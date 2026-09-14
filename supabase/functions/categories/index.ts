@@ -8,13 +8,11 @@ import {
 import {
   categoriesReplaceSchema,
   categoryDto,
-  categoryRow,
   categorySelect,
 } from '../_shared/category-contract.ts'
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
-    const userId = context.userClaims!.id
     const success = successResponder({
       request,
       currentRequestId,
@@ -64,36 +62,16 @@ export default {
           )
         }
 
-        const rows = parsed.data.categories.map((input, index) => categoryRow(input, userId, index))
-        const ids = rows.map((row) => row.id)
-
-        try {
-          if (rows.length > 0) {
-            // bd20: onConflict target follows the PK, now (id, user_id) --
-            // a client-generated id colliding with a DIFFERENT user's
-            // category is no longer possible to conflict with, since every
-            // row here already carries this caller's own userId.
-            const upserted = await context.supabase
-              .from('user_categories')
-              .upsert(rows, { onConflict: 'id,user_id' })
-            if (upserted.error) throw upserted.error
-          }
-
-          // bd26: soft delete (deleted_at), matching todos'/schedule_rules'
-          // convention (DELETE itself is revoked from authenticated) --
-          // this is also what lets /sync report a category removal as a
-          // tombstone instead of the row just silently disappearing.
-          let pruneQuery = context.supabase
-            .from('user_categories')
-            .update({ deleted_at: new Date().toISOString() })
-            .eq('user_id', userId)
-            .is('deleted_at', null)
-          pruneQuery = ids.length > 0
-            ? pruneQuery.not('id', 'in', `(${ids.join(',')})`)
-            : pruneQuery
-          const pruned = await pruneQuery
-          if (pruned.error) throw pruned.error
-        } catch (error) {
+        // be17: previously an upsert followed by a separate prune update --
+        // a crash between them could commit new/updated categories while
+        // never pruning the stale ones. Now one atomic RPC; it derives
+        // user_id/deleted_at itself (see the migration), so the raw
+        // client-shaped rows are passed straight through with no local
+        // user_id/sort_order mapping needed here anymore.
+        const { error } = await context.supabase.rpc('replace_user_categories_atomic', {
+          p_rows: parsed.data.categories,
+        })
+        if (error) {
           console.error(
             JSON.stringify({ requestId: currentRequestId, operation: 'categories.replace', error }),
           )
@@ -112,7 +90,7 @@ export default {
           { items: parsed.data.categories, hasMore: false },
           200,
           'categories.replace',
-          rows.length,
+          parsed.data.categories.length,
         )
       }
 
