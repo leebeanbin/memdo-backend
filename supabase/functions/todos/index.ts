@@ -171,18 +171,20 @@ export default {
           parsed.data.status.includes('planned')
         let googleItems: Record<string, unknown>[] = []
         if (!cursor && parsed.data.from && parsed.data.to && statusAllowsVirtual) {
-          const virtual = await virtualOccurrencesInRange(
-            context.supabase,
-            parsed.data.from,
-            parsed.data.to,
-          )
+          // virtualOccurrencesInRange reads schedule_rules/todos;
+          // googleMirrorEventsInRange reads google_calendar_mirror_events
+          // (joined with google_calendar_connections) -- disjoint tables,
+          // no data dependency between them, so run concurrently instead
+          // of paying both round trips' latency on essentially every
+          // normal calendar-view load. Same shape sync/index.ts already
+          // uses for its own independent-table fan-out.
+          const [virtual, google] = await Promise.all([
+            virtualOccurrencesInRange(context.supabase, parsed.data.from, parsed.data.to),
+            googleMirrorEventsInRange(context.supabase, parsed.data.from, parsed.data.to),
+          ])
           virtualItems = virtual.items
           virtualWindowEnd = virtual.windowEnd
-          googleItems = await googleMirrorEventsInRange(
-            context.supabase,
-            parsed.data.from,
-            parsed.data.to,
-          )
+          googleItems = google
         }
 
         const categories = await fetchCategoriesByIds(
