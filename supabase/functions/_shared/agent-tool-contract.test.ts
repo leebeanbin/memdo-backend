@@ -149,6 +149,25 @@ Deno.test('parseAgentToolCall rejects a non-task event with no startTime', () =>
   assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, { title: '회의', date: 'today', isTask: false })
 })
 
+// bd4: was max(200) here vs. todoInputSchema's real max(120) -- a 121-200
+// char proposal used to stage fine and then fail to save on approval.
+Deno.test("parseAgentToolCall rejects a title past todoInputSchema's real 120-char save limit", () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '가'.repeat(121),
+    date: 'today',
+    isTask: true,
+  })
+})
+
+Deno.test('parseAgentToolCall accepts a title at exactly the 120-char save limit', () => {
+  const result = parseAgentToolCall(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '가'.repeat(120),
+    date: 'today',
+    isTask: true,
+  })
+  assert(result.ok)
+})
+
 Deno.test('parseAgentToolCall rejects a search range where to precedes from', () => {
   assertInvalid(AGENT_TOOL_NAMES.searchSchedules, { from: '2026-12-31', to: '2026-01-01' })
 })
