@@ -3,11 +3,38 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 export const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 export const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke'
-export const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly'
+// Two-way sync (push) needs write access -- .readonly can never create/
+// update/delete a Google event. Every existing connection was authorized
+// under the old readonly-only scope, so this is a breaking change: an
+// existing connection's stored refresh token does NOT retroactively gain
+// write access just because this constant changed -- the user must
+// reconnect (disconnect + connect again) to get a token actually carrying
+// this broader scope. google-calendar-push checks for this explicitly
+// (see insufficientScope handling) rather than assuming every connection
+// row already has write access.
+export const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar'
+
+// Private extended-property keys Memdo stamps on every event it pushes to
+// Google, so the pull side can (a) recognize "this is an event I pushed
+// myself" and skip re-mirroring it (preventing a push->pull duplicate every
+// cycle) and (b) reconstruct entryKind (task vs event) on any future
+// re-read without guessing from the all-day/timed shape alone -- a genuine
+// external all-day Google event would otherwise be indistinguishable from a
+// Memdo task pushed as an all-day event. Private properties are scoped to
+// the specific calendarId/eventId and invisible to other apps/attendees:
+// https://developers.google.com/workspace/calendar/api/guides/extended-properties
+export const MEMDO_TODO_ID_PROPERTY = 'memdoTodoId'
+export const MEMDO_KIND_PROPERTY = 'memdoKind'
 
 export const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
 export const MIRROR_SYNC_WINDOW_PAST_DAYS = 60
 export const MIRROR_SYNC_WINDOW_FUTURE_DAYS = 366
+
+// Single source of truth for the push queue's retry ceiling -- shared by
+// google-calendar-push (which enforces it) and google-calendar-status
+// (which needs the same threshold to report pendingCount vs failedCount),
+// so the two can never drift apart.
+export const GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS = 10
 
 // be12: google-calendar-status previously returned `last_error` verbatim --
 // raw upstream Google API/OAuth response text (see the `throw new Error`
@@ -23,6 +50,25 @@ export type GoogleCalendarErrorReason =
 
 const GOOGLE_ERROR_STATUS_PATTERN = /failed: (\d{3})/
 
+/** `String(error)` only produces a useful message for a real `Error`
+ * instance -- a Supabase/RPC error thrown as a plain object (`if (error)
+ * throw error`, several call sites below) stringifies to the useless
+ * literal "[object Object]" via Object.prototype.toString, silently
+ * discarding message/code/details/hint. Used everywhere this file logs or
+ * classifies a caught error so debugging never depends on which shape the
+ * particular failure happened to throw. */
+export function serializeError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'object' && error !== null) {
+    try {
+      return JSON.stringify(error)
+    } catch {
+      // Fall through -- a circular/non-serializable object.
+    }
+  }
+  return String(error)
+}
+
 export function classifyGoogleCalendarErrorReason(
   message: string | null,
 ): GoogleCalendarErrorReason {
@@ -35,6 +81,78 @@ export function classifyGoogleCalendarErrorReason(
   if (status === 429) return 'rate_limited'
   if (status === 404) return 'calendar_not_found'
   return 'unknown'
+}
+
+/** Shared by google-calendar-sync (15-min cron) and google-calendar-webhook
+ * (real-time push) -- both wrap syncConnection in a try/catch and used to
+ * unconditionally flip the connection to status: 'error' on ANY thrown
+ * error, including a transient 429 from Google's Calendar API mid-sync,
+ * unrelated to auth. A single rate-limit hit during any cycle would
+ * permanently lock the connection into a "needs reconnect"-looking state
+ * until the user manually reconnected, even though nothing about their
+ * auth was actually broken.
+ *
+ * Only auth_expired/calendar_not_found are genuinely actionable ("needs
+ * reconnect" or "pick a different calendar") and flip status to 'error'.
+ * rate_limited/unknown still record last_error (so google-calendar-status
+ * can surface the transient-error state -- see that endpoint's
+ * needsReconnect/lastError handling) but leave status untouched, so the
+ * next cron tick / webhook retries normally with no user-visible
+ * "broken" signal. On the next successful sync, syncConnection's own
+ * success-path update (status: 'active', last_error: null) already clears
+ * whatever this wrote -- no separate recovery step needed. */
+// Narrowed to just what this function calls (matches the SupabasePort
+// pattern already used in agent-cloud-contract.ts/todo-list-contract.ts/
+// todo-contract.ts) rather than the full SupabaseClient class -- lets this
+// one function actually be unit-tested with a fake, unlike syncConnection/
+// pushGoogleEventInline in this same file, which need the real client for
+// their Google-token/vault RPC calls.
+type ConnectionUpdatePort = {
+  from: (
+    table: string,
+  ) => {
+    update: (
+      values: Record<string, unknown>,
+    ) => { eq: (col: string, val: string) => PromiseLike<unknown> }
+  }
+}
+
+/** google-calendar-push's per-row decision for a caught push failure --
+ * pulled out of that file's loop into a pure, testable function (that
+ * file, like every other edge function entry point in this codebase, has
+ * no test coverage of its own; the classification logic does). A
+ * rate-limited failure is transient and retried next tick for free,
+ * without ever counting toward the queue row's MAX_ATTEMPTS ceiling --
+ * everything else counts as a real attempt. */
+export type PushFailureAction =
+  | { kind: 'skip' }
+  | { kind: 'record'; lastError: string }
+
+export function classifyPushFailure(error: unknown): PushFailureAction {
+  const message = serializeError(error)
+  if (classifyGoogleCalendarErrorReason(message) === 'rate_limited') {
+    return { kind: 'skip' }
+  }
+  return { kind: 'record', lastError: message.slice(0, 500) }
+}
+
+export async function applyClassifiedSyncFailure(
+  supabase: ConnectionUpdatePort,
+  connectionId: string,
+  error: unknown,
+): Promise<void> {
+  const message = serializeError(error)
+  const reason = classifyGoogleCalendarErrorReason(message)
+  if (reason === 'auth_expired' || reason === 'calendar_not_found') {
+    await supabase.from('google_calendar_connections').update({
+      status: 'error',
+      last_error: message.slice(0, 500),
+    }).eq('id', connectionId)
+  } else {
+    await supabase.from('google_calendar_connections').update({
+      last_error: message.slice(0, 500),
+    }).eq('id', connectionId)
+  }
 }
 
 export function serviceClient(): SupabaseClient {
@@ -168,14 +286,215 @@ type GoogleEvent = {
   id: string
   status: string
   summary?: string
+  description?: string
   start?: { date?: string; dateTime?: string }
   end?: { date?: string; dateTime?: string }
   location?: string
   updated?: string
+  extendedProperties?: { private?: Record<string, string> }
+}
+
+// True when this event carries Memdo's own extended-property tag -- i.e. an
+// event Memdo itself pushed via createGoogleEvent/updateGoogleEvent, not a
+// genuine external Google event. The pull side (google-calendar-sync) must
+// skip these entirely rather than re-mirroring them: without this check,
+// push-then-pull would create a duplicate representation of the same item
+// every single sync cycle.
+export function isMemdoAuthoredEvent(event: GoogleEvent): boolean {
+  return Boolean(event.extendedProperties?.private?.[MEMDO_TODO_ID_PROPERTY])
+}
+
+export function memdoTodoIdFromEvent(event: GoogleEvent): string | null {
+  return event.extendedProperties?.private?.[MEMDO_TODO_ID_PROPERTY] ?? null
+}
+
+// Minimal todos-row shape needed to build a Google event body. Deliberately
+// narrower than the full todoSelect row -- only what the mapping actually
+// uses.
+export type PushableTodo = {
+  id: string
+  title: string
+  entry_kind: string
+  is_all_day: boolean
+  scheduled_date: string
+  start_at: string | null
+  end_at: string | null
+  note: string | null
+  location_name: string | null
+}
+
+/** Google's own convention: an all-day event's end.date is EXCLUSIVE -- a
+ * single-day all-day event needs end.date set to the day *after*
+ * start.date, or the event renders as zero-length.
+ * https://developers.google.com/workspace/calendar/api/v3/reference/events */
+function exclusiveEndDate(dateISO: string): string {
+  const date = new Date(`${dateISO}T00:00:00Z`)
+  date.setUTCDate(date.getUTCDate() + 1)
+  return date.toISOString().slice(0, 10)
+}
+
+type GoogleEventBody = {
+  id: string
+  summary: string
+  description?: string
+  location?: string
+  start: { date?: string; dateTime?: string }
+  end: { date?: string; dateTime?: string }
+  extendedProperties: { private: Record<string, string> }
+}
+
+/** Google's own custom-id constraint for events.insert: lowercase base32hex
+ * (letters a-v, digits 0-9), length 5-1024.
+ * https://developers.google.com/workspace/calendar/api/v3/reference/events/insert
+ * A todo's UUID with hyphens stripped is 32 lowercase hex characters
+ * (0-9a-f) -- a strict subset of that alphabet -- and deterministic per
+ * todo. Using it as the event id (rather than letting Google assign one)
+ * is what makes createGoogleEvent idempotent: a retry after a create that
+ * actually succeeded on Google's side (but whose follow-up DB write
+ * failed) hits the exact same id again, and Google's own uniqueness
+ * constraint on event ids (409 on collision) is the recovery signal --
+ * see createGoogleEvent below. Without this, a retry would ask Google to
+ * mint a *new* id, silently creating a second, permanently orphaned event
+ * every time a create's follow-up write failed. */
+function deterministicGoogleEventId(todoId: string): string {
+  return todoId.replace(/-/g, '').toLowerCase()
+}
+
+/** Maps a todos row to a Google event body. Tasks (no fixed time) push as
+ * an all-day event on their scheduled_date; events push with their real
+ * start/end (all-day or timed, matching is_all_day). Every event Memdo
+ * pushes is tagged with memdoTodoId/memdoKind so the pull side can
+ * recognize it later -- see isMemdoAuthoredEvent above. */
+export function toGoogleEventBody(todo: PushableTodo): GoogleEventBody {
+  const isTask = todo.entry_kind === 'task'
+  const start = isTask || todo.is_all_day || !todo.start_at
+    ? { date: todo.scheduled_date }
+    : { dateTime: todo.start_at }
+  const end = isTask || todo.is_all_day || !todo.end_at
+    ? { date: exclusiveEndDate(todo.scheduled_date) }
+    : { dateTime: todo.end_at }
+  return {
+    id: deterministicGoogleEventId(todo.id),
+    summary: todo.title,
+    description: todo.note ?? undefined,
+    location: todo.location_name ?? undefined,
+    start,
+    end,
+    extendedProperties: {
+      private: {
+        [MEMDO_TODO_ID_PROPERTY]: todo.id,
+        [MEMDO_KIND_PROPERTY]: todo.entry_kind,
+      },
+    },
+  }
+}
+
+async function googleEventsRequest(
+  method: 'POST' | 'PATCH' | 'DELETE',
+  accessToken: string,
+  calendarId: string,
+  path: string,
+  body?: GoogleEventBody,
+): Promise<{ id: string; updated?: string } | null> {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${
+    encodeURIComponent(calendarId)
+  }/events${path}`
+  const response = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (response.status === 401 || response.status === 403) {
+    const insufficientScope = new Error(
+      `google events ${method} failed: ${response.status} ${await response.text()}`,
+    )
+    ;(insufficientScope as Error & { code: string }).code = 'INSUFFICIENT_SCOPE_OR_AUTH'
+    throw insufficientScope
+  }
+  if (method === 'POST' && response.status === 409) {
+    // Google's response when a client-supplied event id (see
+    // deterministicGoogleEventId above) already exists on this calendar --
+    // exactly the signal createGoogleEvent's retry-recovery path needs.
+    const alreadyExists = new Error(
+      `google events.insert failed: 409 ${await response.text()}`,
+    )
+    ;(alreadyExists as Error & { code: string }).code = 'ALREADY_EXISTS'
+    throw alreadyExists
+  }
+  if (method === 'DELETE') {
+    // Google returns 410 for an already-deleted event -- treat as success,
+    // the desired end state (no event) already holds.
+    if (!response.ok && response.status !== 410 && response.status !== 404) {
+      throw new Error(`google events.delete failed: ${response.status} ${await response.text()}`)
+    }
+    return null
+  }
+  if (!response.ok) {
+    throw new Error(`google events ${method} failed: ${response.status} ${await response.text()}`)
+  }
+  return await response.json()
+}
+
+export async function createGoogleEvent(
+  accessToken: string,
+  calendarId: string,
+  todo: PushableTodo,
+): Promise<{ id: string; updated?: string }> {
+  const body = toGoogleEventBody(todo)
+  let result: { id: string; updated?: string } | null
+  try {
+    result = await googleEventsRequest('POST', accessToken, calendarId, '', body)
+  } catch (error) {
+    if ((error as Error & { code?: string }).code === 'ALREADY_EXISTS') {
+      // A prior attempt already created this event on Google's side (this
+      // call is retrying after that attempt's own follow-up DB write
+      // failed) -- the deterministic id IS the existing event, no need to
+      // fetch it separately. Recovering here is what makes a create retry
+      // safe to call at all: it can never produce a second event.
+      return { id: body.id }
+    }
+    throw error
+  }
+  if (!result) throw new Error('google events.insert returned no body')
+  return result
+}
+
+export async function updateGoogleEvent(
+  accessToken: string,
+  calendarId: string,
+  googleEventId: string,
+  todo: PushableTodo,
+): Promise<{ id: string; updated?: string }> {
+  const result = await googleEventsRequest(
+    'PATCH',
+    accessToken,
+    calendarId,
+    `/${encodeURIComponent(googleEventId)}`,
+    toGoogleEventBody(todo),
+  )
+  if (!result) throw new Error('google events.patch returned no body')
+  return result
+}
+
+export async function deleteGoogleEvent(
+  accessToken: string,
+  calendarId: string,
+  googleEventId: string,
+): Promise<void> {
+  await googleEventsRequest(
+    'DELETE',
+    accessToken,
+    calendarId,
+    `/${encodeURIComponent(googleEventId)}`,
+  )
 }
 
 export type MirrorEventRow = {
   connection_id: string
+  synced_calendar_id: string | null
   user_id: string
   google_event_id: string
   title: string
@@ -183,20 +502,58 @@ export type MirrorEventRow = {
   start_at: string
   end_at: string
   location_name: string | null
+  note: string | null
   google_updated_at: string
+}
+
+const HTML_ENTITIES: Record<string, string> = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&#39;': "'",
+  '&apos;': "'",
+  '&nbsp;': ' ',
+}
+
+/** Google Calendar event descriptions are HTML when authored in Calendar's
+ * own rich-text editor (bold/links/lists), plain text otherwise -- there's
+ * no field telling us which. Converts either into plain text for Memdo's
+ * memo field, which doesn't render HTML: block-level tags become newlines,
+ * every other tag is dropped (keeping its text content), and the handful of
+ * entities Calendar actually emits are decoded. Not a general HTML sanitizer
+ * -- scoped to what this one source produces. */
+export function plainTextFromGoogleDescription(html: string): string {
+  const withBreaks = html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+  const decoded = withBreaks.replace(
+    /&amp;|&lt;|&gt;|&quot;|&#39;|&apos;|&nbsp;/g,
+    (entity) => HTML_ENTITIES[entity] ?? entity,
+  )
+  return decoded
+    .split('\n')
+    .map((line) => line.trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 export function mapGoogleEventToMirrorRow(
   event: GoogleEvent,
   connectionId: string,
   userId: string,
+  syncedCalendarId: string | null = null,
 ): MirrorEventRow | null {
   if (!event.start || !event.end || !event.updated) return null
   const isAllDay = Boolean(event.start.date)
   const startAt = event.start.dateTime ?? `${event.start.date}T00:00:00Z`
   const endAt = event.end.dateTime ?? `${event.end.date}T00:00:00Z`
+  const note = event.description ? plainTextFromGoogleDescription(event.description) : null
   return {
     connection_id: connectionId,
+    synced_calendar_id: syncedCalendarId,
     user_id: userId,
     google_event_id: event.id,
     title: event.summary?.trim() || '(제목 없음)',
@@ -204,6 +561,7 @@ export function mapGoogleEventToMirrorRow(
     start_at: startAt,
     end_at: endAt,
     location_name: event.location ?? null,
+    note: note || null,
     google_updated_at: event.updated,
   }
 }
@@ -212,6 +570,41 @@ export type EventsPage = {
   events: GoogleEvent[]
   nextPageToken?: string
   nextSyncToken?: string
+}
+
+export type GoogleCalendarListEntry = {
+  id: string
+  summary: string
+  primary: boolean
+}
+
+/** Lists every calendar on the user's Google account (their own secondary
+ * calendars, subscribed public calendars like "대한민국의 휴일", shared
+ * calendars, ...) -- the picker source for adding an additional synced
+ * calendar. https://developers.google.com/workspace/calendar/api/v3/reference/calendarList/list */
+export async function fetchAvailableGoogleCalendars(
+  accessToken: string,
+): Promise<GoogleCalendarListEntry[]> {
+  const response = await fetch(
+    'https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250',
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  )
+  if (!response.ok) {
+    throw new Error(
+      `google calendarList.list failed: ${response.status} ${await response.text()}`,
+    )
+  }
+  const body = await response.json()
+  return ((body.items ?? []) as Array<Record<string, unknown>>).map((item) => ({
+    id: item.id as string,
+    // summaryOverride is the user's own renamed label for a subscribed
+    // calendar (e.g. renaming "Holidays in South Korea" to "휴일") --
+    // Calendar's own UI shows that in preference to the calendar's original
+    // summary whenever the user has set one.
+    summary: (item.summaryOverride as string | undefined) ?? (item.summary as string) ??
+      item.id as string,
+    primary: item.primary === true,
+  }))
 }
 
 export async function fetchEventsPage(
@@ -245,5 +638,544 @@ export async function fetchEventsPage(
     events: body.items ?? [],
     nextPageToken: body.nextPageToken,
     nextSyncToken: body.nextSyncToken,
+  }
+}
+
+/** Called from every todos write-commit point (create/update/delete). Always
+ * enqueues first (cheap, and the fallback path if the inline attempt below
+ * fails), then makes one best-effort, fail-open, synchronous attempt to push
+ * immediately -- same "never let a side effect block the primary write"
+ * pattern this codebase already uses for Apple token revocation on account
+ * deletion. Never throws; the caller's own write already succeeded and must
+ * not be undone by a Google-side hiccup. The google-calendar-push cron is
+ * the fallback for anything this inline attempt doesn't manage to deliver. */
+export type GoogleCalendarSyncConnection = {
+  id: string
+  user_id: string
+  google_calendar_id: string
+  refresh_token_secret_id: string
+  sync_token: string | null
+}
+
+const MAX_PAGES_PER_CONNECTION = 20
+
+/** Pulls one connection's events from Google into the mirror table (and
+ * applies last-write-wins updates to any already-materialized todos rows).
+ * Shared by google-calendar-sync (the 15-min batch cron, scans every stale
+ * connection) and google-calendar-webhook (a real-time push notification
+ * for exactly one connection) -- both need the identical sync logic, only
+ * how they discover *which* connection to sync differs. */
+export async function syncConnection(
+  supabase: SupabaseClient,
+  connection: GoogleCalendarSyncConnection,
+): Promise<void> {
+  const refreshToken = await readRefreshTokenSecret(supabase, connection.refresh_token_secret_id)
+  if (!refreshToken) throw new Error('missing refresh token secret')
+
+  let tokens
+  try {
+    tokens = await refreshAccessToken(refreshToken)
+  } catch (error) {
+    const message = serializeError(error)
+    const revoked = message.includes('invalid_grant')
+    await supabase.from('google_calendar_connections').update({
+      status: revoked ? 'revoked' : 'error',
+      last_error: message.slice(0, 500),
+    }).eq('id', connection.id)
+    if (revoked) {
+      // A revoked token means the user has to fully reconnect -- this
+      // connection's mirror rows are dead for good, not transiently stale
+      // the way an 'error' status might be. GET /calendars already never
+      // shows a non-active connection's synthetic entry, so leaving these
+      // rows around just means /todos keeps returning items whose
+      // calendarId can never resolve on the client (found live: this
+      // bricked list loading for every item, not just the Google-origin
+      // ones -- see todo-list-contract.ts's matching !inner/status filter).
+      await supabase.from('google_calendar_mirror_events').delete().eq(
+        'connection_id',
+        connection.id,
+      )
+    }
+    return
+  }
+
+  await pullCalendarIntoMirror(supabase, {
+    accessToken: tokens.access_token,
+    userId: connection.user_id,
+    googleCalendarId: connection.google_calendar_id,
+    syncToken: connection.sync_token,
+    connectionId: connection.id,
+    syncedCalendarId: null,
+  })
+
+  // Additional calendars (holiday calendars, a secondary personal calendar,
+  // etc.) the user opted into via google_calendar_synced_calendars --
+  // pull-only, each with its own independent sync_token so one calendar's
+  // incremental sync never affects another's. Most connections have none of
+  // these, so this is a no-op for the common case.
+  const { data: extraCalendars, error: extraCalendarsError } = await supabase
+    .from('google_calendar_synced_calendars')
+    .select('id,google_calendar_id,sync_token')
+    .eq('connection_id', connection.id)
+  if (extraCalendarsError) throw extraCalendarsError
+  for (const extra of extraCalendars ?? []) {
+    try {
+      await pullCalendarIntoMirror(supabase, {
+        accessToken: tokens.access_token,
+        userId: connection.user_id,
+        googleCalendarId: extra.google_calendar_id as string,
+        syncToken: extra.sync_token as string | null,
+        connectionId: connection.id,
+        syncedCalendarId: extra.id as string,
+      })
+    } catch (error) {
+      // One additional calendar failing (revoked access, calendar deleted
+      // upstream, ...) must never take down the primary calendar's sync or
+      // any other additional calendar's -- isolated per-row, same fail-open
+      // shape as every other best-effort side effect in this file.
+      await supabase.from('google_calendar_synced_calendars').update({
+        last_error: serializeError(error).slice(0, 500),
+      }).eq('id', extra.id as string)
+    }
+  }
+}
+
+/** The actual per-calendar pull+upsert+cancel loop, extracted so both the
+ * connection's primary calendar and any additional google_calendar_synced_
+ * calendars rows can share it -- identical logic either way, only which
+ * calendarId/syncToken to read and which mirror-table key/target row to
+ * write back to differ. syncedCalendarId null means "this is the
+ * connection's own primary calendar" (writes back to
+ * google_calendar_connections, keeps the pre-existing (connection_id,
+ * google_event_id) mirror conflict target); non-null means "this is one of
+ * the additional calendars" (writes back to google_calendar_synced_
+ * calendars, uses the (synced_calendar_id, google_event_id) partial unique
+ * index instead, since several additional calendars could otherwise collide
+ * on connection_id alone). */
+async function pullCalendarIntoMirror(
+  supabase: SupabaseClient,
+  params: {
+    accessToken: string
+    userId: string
+    googleCalendarId: string
+    syncToken: string | null
+    connectionId: string
+    syncedCalendarId: string | null
+  },
+): Promise<void> {
+  const { accessToken, userId, googleCalendarId, connectionId, syncedCalendarId } = params
+  let syncToken = params.syncToken
+  let pageToken: string | undefined
+  let nextSyncToken: string | undefined
+  let pages = 0
+
+  const runPage = async () => {
+    try {
+      return await fetchEventsPage(accessToken, googleCalendarId, {
+        syncToken: syncToken ?? undefined,
+        pageToken,
+        timeMin: syncToken
+          ? undefined
+          : new Date(Date.now() - MIRROR_SYNC_WINDOW_PAST_DAYS * 86400000).toISOString(),
+        timeMax: syncToken
+          ? undefined
+          : new Date(Date.now() + MIRROR_SYNC_WINDOW_FUTURE_DAYS * 86400000).toISOString(),
+      })
+    } catch (error) {
+      if ((error as Error & { code?: string }).code === 'SYNC_TOKEN_GONE') {
+        syncToken = null
+        pageToken = undefined
+        return await fetchEventsPage(accessToken, googleCalendarId, {
+          timeMin: new Date(Date.now() - MIRROR_SYNC_WINDOW_PAST_DAYS * 86400000).toISOString(),
+          timeMax: new Date(Date.now() + MIRROR_SYNC_WINDOW_FUTURE_DAYS * 86400000).toISOString(),
+        })
+      }
+      throw error
+    }
+  }
+
+  while (pages < MAX_PAGES_PER_CONNECTION) {
+    pages += 1
+    const page = await runPage()
+
+    const cancelledIds: string[] = []
+    // Events not authored by Memdo itself (a genuine external Google event,
+    // or one nobody has ever edited in Memdo) -- candidates for the mirror
+    // table, unless already materialized (see below).
+    const externalEvents: typeof page.events = []
+    for (const event of page.events) {
+      if (event.status === 'cancelled') {
+        cancelledIds.push(event.id)
+        continue
+      }
+      // Skip events Memdo pushed itself -- re-mirroring these would create a
+      // duplicate representation of the same item every sync cycle. This
+      // app's own todos row is already the source of truth for them.
+      if (isMemdoAuthoredEvent(event)) continue
+      externalEvents.push(event)
+    }
+
+    // Split externalEvents into "already materialized into a real todos
+    // row" (a previously-mirrored event the user has since edited/deleted
+    // in Memdo) vs "still only ever a mirror row" -- the two need different
+    // targets and a different conflict rule.
+    const materializedByEventId = new Map<
+      string,
+      { id: string; version: number; google_synced_at: string | null }
+    >()
+    if (externalEvents.length > 0) {
+      const { data: materialized, error: materializedError } = await supabase
+        .from('todos')
+        .select('id,google_event_id,version,google_synced_at')
+        .eq('user_id', userId)
+        .in('google_event_id', externalEvents.map((event) => event.id))
+        .is('deleted_at', null)
+      if (materializedError) throw materializedError
+      for (const row of materialized ?? []) {
+        materializedByEventId.set(row.google_event_id as string, {
+          id: row.id as string,
+          version: row.version as number,
+          google_synced_at: row.google_synced_at as string | null,
+        })
+      }
+    }
+
+    const toUpsertMirror = []
+    // Each materialized-event overwrite below targets a distinct todos row
+    // with its own optimistic-lock version -- nothing depends on another
+    // iteration's result, so collect the promises and await them together
+    // instead of one `await` per event inside the loop (up to 20 pages of
+    // events per calendar per connection, per sync run). This also means a
+    // version conflict on one row no longer blocks every later row's
+    // legitimate update from even being attempted in the same pass.
+    const overwritePromises: PromiseLike<{ error: unknown }>[] = []
+    for (const event of externalEvents) {
+      const materialized = materializedByEventId.get(event.id)
+      if (!materialized) {
+        const row = mapGoogleEventToMirrorRow(event, connectionId, userId, syncedCalendarId)
+        if (row) toUpsertMirror.push(row)
+        continue
+      }
+      // Last-write-wins, compared at apply time: only overwrite the
+      // materialized todos row if Google's own change is newer than the
+      // last time this row was synced. A genuinely simultaneous edit on
+      // both sides within one sync interval can still silently lose one
+      // side's change -- an accepted tradeoff, not a full merge.
+      const googleUpdatedAt = event.updated ? new Date(event.updated).getTime() : 0
+      const lastSyncedAt = materialized.google_synced_at
+        ? new Date(materialized.google_synced_at).getTime()
+        : 0
+      if (googleUpdatedAt <= lastSyncedAt) continue
+      const mirrorRow = mapGoogleEventToMirrorRow(event, connectionId, userId, syncedCalendarId)
+      if (!mirrorRow) continue
+      // Bump version too, not just the content -- this is a real change to
+      // the row (Google's edit overwriting Memdo's copy), and a client
+      // still holding the pre-overwrite version must see a VERSION_CONFLICT
+      // on its next PATCH rather than silently clobbering this update, the
+      // same guarantee every other write path on this table provides.
+      overwritePromises.push(
+        supabase
+          .from('todos')
+          .update({
+            title: mirrorRow.title,
+            is_all_day: mirrorRow.is_all_day,
+            start_at: mirrorRow.start_at,
+            end_at: mirrorRow.end_at,
+            scheduled_date: mirrorRow.start_at.slice(0, 10),
+            location_name: mirrorRow.location_name,
+            note: mirrorRow.note,
+            google_synced_at: new Date().toISOString(),
+            version: materialized.version + 1,
+          })
+          .eq('id', materialized.id)
+          .eq('version', materialized.version),
+      )
+    }
+    if (overwritePromises.length > 0) {
+      const overwriteResults = await Promise.all(overwritePromises)
+      const firstError = overwriteResults.find((result) => result.error)?.error
+      if (firstError) throw firstError
+    }
+
+    if (toUpsertMirror.length > 0) {
+      const upserted = await supabase
+        .from('google_calendar_mirror_events')
+        .upsert(
+          toUpsertMirror,
+          syncedCalendarId
+            ? { onConflict: 'synced_calendar_id,google_event_id' }
+            : { onConflict: 'connection_id,google_event_id' },
+        )
+      if (upserted.error) throw upserted.error
+    }
+    if (cancelledIds.length > 0) {
+      const deleteQuery = supabase
+        .from('google_calendar_mirror_events')
+        .delete()
+        .in('google_event_id', cancelledIds)
+      const deleted = await (syncedCalendarId
+        ? deleteQuery.eq('synced_calendar_id', syncedCalendarId)
+        : deleteQuery.eq('connection_id', connectionId).is('synced_calendar_id', null))
+      if (deleted.error) {
+        throw deleted.error
+      }
+
+      // A cancelled event that had been materialized into a real todos row
+      // (the user edited it in Memdo at some point) must be soft-deleted
+      // there too, not just pruned from the mirror table.
+      const { error: cancelMaterializedError } = await supabase
+        .from('todos')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('user_id', userId)
+        .in('google_event_id', cancelledIds)
+        .is('deleted_at', null)
+      if (cancelMaterializedError) {
+        throw cancelMaterializedError
+      }
+    }
+
+    if (page.nextSyncToken) nextSyncToken = page.nextSyncToken
+    if (!page.nextPageToken) break
+    pageToken = page.nextPageToken
+  }
+
+  const finalSyncToken = nextSyncToken ?? syncToken
+  if (syncedCalendarId) {
+    await supabase.from('google_calendar_synced_calendars').update({
+      sync_token: finalSyncToken,
+      last_error: null,
+      last_synced_at: new Date().toISOString(),
+    }).eq('id', syncedCalendarId)
+  } else {
+    await supabase.from('google_calendar_connections').update({
+      sync_token: finalSyncToken,
+      status: 'active',
+      last_error: null,
+      last_synced_at: new Date().toISOString(),
+    }).eq('id', connectionId)
+  }
+}
+
+const GOOGLE_CHANNELS_STOP_URL = 'https://www.googleapis.com/calendar/v3/channels/stop'
+export const WATCH_CHANNEL_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days, renewed daily well before expiry
+
+export type WatchChannel = {
+  channelId: string
+  resourceId: string
+  expiration: string
+  token: string
+}
+
+/** Registers a Google Calendar push-notification channel for one calendar.
+ * Google POSTs to `address` on every change (no event data in the body --
+ * the handler always re-runs syncConnection using the stored sync token,
+ * same as the pull cron does). https://developers.google.com/workspace/calendar/api/guides/push */
+export async function watchCalendar(
+  accessToken: string,
+  calendarId: string,
+  address: string,
+): Promise<WatchChannel> {
+  const channelId = crypto.randomUUID()
+  const token = crypto.randomUUID()
+  const expiration = Date.now() + WATCH_CHANNEL_TTL_MS
+  const response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${
+      encodeURIComponent(calendarId)
+    }/events/watch`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: channelId,
+        type: 'web_hook',
+        address,
+        token,
+        expiration: String(expiration),
+      }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(`google events.watch failed: ${response.status} ${await response.text()}`)
+  }
+  const body = await response.json()
+  return {
+    channelId,
+    resourceId: body.resourceId as string,
+    expiration: new Date(Number(body.expiration ?? expiration)).toISOString(),
+    token,
+  }
+}
+
+export async function stopWatchChannel(
+  accessToken: string,
+  channelId: string,
+  resourceId: string,
+): Promise<void> {
+  await fetch(GOOGLE_CHANNELS_STOP_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: channelId, resourceId }),
+    // Best-effort -- an already-expired/unknown channel 404s, which is fine
+    // (the desired end state, "this channel is gone," already holds).
+  }).catch(() => undefined)
+}
+
+type GoogleCalendarConnectionForPush = {
+  id: string
+  google_calendar_id: string
+  refresh_token_secret_id: string
+}
+
+/// The durable half of a push: looks up the user's active connection and
+/// inserts into `google_calendar_push_queue` via the ownership-checked RPC.
+/// Callers must `await` this before responding to the client -- it's the
+/// step that makes the write durable (the 1-minute google-calendar-push cron
+/// will pick up the queued row even if nothing else ever runs). Returns the
+/// connection row so the caller can hand it to `pushGoogleEventInline`
+/// without a second lookup, or `null` if there's no active connection (no
+/// push queued, nothing to attempt inline).
+export async function enqueueGooglePush(
+  supabase: SupabaseClient,
+  params: {
+    userId: string
+    todoId: string
+    operation: 'create' | 'update' | 'delete'
+    googleEventId?: string | null
+  },
+): Promise<GoogleCalendarConnectionForPush | null> {
+  const { data: connection } = await supabase
+    .from('google_calendar_connections')
+    .select('id,google_calendar_id,refresh_token_secret_id,status')
+    .eq('user_id', params.userId)
+    .eq('status', 'active')
+    .maybeSingle()
+  if (!connection) return null
+
+  const enqueued = await supabase.rpc('enqueue_google_push', {
+    p_todo_id: params.todoId,
+    p_user_id: params.userId,
+    p_connection_id: connection.id,
+    p_operation: params.operation,
+    p_google_event_id: params.googleEventId ?? null,
+  })
+  if (enqueued.error) throw enqueued.error
+
+  return connection
+}
+
+/// The best-effort half of a push: the actual Vault read, Google OAuth
+/// refresh, and Google Calendar API call. Callers must hand this to
+/// `EdgeRuntime.waitUntil(...)` rather than `await` it directly -- Google's
+/// API latency (worse under rate limiting) has no place in a client-facing
+/// todos response's critical path. `enqueueGooglePush` has already made the
+/// write durable by the time this runs, so if the Edge Function instance is
+/// recycled before this finishes, or it throws, the still-queued row is
+/// simply picked up by the 1-minute google-calendar-push cron -- this is
+/// purely a latency optimization layered on top of that guarantee, matching
+/// the "즉시 반영 시도" (best-effort instant push) it was always meant to be,
+/// not a second source of truth for whether the push happened.
+///
+/// Everything here is privileged work (reading the Vault-stored refresh
+/// token, writing todos.google_event_id, clearing the push queue) -- the
+/// RLS-scoped, JWT-bound client callers otherwise use can't do any of it:
+/// vault_read_secret's EXECUTE is service_role-only, and
+/// google_calendar_push_queue has RLS enabled with zero policies for
+/// `authenticated` (a hard, silent, zero-rows-affected deny, not an error).
+/// service_role bypasses RLS entirely, so every query below still carries an
+/// explicit .eq('user_id', params.userId)/.eq('id', connection.id) as
+/// defense-in-depth, matching this codebase's established
+/// service-client-replacing-a-missing-RLS-check convention (see
+/// calendars/index.ts's PATCH fallback).
+export async function pushGoogleEventInline(
+  connection: GoogleCalendarConnectionForPush,
+  params: {
+    userId: string
+    todoId: string
+    operation: 'create' | 'update' | 'delete'
+    todo?: PushableTodo
+    googleEventId?: string | null
+  },
+): Promise<void> {
+  try {
+    const service = serviceClient()
+
+    const refreshToken = await readRefreshTokenSecret(service, connection.refresh_token_secret_id)
+    if (!refreshToken) return
+    const tokens = await refreshAccessToken(refreshToken)
+
+    if (params.operation === 'create' && params.todo) {
+      const result = await createGoogleEvent(
+        tokens.access_token,
+        connection.google_calendar_id,
+        params.todo,
+      )
+      const updated = await service.from('todos').update({
+        google_event_id: result.id,
+        google_synced_at: new Date().toISOString(),
+      }).eq('id', params.todoId).eq('user_id', params.userId).select('id').maybeSingle()
+      if (updated.error) throw updated.error
+      if (!updated.data) {
+        throw new Error(
+          `pushGoogleEventInline: todos.update matched no row for todo ${params.todoId} ` +
+            `after creating google event ${result.id} -- left queued for the cron to recover it`,
+        )
+      }
+    } else if (params.operation === 'update' && params.todo && params.googleEventId) {
+      await updateGoogleEvent(
+        tokens.access_token,
+        connection.google_calendar_id,
+        params.googleEventId,
+        params.todo,
+      )
+      const updated = await service.from('todos').update({
+        google_synced_at: new Date().toISOString(),
+      }).eq('id', params.todoId).eq('user_id', params.userId).select('id').maybeSingle()
+      if (updated.error) throw updated.error
+      if (!updated.data) {
+        throw new Error(
+          `pushGoogleEventInline: todos.update matched no row for todo ${params.todoId} ` +
+            `after updating google event ${params.googleEventId}`,
+        )
+      }
+    } else if (params.operation === 'delete' && params.googleEventId) {
+      await deleteGoogleEvent(
+        tokens.access_token,
+        connection.google_calendar_id,
+        params.googleEventId,
+      )
+    } else {
+      return
+    }
+
+    const dequeued = await service
+      .from('google_calendar_push_queue')
+      .delete()
+      .eq('todo_id', params.todoId)
+      .eq('user_id', params.userId)
+      .select('id')
+    if (dequeued.error) throw dequeued.error
+    // A zero-row delete here isn't itself fatal (create's own case above
+    // already throws if the todos write didn't land, and update/delete
+    // with nothing queued is a legitimate no-op -- e.g. the push already
+    // completed via the cron in a race with this inline attempt) -- just
+    // don't pretend it definitely happened when it might not have.
+    if (dequeued.data.length === 0) {
+      console.error(
+        JSON.stringify({
+          operation: 'google_calendar.push.inline.queue_delete_no_match',
+          todoId: params.todoId,
+        }),
+      )
+    }
+  } catch (error) {
+    // Leave it queued (enqueue_google_push already ran above) -- the
+    // google-calendar-push cron retries on its own 1-minute tick.
+    console.error(
+      JSON.stringify({
+        operation: 'google_calendar.push.inline',
+        todoId: params.todoId,
+        error: serializeError(error),
+      }),
+    )
   }
 }

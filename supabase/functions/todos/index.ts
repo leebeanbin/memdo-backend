@@ -33,6 +33,35 @@ import {
   virtualOccurrencesInRange,
   virtualRangeForPage,
 } from '../_shared/todo-list-contract.ts'
+import {
+  enqueueGooglePush,
+  type PushableTodo,
+  pushGoogleEventInline,
+  serializeError,
+  serviceClient,
+} from '../_shared/google-calendar-contract.ts'
+
+// Supabase's Edge Function runtime (not vanilla Deno) exposes this global for
+// scheduling work that keeps running after the response is already sent --
+// see https://supabase.com/docs/guides/functions/background-tasks. No
+// published type declares it, so it's declared locally where it's used: a
+// Google Calendar push must never add Google's latency to this endpoint's
+// response time (see enqueueGooglePush/pushGoogleEventInline's doc comments).
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void }
+
+function pushableTodo(row: Record<string, unknown>): PushableTodo {
+  return {
+    id: row.id as string,
+    title: row.title as string,
+    entry_kind: row.entry_kind as string,
+    is_all_day: row.is_all_day as boolean,
+    scheduled_date: row.scheduled_date as string,
+    start_at: row.start_at as string | null,
+    end_at: row.end_at as string | null,
+    note: row.note as string | null,
+    location_name: row.location_name as string | null,
+  }
+}
 
 export default {
   fetch: withApi<any>(async (request, context, currentRequestId) => {
@@ -212,6 +241,13 @@ export default {
             pageBoundaryDate,
           })
           clampedTo = range.clampedTo
+          // virtualOccurrencesInRange reads schedule_rules/todos;
+          // googleMirrorEventsInRange reads google_calendar_mirror_events
+          // (joined with google_calendar_connections) -- disjoint tables,
+          // no data dependency between them, so run concurrently instead
+          // of paying both round trips' latency on essentially every
+          // normal calendar-view load. Same shape sync/index.ts already
+          // uses for its own independent-table fan-out.
           if (range.shouldFetch) {
             ;[virtualItems, googleItems] = await Promise.all([
               virtualOccurrencesInRange(context.supabase, range.virtualFrom, range.virtualTo),
@@ -389,14 +425,178 @@ export default {
           })
         }
 
-        const hash = await sha256(parsed.data)
+        // The client materializes a Google-mirrored item the same way it
+        // already materializes a virtual recurring occurrence: a plain
+        // create using the item's own (already-known, from the GET
+        // response) id as the Idempotency-Key. If that id names an existing
+        // mirror row, this create is a materialize -- link the new todos
+        // row to the same Google event and consume the mirror row, rather
+        // than treating it as a brand-new item that would get pushed to
+        // Google as a *second* event.
+        const mirrorRow = await context.supabase
+          .from('google_calendar_mirror_events')
+          .select('id,google_event_id')
+          .eq('id', idempotencyKey)
+          .eq('user_id', context.userClaims!.id)
+          .maybeSingle()
+        if (mirrorRow.error) throw mirrorRow.error
+        const materializedGoogleEventId = mirrorRow.data?.google_event_id as string | undefined
+
+        // No mirror row doesn't necessarily mean this was never a
+        // materialize -- an earlier, successful attempt at this exact
+        // idempotencyKey already deletes the mirror row on success (below).
+        // A retry arriving after that (a client double-tap, or a retry
+        // after the first response looked slow/failed) would otherwise fall
+        // through to inserting with the client's now-stale
+        // synthetic-Google-calendar id from parsed.data and hit
+        // todos_calendar_user_fkey instead of just replaying the
+        // already-created row -- found live: two such 23503s right after
+        // two successful materializes for the same items.
+        if (!materializedGoogleEventId) {
+          const alreadyMaterialized = await context.supabase
+            .from('todos')
+            .select(todoSelect)
+            .eq('id', idempotencyKey)
+            .maybeSingle()
+          if (alreadyMaterialized.error) throw alreadyMaterialized.error
+          if (alreadyMaterialized.data) {
+            const categories = await fetchCategoriesByIds(context.supabase, [
+              alreadyMaterialized.data.category_id as string | null,
+            ])
+            return success(
+              todoDto(
+                alreadyMaterialized.data,
+                categories.get(alreadyMaterialized.data.category_id as string) ?? null,
+              ),
+              201,
+              'todos.create',
+              1,
+            )
+          }
+        }
+
+        // The client's posted calendarId for a mirrored item is the
+        // GET /calendars response's *synthetic* Google entry
+        // (calendars/index.ts sets its id to the connection's own id, not a
+        // real user_calendars row -- there is no backing row for
+        // todos_calendar_user_fkey to find). Route a materialized item to
+        // the user's real personal calendar instead of trusting that id.
+        let insertInput = parsed.data
+        if (materializedGoogleEventId) {
+          // user_calendars has no deleted_at column (it's hard-deleted, not
+          // soft-deleted, unlike todos) -- an .is('deleted_at', null) filter
+          // here threw 42703 (undefined_column) on every single call,
+          // 500-ing this entire materialize path (found live: completing a
+          // not-yet-materialized Google-mirrored item via swipe/checkbox
+          // always failed).
+          const personalCalendar = await context.supabase
+            .from('user_calendars')
+            .select('id')
+            .eq('user_id', context.userClaims!.id)
+            .eq('purpose', 'personal')
+            .maybeSingle()
+          if (personalCalendar.error) throw personalCalendar.error
+          if (!personalCalendar.data) {
+            return apiError(
+              'INTERNAL_ERROR',
+              '기본 캘린더를 찾을 수 없습니다.',
+              500,
+              currentRequestId,
+            )
+          }
+          insertInput = { ...parsed.data, calendarId: personalCalendar.data.id as string }
+        }
+
+        const hash = await sha256(insertInput)
         const { data, error } = await context.supabase
           .from('todos')
-          .insert(todoInsert(parsed.data, context.userClaims!.id, idempotencyKey, hash))
+          .insert(
+            todoInsert(
+              insertInput,
+              context.userClaims!.id,
+              idempotencyKey,
+              hash,
+              materializedGoogleEventId,
+            ),
+          )
           .select(todoSelect)
           .single()
 
         if (!error) {
+          if (materializedGoogleEventId) {
+            // google_calendar_mirror_events has only a SELECT policy for
+            // authenticated (owner-scoped read) -- no DELETE policy at all.
+            // Using context.supabase (the RLS-scoped client) here always
+            // silently deleted 0 rows: no error, no effect, every single
+            // materialize. The mirror row was never actually consumed, so
+            // /todos GET kept merging it back in alongside the now-real
+            // todos row with the same id -- a client-visible duplicate id
+            // that crashes SwiftUI's ForEach/Dictionary(uniqueKeysWithValues:)
+            // (found live). service_role bypasses RLS; the explicit
+            // .eq('id', idempotencyKey) is the only scope this delete needs
+            // since idempotencyKey is already validated against this exact
+            // user's mirror row by the mirrorRow lookup above.
+            //
+            // Best-effort, like the enqueueGooglePush call below -- the
+            // todos row insert above already committed, so a failure here
+            // must not turn that already-successful create into a generic
+            // 500. Worst case on failure: the mirror row lingers and /todos
+            // GET merges it back in alongside the real row -- the exact
+            // "duplicate mirror row" symptom this delete exists to prevent,
+            // not a corrupted client view of whether the create happened.
+            try {
+              const deletedMirror = await serviceClient()
+                .from('google_calendar_mirror_events')
+                .delete()
+                .eq('id', idempotencyKey)
+              if (deletedMirror.error) throw deletedMirror.error
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'todos.create.delete_mirror_row',
+                  todoId: data.id,
+                  error: serializeError(error),
+                }),
+              )
+            }
+          } else {
+            // A genuinely new Memdo-origin item -- push it to Google.
+            // Materialized items skip this: their data came *from* Google
+            // moments ago, nothing has changed yet to push back.
+            //
+            // Best-effort, like every other side effect in this file --
+            // never let it fail the response for a write that already
+            // committed. Found live: enqueue_google_push's ownership check
+            // (WHERE ... AND deleted_at IS NULL) can lose a race against a
+            // concurrent request for the same item (e.g. two overlapping
+            // materialize-then-delete attempts for the same not-yet-touched
+            // Google item) and throw "todo not found for this user" --
+            // which, unguarded, turned an already-successful create into a
+            // generic 500 the client had no way to distinguish from a real
+            // failure, corrupting its view of whether the write happened.
+            try {
+              const pushParams = {
+                userId: context.userClaims!.id,
+                todoId: data.id as string,
+                operation: 'create' as const,
+                todo: pushableTodo(data),
+              }
+              const connection = await enqueueGooglePush(context.supabase, pushParams)
+              if (connection) {
+                EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+              }
+            } catch (error) {
+              console.error(
+                JSON.stringify({
+                  requestId: currentRequestId,
+                  operation: 'todos.create.enqueue_google_push',
+                  todoId: data.id,
+                  error: serializeError(error),
+                }),
+              )
+            }
+          }
           const categories = await fetchCategoriesByIds(context.supabase, [
             data.category_id as string | null,
           ])
@@ -448,9 +648,14 @@ export default {
         // different situation this used to misreport as "same request key
         // used for a different item" (it looks up idempotencyKey as an id,
         // finds nothing, and returns that message regardless) (be8).
+        // bd9: this is a duplicate/already-exists situation, not an
+        // optimistic-lock staleness situation -- VERSION_CONFLICT implies
+        // "you had a stale copy," which isn't what happened here (a real
+        // row already exists for that rule+date regardless of what the
+        // client sent). Message unchanged so no iOS change is required.
         if (error.message?.includes('todos_rule_occurrence_uidx')) {
           return apiError(
-            'VERSION_CONFLICT',
+            'OCCURRENCE_ALREADY_EXISTS',
             '이미 해당 날짜에 반복 일정이 있어요.',
             409,
             currentRequestId,
@@ -532,6 +737,34 @@ export default {
           )
         }
 
+        if (data.google_event_id) {
+          // Best-effort, same as the create path above: the update itself
+          // already committed, so a push-enqueue failure must never turn
+          // into an error response for a write the user already got.
+          try {
+            const pushParams = {
+              userId: context.userClaims!.id,
+              todoId: data.id as string,
+              operation: 'update' as const,
+              todo: pushableTodo(data),
+              googleEventId: data.google_event_id as string,
+            }
+            const connection = await enqueueGooglePush(context.supabase, pushParams)
+            if (connection) {
+              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            }
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                requestId: currentRequestId,
+                operation: 'todos.update.enqueue_google_push',
+                todoId: data.id,
+                error: serializeError(error),
+              }),
+            )
+          }
+        }
+
         // task-mode recurring rules keep exactly one materialized occurrence at a
         // time; completing it advances the series by materializing the next one.
         // Best-effort: the completion itself already succeeded, so a failure here
@@ -611,7 +844,7 @@ export default {
           .eq('id', itemId)
           .eq('version', parsed.data.version)
           .is('deleted_at', null)
-          .select('id')
+          .select('id,google_event_id')
           .maybeSingle()
         if (error) throw error
         if (!data) {
@@ -621,6 +854,33 @@ export default {
             409,
             currentRequestId,
           )
+        }
+        if (data.google_event_id) {
+          // Best-effort, same as create/update above -- the delete itself
+          // already committed (soft-deleted, just above), so a
+          // push-enqueue failure must never turn into an error response for
+          // a delete the user already got.
+          try {
+            const pushParams = {
+              userId: context.userClaims!.id,
+              todoId: data.id as string,
+              operation: 'delete' as const,
+              googleEventId: data.google_event_id as string,
+            }
+            const connection = await enqueueGooglePush(context.supabase, pushParams)
+            if (connection) {
+              EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+            }
+          } catch (error) {
+            console.error(
+              JSON.stringify({
+                requestId: currentRequestId,
+                operation: 'todos.delete.enqueue_google_push',
+                todoId: data.id,
+                error: serializeError(error),
+              }),
+            )
+          }
         }
         return success({ id: data.id }, 200, 'todos.delete', 1)
       }

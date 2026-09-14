@@ -4,6 +4,7 @@ import {
   chatRequestSchema,
   cloudAgentTools,
   dispatchToolCall,
+  isOpenRouterRateLimited,
   MAX_TOOL_ITERATIONS,
   newToolDispatchState,
   OPENROUTER_CHAT_URL,
@@ -56,7 +57,16 @@ async function callOpenRouterStreamed(
     body: JSON.stringify({ model, messages, tools: cloudAgentTools, stream: true }),
   })
   if (!response.ok || !response.body) {
-    throw new Error(`openrouter ${response.status}: ${await response.text().catch(() => '')}`)
+    const bodyText = await response.text().catch(() => '')
+    const upstreamError = new Error(`openrouter ${response.status}: ${bodyText}`)
+    // Structured .status, not just embedded in the message -- the
+    // mid-stream catch block below checks this directly (falling back to a
+    // string match only if it's absent) rather than regex-parsing the
+    // message, same .code-on-a-thrown-Error convention already used
+    // elsewhere in this codebase (INSUFFICIENT_SCOPE_OR_AUTH in
+    // google-calendar-contract.ts).
+    Object.assign(upstreamError, { status: response.status })
+    throw upstreamError
   }
 
   const acc = newStreamAccumulator()
@@ -421,8 +431,21 @@ export default {
           )
           // bd24: same envelope every other error response in this API
           // uses, instead of a bare {error: string} unique to this one
-          // mid-stream path.
-          send(errorEnvelope('INTERNAL_ERROR', 'Agent 응답을 받지 못했습니다.', currentRequestId))
+          // mid-stream path. RATE_LIMITED specifically for an OpenRouter
+          // 429 (confirmed a real, repeated live condition on the shared
+          // model pool) -- the client shows different, retry-shortly copy
+          // for this one instead of the generic failure message.
+          if (isOpenRouterRateLimited(error)) {
+            send(
+              errorEnvelope(
+                'RATE_LIMITED',
+                '지금 AI 응답 요청이 많이 몰려 있어요. 잠시 후 다시 시도해 주세요.',
+                currentRequestId,
+              ),
+            )
+          } else {
+            send(errorEnvelope('INTERNAL_ERROR', 'Agent 응답을 받지 못했습니다.', currentRequestId))
+          }
           await close('error')
         }
       },

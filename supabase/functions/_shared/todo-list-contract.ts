@@ -231,45 +231,75 @@ export async function googleMirrorEventsInRange(
   // +09:00 offset instead of implicit UTC, and scheduledDate is derived
   // from the KST-shifted instant (found via founder-dogfooding code
   // review, be7).
+  // !inner + the status filter below: calendarId (line ~144) resolves
+  // against GET /calendars, which only ever appends a synthetic entry for
+  // an active connection -- a revoked/disconnected-but-not-yet-cleaned-up
+  // connection's mirror rows would otherwise carry a calendarId the client
+  // can never resolve, and ScheduleRepository.load()/loadRange() throw on
+  // the very first unresolvable item, taking the entire list down (found
+  // live: a revoked connection's leftover mirror rows bricked load() for
+  // every item, not just the Google-origin ones).
   const { data, error } = await supabase
     .from('google_calendar_mirror_events')
-    .select('id,connection_id,title,is_all_day,start_at,end_at,location_name')
+    .select(
+      'id,connection_id,synced_calendar_id,title,is_all_day,start_at,end_at,location_name,note,' +
+        'google_calendar_connections!inner(color_token,status),google_calendar_synced_calendars(color_token)',
+    )
+    .eq('google_calendar_connections.status', 'active')
     .lt('start_at', `${to}T23:59:59.999+09:00`)
     .gt('end_at', `${from}T00:00:00.000+09:00`)
   if (error) throw error
 
-  return (data as Record<string, unknown>[]).map((row) => ({
-    id: row.id,
-    scheduledDate: kstDateString(row.start_at as string),
-    calendarId: row.connection_id,
-    title: row.title,
-    entryKind: 'event',
-    isAllDay: row.is_all_day,
-    note: null,
-    meetingUrl: null,
-    categoryId: null,
-    emoji: null,
-    color: null,
-    startAt: row.start_at,
-    endAt: row.end_at,
-    dueAt: null,
-    location: row.location_name ? { name: row.location_name } : null,
-    timeBucket: 'anytime',
-    estimatedMinutes: null,
-    reminderOffsetMinutes: null,
-    sortOrder: 0,
-    status: 'planned',
-    progress: 0,
-    source: 'google_calendar',
-    isRecurrenceException: false,
-    dailyPlanId: null,
-    scheduleRuleId: null,
-    isVirtual: false,
-    rescheduledFromId: null,
-    version: 0,
-    completedAt: null,
-    deletedAt: null,
-    createdAt: null,
-    updatedAt: null,
-  }))
+  return (data as Record<string, unknown>[]).map((row) => {
+    // The Calendar Management color picker persists per-calendar, not
+    // per-event -- the connection's own primary-calendar rows
+    // (synced_calendar_id null) via google_calendar_connections.color_token,
+    // an additional synced calendar's rows via its own
+    // google_calendar_synced_calendars.color_token, same as a real
+    // user_calendars-backed calendar's items share color via calendarId.
+    // calendarId mirrors that split too, so each additional calendar (e.g.
+    // a holiday calendar) resolves to its own synthetic Calendar Management
+    // entry instead of collapsing into the primary connection's.
+    const syncedCalendar = row.google_calendar_synced_calendars as
+      | { color_token?: string | null }
+      | null
+    const connection = row.google_calendar_connections as { color_token?: string | null } | null
+    const color = row.synced_calendar_id
+      ? syncedCalendar?.color_token ?? null
+      : connection?.color_token ?? null
+    return {
+      id: row.id,
+      scheduledDate: kstDateString(row.start_at as string),
+      calendarId: row.synced_calendar_id ?? row.connection_id,
+      title: row.title,
+      entryKind: 'event',
+      isAllDay: row.is_all_day,
+      note: row.note ?? null,
+      meetingUrl: null,
+      categoryId: null,
+      emoji: null,
+      color,
+      startAt: row.start_at,
+      endAt: row.end_at,
+      dueAt: null,
+      location: row.location_name ? { name: row.location_name } : null,
+      timeBucket: 'anytime',
+      estimatedMinutes: null,
+      reminderOffsetMinutes: null,
+      sortOrder: 0,
+      status: 'planned',
+      progress: 0,
+      source: 'google_calendar',
+      isRecurrenceException: false,
+      dailyPlanId: null,
+      scheduleRuleId: null,
+      isVirtual: false,
+      rescheduledFromId: null,
+      version: 0,
+      completedAt: null,
+      deletedAt: null,
+      createdAt: null,
+      updatedAt: null,
+    }
+  })
 }

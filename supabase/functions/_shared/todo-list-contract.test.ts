@@ -416,3 +416,116 @@ Deno.test('googleMirrorEventsInRange derives scheduledDate in KST, not raw UTC',
   assert(items.length === 1)
   assert(items[0].scheduledDate === '2026-08-16')
 })
+
+Deno.test('googleMirrorEventsInRange passes through a captured note, and defaults to null when absent', async () => {
+  const items = await googleMirrorEventsInRange(
+    fakeSupabase({
+      google_calendar_mirror_events: [
+        {
+          id: 'evt-with-note',
+          connection_id: 'conn-1',
+          title: '팀 스탠드업',
+          is_all_day: false,
+          start_at: '2026-08-16T09:00:00.000Z',
+          end_at: '2026-08-16T09:15:00.000Z',
+          location_name: null,
+          note: '어제 진행 상황 공유',
+        },
+        {
+          id: 'evt-without-note',
+          connection_id: 'conn-1',
+          title: '점심 약속',
+          is_all_day: false,
+          start_at: '2026-08-16T03:00:00.000Z',
+          end_at: '2026-08-16T04:00:00.000Z',
+          location_name: null,
+        },
+      ],
+    }),
+    '2026-08-16',
+    '2026-08-16',
+  )
+  const withNote = items.find((item) => item.id === 'evt-with-note')
+  const withoutNote = items.find((item) => item.id === 'evt-without-note')
+  assert(withNote?.note === '어제 진행 상황 공유')
+  assert(withoutNote?.note === null)
+})
+
+Deno.test("googleMirrorEventsInRange uses the connection color_token as every mirrored event's color, and defaults to null when unset", async () => {
+  const items = await googleMirrorEventsInRange(
+    fakeSupabase({
+      google_calendar_mirror_events: [
+        {
+          id: 'evt-colored',
+          connection_id: 'conn-1',
+          title: '팀 스탠드업',
+          is_all_day: false,
+          start_at: '2026-08-16T09:00:00.000Z',
+          end_at: '2026-08-16T09:15:00.000Z',
+          location_name: null,
+          google_calendar_connections: { color_token: 'sky' },
+        },
+        {
+          id: 'evt-uncolored',
+          connection_id: 'conn-2',
+          title: '점심 약속',
+          is_all_day: false,
+          start_at: '2026-08-16T03:00:00.000Z',
+          end_at: '2026-08-16T04:00:00.000Z',
+          location_name: null,
+          google_calendar_connections: { color_token: null },
+        },
+      ],
+    }),
+    '2026-08-16',
+    '2026-08-16',
+  )
+  const colored = items.find((item) => item.id === 'evt-colored')
+  const uncolored = items.find((item) => item.id === 'evt-uncolored')
+  assert(colored?.color === 'sky')
+  assert(uncolored?.color === null)
+})
+
+Deno.test('googleMirrorEventsInRange resolves calendarId/color from the additional synced calendar, not the connection, when synced_calendar_id is set', async () => {
+  // A holiday calendar (or any other additional calendar) shouldn't inherit
+  // the primary connection's color/calendarId -- each additional calendar
+  // is its own synthetic Calendar Management entry.
+  const items = await googleMirrorEventsInRange(
+    fakeSupabase({
+      google_calendar_mirror_events: [
+        {
+          id: 'evt-primary',
+          connection_id: 'conn-1',
+          synced_calendar_id: null,
+          title: '팀 스탠드업',
+          is_all_day: false,
+          start_at: '2026-08-16T09:00:00.000Z',
+          end_at: '2026-08-16T09:15:00.000Z',
+          location_name: null,
+          google_calendar_connections: { color_token: 'indigo' },
+          google_calendar_synced_calendars: null,
+        },
+        {
+          id: 'evt-holiday',
+          connection_id: 'conn-1',
+          synced_calendar_id: 'synced-1',
+          title: '개천절',
+          is_all_day: true,
+          start_at: '2026-08-16T00:00:00.000Z',
+          end_at: '2026-08-17T00:00:00.000Z',
+          location_name: null,
+          google_calendar_connections: { color_token: 'indigo' },
+          google_calendar_synced_calendars: { color_token: 'amber' },
+        },
+      ],
+    }),
+    '2026-08-16',
+    '2026-08-16',
+  )
+  const primary = items.find((item) => item.id === 'evt-primary')
+  const holiday = items.find((item) => item.id === 'evt-holiday')
+  assert(primary?.calendarId === 'conn-1')
+  assert(primary?.color === 'indigo')
+  assert(holiday?.calendarId === 'synced-1')
+  assert(holiday?.color === 'amber')
+})

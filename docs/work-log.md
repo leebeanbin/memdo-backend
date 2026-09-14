@@ -217,6 +217,58 @@
   도구가 없다(클라우드 전용). 루틴/알림 도구(`propose_routine_update`)와 실제 동의 집행, 알림
   `reconcile()`은 이 변경에 포함되지 않았다.
 
+## 2026-09-02 — Google Calendar 양방향 동기화
+
+- 목표: B8을 읽기 전용 mirror에서 push queue·materialize-on-edit·실시간 webhook pull로 확장해 iOS 쪽
+  일정 변경이 Google Calendar에도 반영되게 한다.
+- 변경 파일: `supabase/functions/_shared/google-calendar-contract.ts`,
+  `supabase/functions/google-calendar-push/`, `supabase/functions/google-calendar-webhook/`,
+  `supabase/functions/google-calendar-watch-renew/`,
+  `supabase/functions/google-calendar-synced-calendars/`, `enqueue_google_push` RPC와 push queue
+  테이블 migration, `agent-cloud-chat`의 `search_schedules`/`find_free_slots`/`get_day_context`가
+  Google 미러 이벤트를 함께 조회하도록 수정.
+- 결정과 이유: `todos` 쓰기 경로에 큐 enqueue를 끼워 넣고(materialize-on-edit) 별도 1분 주기 함수가
+  큐를 소진하는 구조를 택했다 — 동기 push로 만들면 Google API 지연이 사용자 쓰기 요청을 블록한다.
+  실시간 반영은 Google push notification webhook 구독(watch-renew로 만료 전 갱신)으로 처리하고,
+  공휴일 같은 추가 캘린더 구독을 별도 함수로 분리했다.
+- 실행한 검증과 결과: 신규 계약 테스트 통과, `deno check` 전체 함수 통과. 실기기에서 iOS 쪽 일정
+  생성·수정이 Google Calendar에 반영되는지, webhook pull이 Google 쪽 변경을 실시간으로 가져오는지
+  수동 검증.
+- 커밋: `eabcca7` (양방향 sync 본체), `8e834f3`·`37804bb`·`9d97787`(같은 날, Agent 쪽 Google 이벤트
+  병합·시간대·로그 수정), `68076ab`(추가 캘린더 구독).
+
+## 2026-09-07~09 — 보안/신뢰성 리뷰 + 배포 인프라 복구
+
+- 목표: 양방향 sync 도입 이후 코드 리뷰에서 나온 소유권·멱등성·에러 분류 문제를 고치고, 별도로
+  발견된 배포 파이프라인 중단과 마이그레이션 히스토리 불일치를 복구한다.
+- 변경 파일: `enqueue_google_push` RPC, `google-calendar-push/`(멱등 처리),
+  `google-calendar-status/`·`google-calendar-sync/`(연결 상태 분류), `agent-cloud-chat/`(rate limit
+  분류), `.github/workflows/deploy-supabase.yml`과 이 저장소 밖 `CLAUDE.md`, `supabase/migrations/`
+  파일 7개 재명명 + 1개 신규 재구성, DB 인덱스 migration,
+  `todos`/`google-calendar-disconnect`(revoked 연결의 미러 이벤트 정리).
+- 결정과 이유:
+  - `enqueue_google_push`가 호출자의 todo·connection 소유권을 검증하지 않아 다른 사용자의 일정을
+    큐에 넣을 수 있었다 — RPC 안에서 소유권을 직접 확인하도록 고쳤다(`800aad2`).
+  - push 큐 재시도가 Google에 같은 이벤트를 중복 생성할 수 있어 결정론적 event id로 멱등하게
+    만들었다(`7a2784c`).
+  - 일시적 sync 오류(`2e8df54`)와 rate limit(`1a1a863`)이 "연결 끊김"으로 잘못 표시돼 불필요한
+    재인증을 요구하고 있었다 — 상태를 `active/error/rate_limited/revoked`로 분리했다.
+  - 실패한 push가 조용히 버려지고 있었다 — 큐 상태를 노출하고 재시도 가능하게 했다(`b0d23f7`).
+  - 배포 파이프라인 복구: `deploy-supabase.yml`이 며칠째 조용히 멈춰 있었는데 원인은 이 저장소가
+    아니라 별도 체크아웃의 `CLAUDE.md` `deno fmt` 위반이었다(`a1da37b`). 이어서 로컬 마이그레이션
+    파일 이름이 원격에 실제 적용된 타임스탬프와 어긋나 있던 걸 발견 — `migration repair`로 라이브 DB
+    메타데이터를 건드리는 대신 git으로 추적되는 파일 재명명으로 맞췄고, 커밋된 적 없던 마이그레이션
+    1개는 라이브 스키마에서 재구성해 새로 커밋했다(`932865c`).
+  - `get_advisors`가 지적한 중복 인덱스 제거, 누락된 FK 인덱스 5개 추가(`73a54ae`).
+  - 실사용 중 revoked 연결의 미러 이벤트가 `/todos` 전체 조회를 깨뜨리는 버그 발견 — 조회 시
+    제외(`32e1708`) + 연결 해제 시 미러 이벤트 자체를 삭제(`f1f9741`)하는 2단계로 고쳤다.
+- 실행한 검증과 결과: 각 커밋 단위로 `deno check`+`deno fmt --check`+계약 테스트 통과. 마이그레이션
+  재명명 후 `supabase db push --linked` dry-run으로 원격과의 정합성 확인. revoked 연결 버그는 실기기
+  재현 후 수정 확인.
+- 커밋: `05f88aa`..`45d6399` (주요: `800aad2`, `7a2784c`, `2e8df54`, `b0d23f7`, `1a1a863`,
+  `a1da37b`, `932865c`, `73a54ae`, `32e1708`, `f1f9741`). 배포는 `deploy-supabase.yml` 자동화로 각
+  push 시 진행됨.
+
 ## 이후 기록 형식
 
 각 작업은 아래 다섯 항목을 빠짐없이 기록한다.
