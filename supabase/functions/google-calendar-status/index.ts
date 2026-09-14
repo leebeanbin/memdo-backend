@@ -23,18 +23,34 @@ async function loadStatusBody(
   // explicit-ownership-check convention used everywhere else this feature
   // reads that table. Never a blanket count -- always scoped to the
   // requesting user's own rows.
+  //
+  // Aggregated in Postgres (count: 'exact', head: true -- a HEAD request,
+  // no row data returned) instead of downloading every queue row's
+  // `attempts` just to sum two integers in JS. The queue is normally
+  // small/transient, but a sustained Google outage or a broken refresh
+  // token lets every write enqueue and eventually max out `attempts`,
+  // growing this into the hundreds+ before the user retries -- and this
+  // endpoint is polled repeatedly in the meantime. Same "aggregate in
+  // Postgres" reasoning as agent_usage_summary.
   let pendingCount = 0
   let failedCount = 0
   if (data) {
-    const { data: queueRows, error: queueError } = await supabase
-      .from('google_calendar_push_queue')
-      .select('attempts')
-      .eq('user_id', userId)
-    if (queueError) return { error: queueError }
-    for (const row of queueRows ?? []) {
-      if ((row.attempts as number) >= GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS) failedCount += 1
-      else pendingCount += 1
-    }
+    const [pendingResult, failedResult] = await Promise.all([
+      supabase
+        .from('google_calendar_push_queue')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .lt('attempts', GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS),
+      supabase
+        .from('google_calendar_push_queue')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .gte('attempts', GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS),
+    ])
+    if (pendingResult.error) return { error: pendingResult.error }
+    if (failedResult.error) return { error: failedResult.error }
+    pendingCount = pendingResult.count ?? 0
+    failedCount = failedResult.count ?? 0
   }
 
   // needsReconnect: an existing connection whose stored scope predates this
