@@ -3,6 +3,8 @@ import {
   classifyGoogleCalendarErrorReason,
   classifyPushFailure,
   createGoogleEvent,
+  GOOGLE_CALENDAR_SCOPES,
+  hasSufficientGoogleCalendarScope,
   isMemdoAuthoredEvent,
   mapGoogleEventToMirrorRow,
   MEMDO_KIND_PROPERTY,
@@ -43,6 +45,56 @@ Deno.test('serializeError JSON-stringifies a plain error-shaped object instead o
 Deno.test('serializeError falls back to String() for a primitive', () => {
   assert(serializeError('plain string reason') === 'plain string reason')
   assert(serializeError(404) === '404')
+})
+
+// R0-1: narrowed OAuth scope -- these cover the sufficiency check that
+// decides whether an existing connection needs to reconnect, NOT an
+// exact-match check. The direction matters: broad -> narrow (this
+// migration) must never force an already-sufficient connection to
+// reconnect, unlike the earlier readonly -> full-write migration (a
+// genuine breaking change).
+
+Deno.test('hasSufficientGoogleCalendarScope is true for the exact new narrower scope pair', () => {
+  assert(hasSufficientGoogleCalendarScope(GOOGLE_CALENDAR_SCOPES.join(' ')))
+})
+
+Deno.test('hasSufficientGoogleCalendarScope is true for the old broad calendar scope (pre-R0-1 connections)', () => {
+  assert(hasSufficientGoogleCalendarScope('https://www.googleapis.com/auth/calendar'))
+})
+
+Deno.test('hasSufficientGoogleCalendarScope tolerates extra unrelated scopes and any token order', () => {
+  assert(
+    hasSufficientGoogleCalendarScope(
+      'https://www.googleapis.com/auth/userinfo.email ' +
+        'https://www.googleapis.com/auth/calendar.calendarlist.readonly ' +
+        'https://www.googleapis.com/auth/calendar.events',
+    ),
+  )
+})
+
+Deno.test('hasSufficientGoogleCalendarScope is false when only one of the two new scopes is present', () => {
+  assert(!hasSufficientGoogleCalendarScope('https://www.googleapis.com/auth/calendar.events'))
+  assert(
+    !hasSufficientGoogleCalendarScope(
+      'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+    ),
+  )
+})
+
+Deno.test('hasSufficientGoogleCalendarScope is false for the original readonly-only grant (predates write access)', () => {
+  assert(!hasSufficientGoogleCalendarScope('https://www.googleapis.com/auth/calendar.readonly'))
+})
+
+Deno.test("hasSufficientGoogleCalendarScope's substring guard: calendar.readonly must not false-positive as the broad calendar scope", () => {
+  // '.../auth/calendar' is a literal text-prefix of '.../auth/calendar.readonly'
+  // -- exact token matching (not substring) is what makes this false.
+  assert(!hasSufficientGoogleCalendarScope('https://www.googleapis.com/auth/calendar.readonly'))
+})
+
+Deno.test('hasSufficientGoogleCalendarScope is false for null/undefined/empty scope', () => {
+  assert(!hasSufficientGoogleCalendarScope(null))
+  assert(!hasSufficientGoogleCalendarScope(undefined))
+  assert(!hasSufficientGoogleCalendarScope(''))
 })
 
 Deno.test('classifyGoogleCalendarErrorReason maps a null message to unknown', () => {

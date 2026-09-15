@@ -3,16 +3,44 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 export const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 export const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke'
-// Two-way sync (push) needs write access -- .readonly can never create/
-// update/delete a Google event. Every existing connection was authorized
-// under the old readonly-only scope, so this is a breaking change: an
-// existing connection's stored refresh token does NOT retroactively gain
-// write access just because this constant changed -- the user must
-// reconnect (disconnect + connect again) to get a token actually carrying
-// this broader scope. google-calendar-push checks for this explicitly
-// (see insufficientScope handling) rather than assuming every connection
-// row already has write access.
-export const GOOGLE_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar'
+// R0-1: narrowed from the single broad `calendar` scope (full edit/share/
+// permanent-delete over the whole Calendar, far beyond what two-way EVENT
+// sync needs) to the two scopes this app actually uses -- calendar.events
+// (event list/create/update/delete/watch) and calendar.calendarlist.readonly
+// (listing the user's calendars). Google's own guidance is to request the
+// narrowest scope that covers real usage.
+export const GOOGLE_CALENDAR_SCOPES = [
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+]
+
+// The scope every connection made before R0-1 was granted under. Kept as
+// its own constant (not deleted) because it's still a live comparison
+// target: it's a strict superset of GOOGLE_CALENDAR_SCOPES, so an existing
+// broad grant already has everything the narrower scopes cover. Unlike the
+// earlier readonly -> full-write migration (a genuine breaking change --
+// a readonly token literally cannot perform write operations, so
+// reconnection was required), narrowing what NEW connections ask for does
+// not retroactively shrink what an EXISTING token already carries. Forcing
+// every already-sufficient existing connection through a disruptive
+// re-consent for zero functional gain would be the wrong call here -- see
+// hasSufficientGoogleCalendarScope below, which treats either shape as
+// fine and reserves needsReconnect for a genuinely insufficient scope
+// (e.g. the original readonly-only grant, which predates write access
+// entirely).
+const GOOGLE_CALENDAR_LEGACY_FULL_SCOPE = 'https://www.googleapis.com/auth/calendar'
+
+/** Whether a connection's already-granted OAuth scope covers everything
+ * this app currently does (event read/write/watch + calendar list read).
+ * Token-exact matching throughout (not substring) -- '.../auth/calendar'
+ * is a literal text-prefix of '.../auth/calendar.readonly', so substring
+ * matching would false-positive on exactly the historically-broken case
+ * this function exists to detect. */
+export function hasSufficientGoogleCalendarScope(grantedScope: string | null | undefined): boolean {
+  const granted = new Set((grantedScope ?? '').split(/\s+/).filter(Boolean))
+  if (granted.has(GOOGLE_CALENDAR_LEGACY_FULL_SCOPE)) return true
+  return GOOGLE_CALENDAR_SCOPES.every((scope) => granted.has(scope))
+}
 
 // Private extended-property keys Memdo stamps on every event it pushes to
 // Google, so the pull side can (a) recognize "this is an event I pushed
@@ -182,7 +210,7 @@ export function buildAuthorizationUrl(state: string): string {
     client_id: googleClientId(),
     redirect_uri: redirectUri(),
     response_type: 'code',
-    scope: GOOGLE_CALENDAR_SCOPE,
+    scope: GOOGLE_CALENDAR_SCOPES.join(' '),
     access_type: 'offline',
     prompt: 'consent',
     include_granted_scopes: 'true',

@@ -2,7 +2,7 @@ import { apiError, json, logRequest, responseByteLength, withApi } from '../_sha
 import {
   classifyGoogleCalendarErrorReason,
   GOOGLE_CALENDAR_PUSH_MAX_ATTEMPTS,
-  GOOGLE_CALENDAR_SCOPE,
+  hasSufficientGoogleCalendarScope,
   serviceClient,
 } from '../_shared/google-calendar-contract.ts'
 
@@ -53,16 +53,18 @@ async function loadStatusBody(
     failedCount = failedResult.count ?? 0
   }
 
-  // needsReconnect: an existing connection whose stored scope predates this
-  // app's move from calendar.readonly to full write access -- push 403s
-  // forever on this without ever flipping `status` away from 'active'
-  // (only a refresh-token failure does that), so it's otherwise completely
-  // invisible. Exact-token match on the whitespace-split scope string, NOT
-  // a substring check: '.../auth/calendar' is a literal text-prefix of
-  // '.../auth/calendar.readonly', so substring matching would
-  // false-positive on exactly the broken case.
+  // needsReconnect: an existing connection whose stored scope is
+  // genuinely insufficient for what this app does today (the original
+  // calendar.readonly-only grant, which predates write access entirely) --
+  // push 403s forever on this without ever flipping `status` away from
+  // 'active' (only a refresh-token failure does that), so it's otherwise
+  // completely invisible. hasSufficientGoogleCalendarScope also accepts
+  // the old broad `calendar` scope every pre-R0-1 connection carries
+  // (a strict superset of the narrower scopes this app asks for now), so
+  // narrowing what NEW connections request doesn't force every existing,
+  // already-sufficient connection through a disruptive reconnect.
   const needsReconnect = data
-    ? !((data.scope as string | null) ?? '').split(/\s+/).includes(GOOGLE_CALENDAR_SCOPE)
+    ? !hasSufficientGoogleCalendarScope(data.scope as string | null)
     : false
 
   // lastError used to only be computed when status === 'error' -- but a
