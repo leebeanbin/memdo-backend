@@ -29,21 +29,33 @@ const EXPECTED_TOOL_NAME: Record<string, string | null> = {
   UNSUPPORTED: null,
 }
 
+/** True when `actual` matches `expected` for one pinned field -- `===` for
+ * every scalar (string/boolean/number), which covers every fixture before
+ * A1-4. A1-4 added the first array-valued field pinned in this corpus
+ * (reminderOffsetsMinutes) -- `===` on two distinct array instances is
+ * always false regardless of content, so an array `expected` value compares
+ * by JSON.stringify instead (order-sensitive, which is correct here: the
+ * domain schema sorts reminderOffsetsMinutes ascending on the way in, so a
+ * fixture pinning e.g. [10, 1440] is asserting the real sorted order, not
+ * just "these two numbers are present in some order"). Not a general deep-
+ * equality matcher -- a pinned object value would still need its own
+ * comparison rule added here when the corpus first needs one. */
+function matchesExpectedValue(expected: unknown, actual: unknown): boolean {
+  if (Array.isArray(expected)) return JSON.stringify(actual) === JSON.stringify(expected)
+  return actual === expected
+}
+
 /** Top-level partial match, per the corpus README's "expected is optional
  * and partial -- fill in only the fields worth pinning down for that case."
  * Only keys present in `expected` are checked; extra fields on `actualArgs`
- * that aren't in `expected` always pass (they were never pinned down).
- * Shallow (`===`) comparison -- every current fixture's `expected` values
- * are scalars (strings/booleans), so this is sufficient today. A nested
- * `expected` object would need its own deep-partial matcher; out of scope
- * for this Epic since the corpus doesn't have one yet. */
+ * that aren't in `expected` always pass (they were never pinned down). */
 function argsMismatches(
   expected: Record<string, unknown> | undefined,
   actualArgs: unknown,
 ): string[] {
   const args = (actualArgs ?? {}) as Record<string, unknown>
   return Object.entries(expected ?? {})
-    .filter(([key, value]) => args[key] !== value)
+    .filter(([key, value]) => !matchesExpectedValue(value, args[key]))
     .map(([key, value]) =>
       `${key}: expected ${JSON.stringify(value)}, got ${JSON.stringify(args[key])}`
     )

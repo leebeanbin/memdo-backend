@@ -261,3 +261,43 @@ Deno.test('PROPOSE_SCHEDULE expected, extra unpinned args always pass', () => {
   )
   assertEquals(result.verdict, 'pass')
 })
+
+// A1-4: reminderOffsetsMinutes is the corpus's first array-valued pinned
+// field -- `===` on two distinct array instances is always false regardless
+// of content, so this needs its own comparison rule (matchesExpectedValue),
+// not the plain `===` every scalar field before it used.
+
+Deno.test('PROPOSE_SCHEDULE expected, matching array field (reminderOffsetsMinutes): pass', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { reminderOffsetsMinutes: [10, 1440] } },
+    { dispatchedTools: [call('propose_schedule', { reminderOffsetsMinutes: [10, 1440] })] },
+  )
+  assertEquals(result.verdict, 'pass')
+})
+
+Deno.test('PROPOSE_SCHEDULE expected, array field with a different order: fail', () => {
+  // Order-sensitive on purpose -- reminderOffsetsMinutes is sorted
+  // ascending by the domain schema, so a fixture pinning [10, 1440] is
+  // asserting that real sorted order, not just set membership.
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { reminderOffsetsMinutes: [10, 1440] } },
+    { dispatchedTools: [call('propose_schedule', { reminderOffsetsMinutes: [1440, 10] })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('PROPOSE_SCHEDULE expected, array field with different contents: fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { reminderOffsetsMinutes: [10] } },
+    { dispatchedTools: [call('propose_schedule', { reminderOffsetsMinutes: [10, 1440] })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('PROPOSE_SCHEDULE expected, array field absent from actual args: fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { reminderOffsetsMinutes: [10] } },
+    { dispatchedTools: [call('propose_schedule', { entryKind: 'event' })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
