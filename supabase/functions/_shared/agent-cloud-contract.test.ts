@@ -263,6 +263,48 @@ function fakeSupabaseWithTimezone(
   }
 }
 
+// A1-3: branches on table name the same way fakeSupabaseWithTimezone does,
+// for resolveCategoryHint's own select().is().eq().ilike().maybeSingle()
+// chain -- distinct from fakeSupabase's single generic .eq() (which can't
+// tell an is_task_kind filter apart from an id filter).
+function fakeSupabaseWithCategories(
+  rows: ExistingScheduleRow[],
+  categories: { id: string; name: string; is_task_kind: boolean }[],
+): { from: (table: string) => any } {
+  return {
+    from: (table: string) => {
+      if (table === 'user_categories') {
+        let isTaskKindFilter: boolean | undefined
+        let nameFilter: string | undefined
+        const chain: any = {
+          select: () => chain,
+          is: () => chain,
+          eq: (col: string, value: boolean) => {
+            if (col === 'is_task_kind') isTaskKindFilter = value
+            return chain
+          },
+          ilike: (col: string, value: string) => {
+            if (col === 'name') nameFilter = value
+            return chain
+          },
+          maybeSingle: () => {
+            const matches = categories.filter((c) =>
+              c.is_task_kind === isTaskKindFilter &&
+              c.name.toLowerCase() === (nameFilter ?? '').toLowerCase()
+            )
+            if (matches.length > 1) {
+              return Promise.resolve({ data: null, error: new Error('multiple matches') })
+            }
+            return Promise.resolve({ data: matches[0] ?? null, error: null })
+          },
+        }
+        return chain
+      }
+      return fakeSupabase(rows).from(table)
+    },
+  }
+}
+
 function fakeSupabaseError(): { from: (table: string) => any } {
   return {
     from: (_table: string) => {
@@ -377,6 +419,113 @@ Deno.test('dispatchToolCall propose_schedule surfaces a real conflict', async ()
   assert(result.ok === true)
   assert(result.warning.includes('팀 회의'))
   assert(state.conflictTitle === '팀 회의')
+})
+
+// ── A1-3: categoryHint -> real categoryId, deterministic server-side
+// resolution -- exact case-insensitive name match, scoped to the same
+// entryKind, never a guess. ──
+
+Deno.test('dispatchToolCall propose_schedule resolves categoryHint to a real categoryId on an exact match', async () => {
+  const state = newToolDispatchState()
+  const supabase = fakeSupabaseWithCategories([], [
+    { id: 'cat-1', name: '운동', is_task_kind: true },
+  ])
+  await dispatchToolCall(
+    supabase,
+    'propose_schedule',
+    { title: '헬스장', entryKind: 'task', scheduledDate: 'today', categoryHint: '운동' },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedSchedule?.categoryId === 'cat-1')
+})
+
+Deno.test('dispatchToolCall propose_schedule categoryHint match is case-insensitive', async () => {
+  const state = newToolDispatchState()
+  const supabase = fakeSupabaseWithCategories([], [
+    { id: 'cat-1', name: 'Work', is_task_kind: false },
+  ])
+  await dispatchToolCall(
+    supabase,
+    'propose_schedule',
+    {
+      title: '회의',
+      entryKind: 'event',
+      scheduledDate: 'today',
+      startTime: '10:00',
+      categoryHint: 'work',
+    },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedSchedule?.categoryId === 'cat-1')
+})
+
+Deno.test('dispatchToolCall propose_schedule leaves categoryId unresolved when categoryHint matches no category', async () => {
+  const state = newToolDispatchState()
+  const supabase = fakeSupabaseWithCategories([], [
+    { id: 'cat-1', name: '운동', is_task_kind: true },
+  ])
+  await dispatchToolCall(
+    supabase,
+    'propose_schedule',
+    { title: '독서', entryKind: 'task', scheduledDate: 'today', categoryHint: '취미' },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedSchedule?.categoryId === undefined)
+  assert(state.proposedSchedule?.categoryHint === '취미')
+})
+
+Deno.test('dispatchToolCall propose_schedule never matches a category of the wrong entryKind', async () => {
+  // A task-kind category named 운동 must not resolve for an *event*
+  // proposal that happens to share the same hint text.
+  const state = newToolDispatchState()
+  const supabase = fakeSupabaseWithCategories([], [
+    { id: 'cat-1', name: '운동', is_task_kind: true },
+  ])
+  await dispatchToolCall(
+    supabase,
+    'propose_schedule',
+    {
+      title: '요가 수업',
+      entryKind: 'event',
+      scheduledDate: 'today',
+      startTime: '19:00',
+      categoryHint: '운동',
+    },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedSchedule?.categoryId === undefined)
+})
+
+Deno.test('dispatchToolCall propose_schedule leaves categoryId unresolved for an ambiguous (duplicate-name) match', async () => {
+  const state = newToolDispatchState()
+  const supabase = fakeSupabaseWithCategories([], [
+    { id: 'cat-1', name: '운동', is_task_kind: true },
+    { id: 'cat-2', name: '운동', is_task_kind: true },
+  ])
+  await dispatchToolCall(
+    supabase,
+    'propose_schedule',
+    { title: '헬스장', entryKind: 'task', scheduledDate: 'today', categoryHint: '운동' },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedSchedule?.categoryId === undefined)
+})
+
+Deno.test('dispatchToolCall propose_schedule never queries categories when no categoryHint was proposed', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule',
+    { title: '점심', entryKind: 'event', scheduledDate: 'today', startTime: '12:00' },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedSchedule?.categoryId === undefined)
 })
 
 Deno.test('conflict/no-time (boundary fixture): rows with no start_at/end_at never reach ConflictService', async () => {
@@ -1155,6 +1304,12 @@ const IOS_PROPOSED_SCHEDULE_KEYS = [
   'reminderOffsetsMinutes',
   'locationQuery',
   'categoryHint',
+  // A1-3: resolved server-side (resolveCategoryHint), present only when
+  // categoryHint matched a real category -- not part of the model's own
+  // args, so it's absent from CloudProposedScheduleDTO until an iOS issue
+  // decides to auto-apply it (currently unapplied, categoryHint stays
+  // display-only -- see A1-2's toScheduleDetail doc comment).
+  'categoryId',
   'repeat',
   'note',
   'conflictTitle',
@@ -1287,8 +1442,12 @@ Deno.test('buildDonePayload.proposedSchedule derives isTask:false for an event',
 
 Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO field for field', async () => {
   const state = newToolDispatchState()
+  // categoryHint below is seeded to actually resolve (fakeSupabaseWithCategories,
+  // not the bare fakeSupabase([]) every other field-for-field test uses) so
+  // categoryId genuinely appears in the payload -- this test's whole point
+  // is exercising every key iOS declares, categoryId included.
   await dispatchToolCall(
-    fakeSupabase([]),
+    fakeSupabaseWithCategories([], [{ id: 'cat-1', name: '업무', is_task_kind: true }]),
     AGENT_TOOL_NAMES.proposeSchedule,
     {
       title: '보고서 제출',

@@ -527,6 +527,10 @@ export type ProposedScheduleArgs = {
   reminderOffsetsMinutes?: number[]
   locationQuery?: string
   categoryHint?: string
+  /** A1-3: resolved server-side from categoryHint against the user's real
+   * categories (resolveCategoryHint) -- never set directly by the model.
+   * Absent when categoryHint was absent, or present but didn't match. */
+  categoryId?: string
   repeat?: 'daily' | 'weekdays' | 'weekly' | 'biweekly' | 'monthly' | 'yearly'
 }
 
@@ -1116,6 +1120,39 @@ type ToolHandler = (
   today: Date,
 ) => Promise<unknown>
 
+/** A1-3: deterministic categoryHint resolution -- matches this codebase's
+ * existing principle (see systemPrompt()'s authoritative-evidence rules)
+ * that the model proposes intent, the backend resolves it against real
+ * data, never the model inventing a real categoryId directly. Exact
+ * (case-insensitive) name match only, scoped to categories of the same
+ * kind (task/event) as the proposal itself -- a fuzzy/partial match would
+ * reintroduce exactly the kind of guessing this boundary exists to
+ * remove, and an ambiguous or absent match returns undefined (the
+ * proposal still stages, just without an auto-applied category) rather
+ * than picking one arbitrarily. */
+async function resolveCategoryHint(
+  supabase: SupabasePort,
+  categoryHint: string,
+  isTask: boolean,
+): Promise<string | undefined> {
+  try {
+    const { data, error } = await supabase
+      .from('user_categories')
+      .select('id')
+      .is('deleted_at', null)
+      .eq('is_task_kind', isTask)
+      .ilike('name', categoryHint.trim())
+      .maybeSingle()
+    if (error || !data) return undefined
+    return data.id as string
+  } catch {
+    // Same fail-open-to-"no category" stance as a genuinely absent/
+    // ambiguous match -- a lookup failure must never block staging the
+    // rest of an otherwise-valid proposal.
+    return undefined
+  }
+}
+
 async function handleProposeSchedule(
   supabase: SupabasePort,
   args: any,
@@ -1159,10 +1196,17 @@ async function handleProposeSchedule(
   // (and the client payload) exactly like every other optional field here,
   // instead of showing up as a present-but-undefined key.
   const offsetMinutes = await resolveUserTimezoneOffsetMinutes(supabase, today)
+  // A1-3: resolved the same "only add the key when there's a real value"
+  // way dueDate is above -- an absent/ambiguous categoryHint match leaves
+  // categoryId genuinely absent, not present-but-undefined.
+  const categoryId = args.categoryHint
+    ? await resolveCategoryHint(supabase, args.categoryHint, args.entryKind === 'task')
+    : undefined
   const resolvedArgs: ProposedScheduleArgs = {
     ...(args as ProposedScheduleArgs),
     scheduledDate: resolveDate(args.scheduledDate, today, offsetMinutes),
     ...(args.dueDate ? { dueDate: resolveDate(args.dueDate, today, offsetMinutes) } : {}),
+    ...(categoryId ? { categoryId } : {}),
   }
   state.proposedSchedule = resolvedArgs
   // Reflection: guaranteed, not dependent on the model having called
