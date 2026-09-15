@@ -48,6 +48,56 @@ Deno.test('propose_schedule_update -> search_schedules (order reversed): fail', 
   assertEquals(result.verdict, 'fail')
 })
 
+// ── A2-5: PROPOSE_SCHEDULE_EDIT -- same search-before-propose contract as
+// PROPOSE_SCHEDULE_UPDATE above. ──
+
+Deno.test('search_schedules -> propose_schedule_edit: pass', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE_EDIT', expected: { id: 'a1' } },
+    {
+      dispatchedTools: [
+        call('search_schedules'),
+        call('propose_schedule_edit', { id: 'a1', reminderOffsetsMinutes: [30, 1440] }),
+      ],
+    },
+  )
+  assertEquals(result.verdict, 'pass')
+})
+
+Deno.test('propose_schedule_edit only (no search): fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE_EDIT', expected: { id: 'a1' } },
+    { dispatchedTools: [call('propose_schedule_edit', { id: 'a1' })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('propose_schedule_edit -> search_schedules (order reversed): fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE_EDIT', expected: { id: 'a1' } },
+    {
+      dispatchedTools: [
+        call('propose_schedule_edit', { id: 'a1' }),
+        call('search_schedules'),
+      ],
+    },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('PROPOSE_SCHEDULE_EDIT expected, but an unrelated propose_schedule fires instead: fail (unexpected mutation)', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'SEARCH_SCHEDULES' },
+    {
+      dispatchedTools: [
+        call('search_schedules'),
+        call('propose_schedule_edit', { id: 'a1' }),
+      ],
+    },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
 Deno.test('find_free_slots -> search_schedules -> propose_schedule_update: pass (extra tool in between is fine)', () => {
   const result = gradeCase(
     { expectedBehavior: 'PROPOSE_SCHEDULE_UPDATE', expected: { action: 'complete' } },

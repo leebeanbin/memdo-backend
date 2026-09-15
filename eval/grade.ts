@@ -22,6 +22,10 @@ export type EvalFixture = {
 const EXPECTED_TOOL_NAME: Record<string, string | null> = {
   PROPOSE_SCHEDULE: AGENT_TOOL_NAMES.proposeSchedule,
   PROPOSE_SCHEDULE_UPDATE: AGENT_TOOL_NAMES.proposeScheduleUpdate,
+  // A2-5: field-level edit on an existing item -- same "search first,
+  // never guess an id" contract as PROPOSE_SCHEDULE_UPDATE, see
+  // requiresSearchFirst below.
+  PROPOSE_SCHEDULE_EDIT: AGENT_TOOL_NAMES.proposeScheduleEdit,
   SEARCH_SCHEDULES: AGENT_TOOL_NAMES.searchSchedules,
   FIND_FREE_SLOTS: AGENT_TOOL_NAMES.findFreeSlots,
   CLARIFICATION_REQUIRED: AGENT_TOOL_NAMES.requestClarification,
@@ -66,13 +70,14 @@ function argsMismatches(
  * UNSUPPORTED) must never pass just because its own expected read tool also
  * fired -- an unexpected mutation proposal alongside it is a genuine
  * over-eager-mutation failure, not a benign extra call the way an extra
- * read tool (e.g. get_day_context) is. Scoped to exactly these two names,
+ * read tool (e.g. get_day_context) is. Scoped to exactly these three names,
  * not every propose_* tool -- proposeRoutineUpdate/proposeReviewActions
  * have no corpus coverage yet, so extending this guard to them now would be
  * untested speculation. */
 const MUTATION_PROPOSAL_TOOLS = new Set<string>([
   AGENT_TOOL_NAMES.proposeSchedule,
   AGENT_TOOL_NAMES.proposeScheduleUpdate,
+  AGENT_TOOL_NAMES.proposeScheduleEdit,
 ])
 
 /** dispatchedTools (the full call sequence, backend tool names =
@@ -129,24 +134,26 @@ export function gradeCase(
   const calls = actual.dispatchedTools
     .map((call, index) => ({ ...call, index }))
     .filter((c) => c.name === expectedTool)
-  const requiresSearchFirst = fixture.expectedBehavior === 'PROPOSE_SCHEDULE_UPDATE'
+  const requiresSearchFirst = fixture.expectedBehavior === 'PROPOSE_SCHEDULE_UPDATE' ||
+    fixture.expectedBehavior === 'PROPOSE_SCHEDULE_EDIT'
   const searchIndex = actual.dispatchedTools.findIndex((t) =>
     t.name === AGENT_TOOL_NAMES.searchSchedules
   )
 
   if (calls.length === 0) {
-    // gradeCase is never called for a state-dependent PROPOSE_SCHEDULE_UPDATE
-    // fixture without a deterministic seed account (run.ts filters those to
-    // 'skipped' before reaching here), so by the time this branch runs for
-    // that category, the caller has already established grading is
-    // meaningful: both "search_schedules never attempted" and "searched but
-    // no update followed" are plain failures here, not data-availability
-    // questions this function has any way to judge.
+    // gradeCase is never called for a state-dependent PROPOSE_SCHEDULE_UPDATE/
+    // PROPOSE_SCHEDULE_EDIT fixture without a deterministic seed account
+    // (run.ts filters those to 'skipped' before reaching here), so by the
+    // time this branch runs for either category, the caller has already
+    // established grading is meaningful: both "search_schedules never
+    // attempted" and "searched but no update/edit followed" are plain
+    // failures here, not data-availability questions this function has any
+    // way to judge.
     if (requiresSearchFirst && searchIndex === -1) {
       return {
         verdict: 'fail',
         reason:
-          'expected search_schedules to be attempted before propose_schedule_update, but search_schedules was never called',
+          `expected search_schedules to be attempted before ${expectedTool}, but search_schedules was never called`,
       }
     }
     return {
