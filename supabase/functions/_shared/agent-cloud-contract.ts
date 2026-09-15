@@ -220,7 +220,7 @@ export const cloudAgentTools = [
     function: {
       name: AGENT_TOOL_NAMES.proposeSchedule,
       description:
-        'Propose a new schedule or task for the user to confirm. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim something was created without the user approving a proposal. Only one proposal can be staged at a time -- if the user is asking for multiple new items, propose just the first one and mention the rest still need their own turn once this one is confirmed or declined. Only set a field the user actually specified or clearly implied -- never invent a location, category, reminder count, duration, or due date the user never mentioned; leave it out instead.',
+        'Propose ONE new schedule or task for the user to confirm. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim something was created without the user approving a proposal. If the user is asking for more than one new item in the same request (e.g. "금요일 미용실 넣고 토요일 AWS, 일요일 운동"), call propose_schedule_batch instead with all of them in one call -- do not call this tool more than once in the same turn; only the last call would ever reach the user. Only set a field the user actually specified or clearly implied -- never invent a location, category, reminder count, duration, or due date the user never mentioned; leave it out instead.',
       parameters: {
         type: 'object',
         properties: {
@@ -262,6 +262,72 @@ export const cloudAgentTools = [
           note: { type: 'string' },
         },
         required: ['title', 'entryKind', 'scheduledDate'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: AGENT_TOOL_NAMES.proposeScheduleBatch,
+      description:
+        'Propose MULTIPLE new schedules/tasks in ONE call, for a single request that names more than one new item at once (e.g. "금요일 미용실 넣고 토요일 AWS 2시간, 일요일 운동 넣어줘"). This does NOT save anything -- it only stages the whole batch for the user to review and approve. Never claim anything was created without the user approving. Each item in `items` follows the exact same rules as propose_schedule\'s own fields -- only set a field the user actually specified or clearly implied for that item; never invent a location, category, reminder count, duration, or due date. Up to 10 items. For a single new item, use propose_schedule instead.',
+      parameters: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 10,
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                entryKind: { type: 'string', enum: ['event', 'task'] },
+                scheduledDate: {
+                  type: 'string',
+                  description: "'today', 'tomorrow', or yyyy-MM-dd",
+                },
+                startTime: { type: 'string', description: 'HH:mm, omit for a task' },
+                endTime: { type: 'string', description: 'HH:mm, omit for a task' },
+                dueDate: {
+                  type: 'string',
+                  description:
+                    "Task only -- 'today', 'tomorrow', or yyyy-MM-dd. Only when the user names a deadline distinct from a scheduled time.",
+                },
+                dueTime: { type: 'string', description: 'HH:mm, only alongside dueDate' },
+                estimatedMinutes: {
+                  type: 'integer',
+                  description:
+                    'How long the task/event is expected to take, only if the user states it',
+                },
+                reminderOffsetsMinutes: {
+                  type: 'array',
+                  items: { type: 'integer' },
+                  description:
+                    'Minutes before the start (or due time, if no start) to remind the user. Up to 5. Omit for no reminder.',
+                },
+                locationQuery: {
+                  type: 'string',
+                  description:
+                    'A place name or address the user mentioned, in their own words -- never a resolved address or coordinates.',
+                },
+                categoryHint: {
+                  type: 'string',
+                  description:
+                    "A category the user named or clearly implied (e.g. '운동', '업무').",
+                },
+                repeat: {
+                  type: 'string',
+                  enum: ['daily', 'weekdays', 'weekly', 'biweekly', 'monthly', 'yearly'],
+                  description: 'Only when the user explicitly asks for a recurring item.',
+                },
+                note: { type: 'string' },
+              },
+              required: ['title', 'entryKind', 'scheduledDate'],
+            },
+          },
+        },
+        required: ['items'],
       },
     },
   },
@@ -447,7 +513,7 @@ export function systemPrompt(today: string): string {
     "The person's locale is ko_KR. You MUST respond in Korean.",
     "You are Memdo's personal schedule assistant. Be concise, warm, and practical.",
     `Today's date is ${today}.`,
-    'When the user wants to create, add, or make a new schedule or task, call propose_schedule -- do not just describe it in text, and do not claim you created it.',
+    'When the user wants to create, add, or make a new schedule or task, call propose_schedule -- do not just describe it in text, and do not claim you created it. When the request names MORE THAN ONE new item at once (e.g. "금요일 미용실 넣고 토요일 AWS, 일요일 운동"), call propose_schedule_batch ONCE with all of them in its `items` array instead -- never call propose_schedule repeatedly in the same turn for a multi-item request, only the last call would ever reach the user.',
     'When the user asks to find free time or where to fit something, call find_free_slots. Only pass durationMinutes when the user states an explicit numeric length ("1시간 찾아줘"); omit it entirely for a plain availability question ("언제 비어 있어?"). An activity name alone ("운동할 시간 찾아줘") is NOT a duration -- if the user names an activity but never says how long, call request_clarification and ask how much time they need instead of guessing.',
     'When the user asks about existing plans, or before proposing something new, call search_schedules to check first rather than guessing.',
     'When the user wants to complete, move, or delete an EXISTING schedule or task, first call search_schedules to find its real id, then call propose_schedule_update -- IN THAT SAME RESPONSE, not a later one. Do not guess an id, and do not claim the change happened.',
@@ -1071,10 +1137,27 @@ export type ClarificationRequestArgs = {
   reason?: string
 }
 
+/** A3-1: one entry per item in a propose_schedule_batch call -- same shape
+ * handleProposeSchedule stages into state.proposedSchedule, plus its own
+ * conflictTitle/conflictCheckFailed since a batch item's conflict outcome is
+ * per-item, not a single turn-wide flag the way proposedSchedule's sibling
+ * fields are. */
+export type ProposedScheduleBatchItem = ProposedScheduleArgs & {
+  note?: string
+  conflictTitle: string | null
+  conflictCheckFailed: boolean
+}
+
 export type ToolDispatchState = {
   proposedSchedule: (ProposedScheduleArgs & { note?: string }) | null
   conflictTitle: string | null
   conflictCheckFailed: boolean
+  /** A3-1: separate slot from proposedSchedule above, not a reuse of it --
+   * propose_schedule (single item) and propose_schedule_batch (multiple)
+   * remain two distinct tools with independent single-slot guards, so a
+   * model call to either doesn't clobber a proposal already staged by the
+   * other. */
+  proposedScheduleBatch: ProposedScheduleBatchItem[] | null
   proposedScheduleUpdate:
     | (ProposedScheduleUpdateArgs & {
       title: string
@@ -1145,6 +1228,7 @@ export function newToolDispatchState(): ToolDispatchState {
     proposedSchedule: null,
     conflictTitle: null,
     conflictCheckFailed: false,
+    proposedScheduleBatch: null,
     proposedScheduleUpdate: null,
     proposedScheduleEdit: null,
     proposedRoutineUpdate: null,
@@ -1194,6 +1278,11 @@ export function buildDonePayload(
       isTask: boolean
     })
     | null
+  // A3-1: no pre-existing client ever declared this key, so unlike
+  // proposedSchedule's date/isTask bridge above, there is no back-compat
+  // decode hazard here -- a batch item can just use scheduledDate/entryKind
+  // from day one.
+  proposedScheduleBatch: ToolDispatchState['proposedScheduleBatch']
   proposedScheduleUpdate: ToolDispatchState['proposedScheduleUpdate']
   proposedScheduleEdit: ToolDispatchState['proposedScheduleEdit']
   proposedRoutineUpdate: ToolDispatchState['proposedRoutineUpdate']
@@ -1228,6 +1317,7 @@ export function buildDonePayload(
         conflictCheckFailed: state.conflictCheckFailed,
       }
       : null,
+    proposedScheduleBatch: state.proposedScheduleBatch,
     proposedScheduleUpdate: state.proposedScheduleUpdate,
     proposedScheduleEdit: state.proposedScheduleEdit,
     proposedRoutineUpdate: state.proposedRoutineUpdate,
@@ -1368,6 +1458,93 @@ async function handleProposeSchedule(
     : state.conflictTitle
     ? { ok: true, warning: `Conflicts with existing '${state.conflictTitle}'` }
     : { ok: true }
+}
+
+/** A3-1/A3-2: stages MULTIPLE new-item proposals from ONE tool call --
+ * the structural fix for the exact bulk-create confirmation-loop failure
+ * mode traced live in agent_audit_log (2026-09-15): a request naming
+ * several new items relied on the model calling propose_schedule N times
+ * in one turn, but that tool's own single-slot guard (see
+ * handleProposeSchedule's comment) means only the LAST call ever actually
+ * stages -- every earlier one silently fails closed, and a probabilistic
+ * model reliably converting "user said yes" into N separate tool calls in
+ * one response is exactly the reliability class two prior system-prompt-only
+ * mitigations (this file's systemPrompt()) could only partially patch.
+ * propose_schedule_batch sidesteps the reliability question entirely: ONE
+ * call, one array, staged together.
+ *
+ * Per item (A3-2): the exact same dueDate/categoryHint resolution and
+ * conflict-check reflection handleProposeSchedule already does for a single
+ * item -- reused function-for-function (resolveCategoryHint, resolveDate,
+ * fetchSchedules, findConflict), not a parallel reimplementation. One
+ * item's conflict or lookup failure never blocks the others: each item gets
+ * its own conflictTitle/conflictCheckFailed, and a per-item fetchSchedules
+ * failure only marks THAT item's conflictCheckFailed, mirroring
+ * handleProposeSchedule's fail-closed-per-check stance without letting one
+ * bad date range take down the whole batch. Items are NOT cross-checked
+ * against each other (only against real existing rows) -- out of scope for
+ * this pass, see A3-1's own issue text. */
+async function handleProposeScheduleBatch(
+  supabase: SupabasePort,
+  args: any,
+  state: ToolDispatchState,
+  today: Date,
+): Promise<unknown> {
+  // Same single-slot-overwrite guard as every other propose_* handler --
+  // see handleProposeSchedule's comment for the founder-dogfooding incident
+  // this pattern exists for.
+  if (state.proposedScheduleBatch) {
+    return {
+      ok: false,
+      error:
+        'A batch is already staged for the user to confirm this turn. Describe just that one and wait for the user to confirm or decline before proposing another.',
+    }
+  }
+  const items = args.items as ProposedScheduleArgs[]
+  const offsetMinutes = await resolveUserTimezoneOffsetMinutes(supabase, today)
+  const resolvedItems: ProposedScheduleBatchItem[] = []
+  for (const item of items) {
+    const categoryId = item.categoryHint
+      ? await resolveCategoryHint(supabase, item.categoryHint, item.entryKind === 'task')
+      : undefined
+    const resolvedItem: ProposedScheduleArgs = {
+      ...item,
+      scheduledDate: resolveDate(item.scheduledDate, today, offsetMinutes),
+      ...(item.dueDate ? { dueDate: resolveDate(item.dueDate, today, offsetMinutes) } : {}),
+      ...(categoryId ? { categoryId } : {}),
+    }
+    let conflictTitle: string | null = null
+    let conflictCheckFailed = false
+    try {
+      const existing = await fetchSchedules(
+        supabase,
+        resolvedItem.scheduledDate,
+        resolvedItem.scheduledDate,
+      )
+      conflictTitle = findConflict(existing, resolvedItem, today)
+    } catch {
+      conflictCheckFailed = true
+    }
+    resolvedItems.push({ ...resolvedItem, conflictTitle, conflictCheckFailed })
+  }
+  state.proposedScheduleBatch = resolvedItems
+  const conflictCount = resolvedItems.filter((i) => i.conflictTitle).length
+  const failedCheckCount = resolvedItems.filter((i) => i.conflictCheckFailed).length
+  if (failedCheckCount > 0) {
+    return {
+      ok: true,
+      count: resolvedItems.length,
+      warning:
+        `Could not verify existing schedules for conflicts on ${failedCheckCount} item(s) -- tell the user to double-check those before saving.`,
+    }
+  }
+  return conflictCount > 0
+    ? {
+      ok: true,
+      count: resolvedItems.length,
+      warning: `${conflictCount} item(s) conflict with existing schedules`,
+    }
+    : { ok: true, count: resolvedItems.length }
 }
 
 async function handleProposeScheduleUpdate(
@@ -1550,6 +1727,7 @@ const toolHandlers: Record<string, ToolHandler> = {
   [AGENT_TOOL_NAMES.searchSchedules]: (supabase, args) => searchSchedules(supabase, args),
   [AGENT_TOOL_NAMES.findFreeSlots]: (supabase, args) => findFreeSlots(supabase, args),
   [AGENT_TOOL_NAMES.proposeSchedule]: handleProposeSchedule,
+  [AGENT_TOOL_NAMES.proposeScheduleBatch]: handleProposeScheduleBatch,
   [AGENT_TOOL_NAMES.proposeScheduleUpdate]: handleProposeScheduleUpdate,
   [AGENT_TOOL_NAMES.proposeScheduleEdit]: handleProposeScheduleEdit,
   [AGENT_TOOL_NAMES.getDayContext]: (supabase, args, _state, today) =>

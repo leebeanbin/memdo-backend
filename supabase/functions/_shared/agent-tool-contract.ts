@@ -9,6 +9,7 @@ export const AGENT_TOOL_NAMES = {
   searchSchedules: 'search_schedules',
   findFreeSlots: 'find_free_slots',
   proposeSchedule: 'propose_schedule',
+  proposeScheduleBatch: 'propose_schedule_batch',
   proposeScheduleUpdate: 'propose_schedule_update',
   proposeScheduleEdit: 'propose_schedule_edit',
   getDayContext: 'get_day_context',
@@ -108,6 +109,23 @@ export const proposeScheduleArgsSchema = z.object({
   // same default is a staging->save boundary question, not a model-output
   // boundary one -- that's Epic C-04 "Proposal final validation", not here.
 })
+
+// A3-1: batches multiple propose_schedule-shaped items into ONE tool call,
+// for the exact bulk-create request pattern ("금요일 미용실 넣고 토요일 AWS,
+// 일요일 운동") that the single-slot propose_schedule guard structurally
+// can't satisfy -- see handleProposeScheduleBatch's own comment for why
+// relying on N sequential propose_schedule calls in one turn is the wrong
+// fix (only the last one would ever reach the user, same failure class as
+// the founder-dogfooding incident propose_schedule's own single-slot guard
+// exists for). Reuses proposeScheduleArgsSchema per item unchanged -- same
+// field-level rules (event needs startTime, dueDate is task-only, etc.)
+// apply per item, not just once for the whole batch. Capped at 10: generous
+// for any real bulk-create request seen so far, small enough to keep a
+// single turn's conflict-check work (one fetchSchedules per distinct date)
+// bounded.
+export const proposeScheduleBatchArgsSchema = z.object({
+  items: z.array(proposeScheduleArgsSchema).min(1).max(10),
+}).strict()
 
 // .strict() on every variant: a 'complete'/'delete' call that also carries
 // date/startTime/endTime is a sign the model confused this with reschedule
@@ -230,6 +248,7 @@ const agentArgsSchemaByTool: Record<string, z.ZodType> = {
   [AGENT_TOOL_NAMES.searchSchedules]: searchSchedulesArgsSchema,
   [AGENT_TOOL_NAMES.findFreeSlots]: findFreeSlotsArgsSchema,
   [AGENT_TOOL_NAMES.proposeSchedule]: proposeScheduleArgsSchema,
+  [AGENT_TOOL_NAMES.proposeScheduleBatch]: proposeScheduleBatchArgsSchema,
   [AGENT_TOOL_NAMES.proposeScheduleUpdate]: proposeScheduleUpdateArgsSchema,
   [AGENT_TOOL_NAMES.proposeScheduleEdit]: proposeScheduleEditArgsSchema,
   [AGENT_TOOL_NAMES.getDayContext]: getDayContextArgsSchema,

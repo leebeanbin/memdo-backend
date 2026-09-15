@@ -35,6 +35,12 @@ Deno.test('parseAgentToolCall accepts a valid call for every tool', () => {
     entryKind: 'task',
     scheduledDate: 'tomorrow',
   })
+  assertValid(AGENT_TOOL_NAMES.proposeScheduleBatch, {
+    items: [
+      { title: '미용실', entryKind: 'event', scheduledDate: 'today', startTime: '10:00' },
+      { title: '운동', entryKind: 'task', scheduledDate: 'tomorrow' },
+    ],
+  })
   assertValid(AGENT_TOOL_NAMES.proposeScheduleUpdate, { id: 'a1', action: 'complete' })
   assertValid(AGENT_TOOL_NAMES.proposeScheduleUpdate, { id: 'a1', action: 'delete' })
   assertValid(AGENT_TOOL_NAMES.proposeScheduleUpdate, {
@@ -318,6 +324,54 @@ Deno.test('parseAgentToolCall rejects propose_schedule_edit carrying an unrecogn
     id: 'a1',
     title: '새 제목',
     note: '메모',
+  })
+})
+
+// ── A3-1: propose_schedule_batch -- `items` reuses proposeScheduleArgsSchema
+// per item unchanged, so every per-item rule (event needs startTime,
+// dueDate is task-only, etc.) applies inside the array too, not just once
+// for the call as a whole. ──
+
+Deno.test('parseAgentToolCall rejects an empty propose_schedule_batch items array', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleBatch, { items: [] })
+})
+
+Deno.test('parseAgentToolCall rejects a propose_schedule_batch with more than 10 items', () => {
+  const items = Array.from(
+    { length: 11 },
+    (_, i) => ({ title: `할 일 ${i}`, entryKind: 'task', scheduledDate: 'today' }),
+  )
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleBatch, { items })
+})
+
+Deno.test('parseAgentToolCall accepts a propose_schedule_batch at exactly the 10-item cap', () => {
+  const items = Array.from(
+    { length: 10 },
+    (_, i) => ({ title: `할 일 ${i}`, entryKind: 'task', scheduledDate: 'today' }),
+  )
+  assertValid(AGENT_TOOL_NAMES.proposeScheduleBatch, { items })
+})
+
+Deno.test('parseAgentToolCall rejects propose_schedule_batch when one item in the array is invalid, not just the call as a whole', () => {
+  // Second item is an event with no startTime -- same per-item rule
+  // proposeScheduleArgsSchema already enforces for a lone propose_schedule
+  // call, now proven to reach inside the array too.
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleBatch, {
+    items: [
+      { title: '미용실', entryKind: 'event', scheduledDate: 'today', startTime: '10:00' },
+      { title: '회의', entryKind: 'event', scheduledDate: 'tomorrow' },
+    ],
+  })
+})
+
+Deno.test('parseAgentToolCall rejects propose_schedule_batch missing items entirely', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleBatch, {})
+})
+
+Deno.test('parseAgentToolCall rejects propose_schedule_batch carrying an unrecognized top-level field (strict)', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleBatch, {
+    items: [{ title: '미용실', entryKind: 'task', scheduledDate: 'today' }],
+    title: '엉뚱한 필드',
   })
 })
 

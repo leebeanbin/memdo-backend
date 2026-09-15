@@ -609,6 +609,162 @@ Deno.test('dispatchToolCall propose_schedule fails closed when the conflict chec
   assert(state.conflictTitle === null)
 })
 
+// ── A3-1/A3-2: propose_schedule_batch -- stages MULTIPLE new-item
+// proposals from one call, the structural fix for the bulk-create
+// confirmation-loop failure mode (relying on N sequential propose_schedule
+// calls, only the last of which ever actually staged). ──
+
+Deno.test('dispatchToolCall propose_schedule_batch stages every item in one call', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule_batch',
+    {
+      items: [
+        { title: '미용실', entryKind: 'event', scheduledDate: 'today', startTime: '10:00' },
+        { title: 'AWS 공부', entryKind: 'task', scheduledDate: 'tomorrow' },
+      ],
+    },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(result.count === 2)
+  assert(state.proposedScheduleBatch?.length === 2)
+  assert(state.proposedScheduleBatch?.[0].title === '미용실')
+  assert(state.proposedScheduleBatch?.[0].scheduledDate === '2026-08-16')
+  assert(state.proposedScheduleBatch?.[1].title === 'AWS 공부')
+  assert(state.proposedScheduleBatch?.[1].scheduledDate === '2026-08-17')
+})
+
+Deno.test('dispatchToolCall propose_schedule_batch fails closed on a second call in the same turn', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule_batch',
+    {
+      items: [{ title: '미용실', entryKind: 'event', scheduledDate: 'today', startTime: '10:00' }],
+    },
+    state,
+    dispatchToday,
+  )
+  const second: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule_batch',
+    { items: [{ title: '운동', entryKind: 'task', scheduledDate: 'tomorrow' }] },
+    state,
+    dispatchToday,
+  )
+  assert(second.ok === false)
+  // The first call's batch must survive untouched -- still exactly the one
+  // item from the first call, not silently overwritten or appended to.
+  assert(state.proposedScheduleBatch?.length === 1)
+  assert(state.proposedScheduleBatch?.[0].title === '미용실')
+})
+
+Deno.test('dispatchToolCall propose_schedule_batch surfaces a conflict on the specific item it belongs to, not the whole batch', async () => {
+  const state = newToolDispatchState()
+  const existing: ExistingScheduleRow[] = [{
+    id: 'a1',
+    title: '팀 회의',
+    scheduled_date: '2026-08-16',
+    start_at: timeOn('2026-08-16', '10:00')!.toISOString(),
+    end_at: timeOn('2026-08-16', '11:00')!.toISOString(),
+    version: 1,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing),
+    'propose_schedule_batch',
+    {
+      items: [
+        { title: '미용실', entryKind: 'event', scheduledDate: 'today', startTime: '10:30' },
+        { title: '독서', entryKind: 'task', scheduledDate: 'today' },
+      ],
+    },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(result.warning.includes('1'))
+  assert(state.proposedScheduleBatch?.[0].conflictTitle === '팀 회의')
+  // A task has no time range to conflict-check -- must stay unaffected by
+  // the sibling item's conflict, not inherit it.
+  assert(state.proposedScheduleBatch?.[1].conflictTitle === null)
+})
+
+Deno.test('dispatchToolCall propose_schedule_batch resolves categoryHint per item', async () => {
+  const state = newToolDispatchState()
+  const supabase = fakeSupabaseWithCategories([], [
+    { id: 'cat-1', name: '운동', is_task_kind: true },
+  ])
+  await dispatchToolCall(
+    supabase,
+    'propose_schedule_batch',
+    {
+      items: [
+        { title: '헬스장', entryKind: 'task', scheduledDate: 'today', categoryHint: '운동' },
+        { title: '독서', entryKind: 'task', scheduledDate: 'today', categoryHint: '취미' },
+      ],
+    },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedScheduleBatch?.[0].categoryId === 'cat-1')
+  assert(state.proposedScheduleBatch?.[1].categoryId === undefined)
+})
+
+Deno.test("dispatchToolCall propose_schedule_batch: one item's conflict-check failure doesn't block or taint the others", async () => {
+  // A per-item fake -- the 2nd fetchSchedules call (this item's own
+  // conflict check) fails, the 1st and 3rd succeed with no conflict. Proves
+  // handleProposeScheduleBatch's per-item try/catch is genuinely per-item,
+  // not a whole-batch fail-closed the way a single shared try/catch around
+  // the loop would produce.
+  let fetchCount = 0
+  const supabase = {
+    from: (_table: string) => {
+      const chain: any = {
+        select: () => chain,
+        is: () => chain,
+        not: () => chain,
+        gte: () => chain,
+        lte: () => chain,
+        limit: () => chain,
+        eq: () => chain,
+        maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        then: (resolve: (v: { data: unknown; error: unknown }) => void) => {
+          fetchCount += 1
+          if (fetchCount === 2) {
+            resolve({ data: null, error: new Error('boom') })
+          } else {
+            resolve({ data: [], error: null })
+          }
+        },
+      }
+      return chain
+    },
+  }
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    supabase,
+    'propose_schedule_batch',
+    {
+      items: [
+        { title: '미용실', entryKind: 'task', scheduledDate: 'today' },
+        { title: 'AWS', entryKind: 'task', scheduledDate: 'today' },
+        { title: '운동', entryKind: 'task', scheduledDate: 'today' },
+      ],
+    },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(result.warning.includes('1'))
+  assert(state.proposedScheduleBatch?.[0].conflictCheckFailed === false)
+  assert(state.proposedScheduleBatch?.[1].conflictCheckFailed === true)
+  assert(state.proposedScheduleBatch?.[2].conflictCheckFailed === false)
+  assert(state.proposedScheduleBatch?.length === 3)
+})
+
 Deno.test('dispatchToolCall propose_schedule_update completes against a real target', async () => {
   const state = newToolDispatchState()
   const existing: ExistingScheduleRow[] = [{
@@ -1576,6 +1732,34 @@ Deno.test('buildDonePayload.proposedSchedule always includes the pre-A1-1 date/i
   assert(payload.proposedSchedule !== null)
   assert(payload.proposedSchedule!.date === payload.proposedSchedule!.scheduledDate)
   assert(payload.proposedSchedule!.isTask === true)
+})
+
+// A3-1: no iOS DTO decodes this yet (A3-3 is the dedicated multi-confirm UI
+// work) -- same "plumbing ready before the card exists" precedent
+// proposedScheduleEdit followed before A2-3, so this isn't added to
+// IOS_STREAM_LINE_KEYS/the subset-check loop above yet. Just confirms
+// buildDonePayload actually threads state.proposedScheduleBatch through.
+Deno.test('buildDonePayload.proposedScheduleBatch carries every staged item through, null when nothing was proposed', async () => {
+  const emptyState = newToolDispatchState()
+  assert(buildDonePayload(emptyState, fakeTrace).proposedScheduleBatch === null)
+
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeScheduleBatch,
+    {
+      items: [
+        { title: '미용실', entryKind: 'event', scheduledDate: 'today', startTime: '10:00' },
+        { title: '운동', entryKind: 'task', scheduledDate: 'tomorrow' },
+      ],
+    },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state, fakeTrace)
+  assert(payload.proposedScheduleBatch?.length === 2)
+  assert(payload.proposedScheduleBatch?.[0].title === '미용실')
+  assert(payload.proposedScheduleBatch?.[1].title === '운동')
 })
 
 Deno.test('buildDonePayload.proposedSchedule derives isTask:false for an event', async () => {

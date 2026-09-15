@@ -143,6 +143,66 @@ Deno.test('buildFounderDebugTrace never emits full note/locationQuery/categoryHi
   assert(call.args.categoryHintLength === '건강'.length)
 })
 
+// A3-1: each item in propose_schedule_batch's `items` array gets the exact
+// same per-field redaction as a standalone propose_schedule call -- proven
+// here by seeding two items with distinct sensitive title/note/
+// locationQuery/categoryHint text and confirming none of it survives.
+Deno.test('buildFounderDebugTrace never emits full title/note/locationQuery/categoryHint text for any item in propose_schedule_batch', () => {
+  const built = buildFounderDebugTrace(
+    trace,
+    dispatched([{
+      name: 'propose_schedule_batch',
+      args: {
+        items: [
+          {
+            title: '회사 A와의 비밀 협상',
+            entryKind: 'event',
+            scheduledDate: 'tomorrow',
+            startTime: '14:00',
+            note: '절대 외부에 공개하면 안 되는 내용',
+          },
+          {
+            title: '병원 예약',
+            entryKind: 'task',
+            scheduledDate: 'tomorrow',
+            locationQuery: '서울대학교병원 정신건강의학과',
+            categoryHint: '건강',
+          },
+        ],
+      },
+      result: { ok: true, count: 2 },
+    }]),
+  )
+  const call = built.toolCalls[0]
+  const serialized = JSON.stringify(call.args)
+  assert(!serialized.includes('비밀 협상'))
+  assert(!serialized.includes('외부에 공개'))
+  assert(!serialized.includes('정신건강의학과'))
+  assert(!serialized.includes('건강'))
+  const items = call.args.items as Array<Record<string, unknown>>
+  assert(items.length === 2)
+  assert(items[0].titleLength === '회사 A와의 비밀 협상'.length)
+  assert(items[0].noteLength === '절대 외부에 공개하면 안 되는 내용'.length)
+  assert(items[0].scheduledDate === 'tomorrow')
+  assert(items[1].locationQueryLength === '서울대학교병원 정신건강의학과'.length)
+  assert(items[1].categoryHintLength === '건강'.length)
+})
+
+Deno.test('buildFounderDebugTrace propose_schedule_batch result keeps the item count, drops everything else', () => {
+  const built = buildFounderDebugTrace(
+    trace,
+    dispatched([{
+      name: 'propose_schedule_batch',
+      args: { items: [] },
+      result: { ok: true, count: 3, warning: '1 item(s) conflict with existing schedules' },
+    }]),
+  )
+  const result = built.toolCalls[0].result as Record<string, unknown>
+  assert(result.ok === true)
+  assert(result.count === 3)
+  assert(!('warning' in result))
+})
+
 Deno.test('buildFounderDebugTrace never leaks a conflicting item title embedded in a warning string', () => {
   const built = buildFounderDebugTrace(
     trace,
