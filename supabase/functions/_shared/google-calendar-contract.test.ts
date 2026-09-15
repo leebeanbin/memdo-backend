@@ -163,6 +163,8 @@ Deno.test('toGoogleEventBody pushes a task as a single-day all-day event with an
     end_at: null,
     note: null,
     location_name: null,
+    reminder_offsets_minutes: [],
+    source: 'manual',
   })
   assertEquals(body.start.date, '2026-09-05')
   assertEquals(body.end.date, '2026-09-06')
@@ -180,6 +182,8 @@ Deno.test('toGoogleEventBody exclusive end-date rolls over a month/year boundary
     end_at: null,
     note: null,
     location_name: null,
+    reminder_offsets_minutes: [],
+    source: 'manual',
   })
   assertEquals(body.start.date, '2026-12-31')
   assertEquals(body.end.date, '2027-01-01')
@@ -196,6 +200,8 @@ Deno.test('toGoogleEventBody pushes a timed event with real start/end dateTime, 
     end_at: '2026-09-05T10:00:00Z',
     note: null,
     location_name: null,
+    reminder_offsets_minutes: [],
+    source: 'manual',
   })
   assertEquals(body.start.dateTime, '2026-09-05T09:00:00Z')
   assertEquals(body.end.dateTime, '2026-09-05T10:00:00Z')
@@ -213,9 +219,83 @@ Deno.test('toGoogleEventBody tags every pushed event with memdoTodoId/memdoKind'
     end_at: null,
     note: null,
     location_name: null,
+    reminder_offsets_minutes: [],
+    source: 'manual',
   })
   assertEquals(body.extendedProperties.private[MEMDO_TODO_ID_PROPERTY], 'todo-4')
   assertEquals(body.extendedProperties.private[MEMDO_KIND_PROPERTY], 'task')
+})
+
+// toGoogleEventBody reminders (R1-7) -- two rules that must not be gotten
+// backwards: "no reminders" is an explicit empty overrides array, not an
+// omitted field (which would let Google's account-level default apply);
+// and a materialized-from-Google todo (source === 'google_calendar') must
+// never push a reminders block at all, so an unrelated-field PATCH can't
+// silently wipe a reminder the user set directly in Google Calendar.
+
+Deno.test('toGoogleEventBody sends useDefault:false with popup overrides for a Memdo-origin todo', () => {
+  const body = toGoogleEventBody({
+    id: 'todo-5',
+    title: '팀 회의',
+    entry_kind: 'event',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: '2026-09-05T09:00:00Z',
+    end_at: '2026-09-05T10:00:00Z',
+    note: null,
+    location_name: null,
+    reminder_offsets_minutes: [10, 30],
+    source: 'manual',
+  })
+  assertEquals(
+    JSON.stringify(body.reminders),
+    JSON.stringify({
+      useDefault: false,
+      overrides: [{ method: 'popup', minutes: 10 }, { method: 'popup', minutes: 30 }],
+    }),
+  )
+})
+
+Deno.test('toGoogleEventBody sends an explicit empty overrides array, not an omitted field, when Memdo has no reminders set', () => {
+  const body = toGoogleEventBody({
+    id: 'todo-6',
+    title: '팀 회의',
+    entry_kind: 'event',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: '2026-09-05T09:00:00Z',
+    end_at: '2026-09-05T10:00:00Z',
+    note: null,
+    location_name: null,
+    reminder_offsets_minutes: [],
+    source: 'manual',
+  })
+  assertEquals(JSON.stringify(body.reminders), JSON.stringify({ useDefault: false, overrides: [] }))
+  // The distinction that actually matters: the key is present in the
+  // serialized payload (Google must see an explicit block), not merely
+  // that the in-memory value happens to be an empty-overrides object.
+  assert('reminders' in JSON.parse(JSON.stringify(body)))
+})
+
+Deno.test('toGoogleEventBody omits reminders entirely for a materialized-from-Google todo, even with Memdo-side offsets set', () => {
+  const body = toGoogleEventBody({
+    id: 'todo-7',
+    title: '팀 회의',
+    entry_kind: 'event',
+    is_all_day: false,
+    scheduled_date: '2026-09-05',
+    start_at: '2026-09-05T09:00:00Z',
+    end_at: '2026-09-05T10:00:00Z',
+    note: null,
+    location_name: null,
+    reminder_offsets_minutes: [10],
+    source: 'google_calendar',
+  })
+  assertEquals(body.reminders, undefined)
+  // The field must be genuinely absent from the serialized PATCH body, not
+  // merely `null` -- either would silently wipe reminders set directly in
+  // Google Calendar, since PATCH preserves any field it doesn't receive.
+  assert(!('reminders' in JSON.parse(JSON.stringify(body))))
 })
 
 // toGoogleEventBody's id / createGoogleEvent idempotency -- a create retry
@@ -235,6 +315,8 @@ Deno.test('toGoogleEventBody derives a deterministic Google event id from the to
     end_at: null,
     note: null,
     location_name: null,
+    reminder_offsets_minutes: [],
+    source: 'manual',
   })
   assertEquals(body.id, 'a1b2c3d4e5f6478990abcdef01234567')
   // Google's events.insert custom-id constraint: lowercase base32hex
@@ -263,6 +345,8 @@ Deno.test('createGoogleEvent recovers the same deterministic id on a 409 (alread
       end_at: null,
       note: null,
       location_name: null,
+      reminder_offsets_minutes: [],
+      source: 'manual',
     })
     assertEquals(result.id, 'a1b2c3d4e5f6478990abcdef01234567')
     assertEquals(requestCount, 1)

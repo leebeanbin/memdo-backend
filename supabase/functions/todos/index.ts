@@ -60,6 +60,8 @@ function pushableTodo(row: Record<string, unknown>): PushableTodo {
     end_at: row.end_at as string | null,
     note: row.note as string | null,
     location_name: row.location_name as string | null,
+    reminder_offsets_minutes: (row.reminder_offsets_minutes as number[] | null) ?? [],
+    source: row.source as string,
   }
 }
 

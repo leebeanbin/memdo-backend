@@ -62,7 +62,9 @@ async function pushOne(
   // stale snapshot, since this queue row may have sat for a while.
   const { data: todo, error: todoError } = await supabase
     .from('todos')
-    .select('id,title,entry_kind,is_all_day,scheduled_date,start_at,end_at,note,location_name')
+    .select(
+      'id,title,entry_kind,is_all_day,scheduled_date,start_at,end_at,note,location_name,reminder_offsets_minutes,source',
+    )
     .eq('id', row.todo_id)
     .eq('user_id', row.user_id)
     .is('deleted_at', null)

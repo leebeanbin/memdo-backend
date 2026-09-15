@@ -349,6 +349,12 @@ export type PushableTodo = {
   end_at: string | null
   note: string | null
   location_name: string | null
+  reminder_offsets_minutes: number[]
+  // R1-7: distinguishes a materialized-from-Google todo (source ===
+  // 'google_calendar', google_event_id already points at a pre-existing
+  // Google event the user set up directly in Google Calendar) from a
+  // genuinely Memdo-origin one -- see toGoogleEventBody's reminders logic.
+  source: string
 }
 
 /** Google's own convention: an all-day event's end.date is EXCLUSIVE -- a
@@ -369,6 +375,10 @@ type GoogleEventBody = {
   start: { date?: string; dateTime?: string }
   end: { date?: string; dateTime?: string }
   extendedProperties: { private: Record<string, string> }
+  reminders?: {
+    useDefault: boolean
+    overrides?: Array<{ method: 'popup'; minutes: number }>
+  }
 }
 
 /** Google's own custom-id constraint for events.insert: lowercase base32hex
@@ -392,7 +402,22 @@ function deterministicGoogleEventId(todoId: string): string {
  * an all-day event on their scheduled_date; events push with their real
  * start/end (all-day or timed, matching is_all_day). Every event Memdo
  * pushes is tagged with memdoTodoId/memdoKind so the pull side can
- * recognize it later -- see isMemdoAuthoredEvent above. */
+ * recognize it later -- see isMemdoAuthoredEvent above.
+ *
+ * R1-7 reminders, two rules that must not be gotten backwards:
+ * 1. A genuinely Memdo-origin todo always sends an explicit `reminders`
+ *    block, even when reminder_offsets_minutes is empty -- omitting the
+ *    field entirely would let Google's account-level default reminder
+ *    apply, which is NOT what "no reminders" means in Memdo.
+ * 2. A materialized-from-Google todo (source === 'google_calendar' --
+ *    google_event_id already points at a pre-existing event the user set
+ *    up directly in Google Calendar) omits `reminders` entirely on every
+ *    push, including a PATCH that's only touching an unrelated field.
+ *    Google's PATCH semantics preserve any field you don't send; sending a
+ *    default/empty reminders block here would silently wipe reminders the
+ *    user set directly in Google. Full ownership-takeover of a Google-set
+ *    reminder (so a deliberate Memdo-side reminder edit CAN push through)
+ *    is out of scope here -- see R1-9. */
 export function toGoogleEventBody(todo: PushableTodo): GoogleEventBody {
   const isTask = todo.entry_kind === 'task'
   const start = isTask || todo.is_all_day || !todo.start_at
@@ -413,6 +438,13 @@ export function toGoogleEventBody(todo: PushableTodo): GoogleEventBody {
         [MEMDO_TODO_ID_PROPERTY]: todo.id,
         [MEMDO_KIND_PROPERTY]: todo.entry_kind,
       },
+    },
+    reminders: todo.source === 'google_calendar' ? undefined : {
+      useDefault: false,
+      overrides: todo.reminder_offsets_minutes.map((minutes) => ({
+        method: 'popup' as const,
+        minutes,
+      })),
     },
   }
 }
