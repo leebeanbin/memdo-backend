@@ -309,11 +309,11 @@ function todoValues(input: TodoInput) {
   // The legacy scalar DB column is kept in sync (set to the array's
   // minimum -- already sorted ascending by reminderOffsetsSchema's own
   // transform, so [0] is the nearest-to-event reminder) rather than left
-  // to go stale on every write. Other code paths still read it directly
-  // today and haven't been made array-aware yet (schedule_rules
-  // materialization, reschedule_todo's RPC -- R1-3); syncing it here
-  // avoids a real regression in those paths until R1-3 lands, and matches
-  // the same "legacy scalar = minimum" rule the API response uses.
+  // to go stale on every write -- an old iOS client (pre-R1-4) still reads
+  // this column directly and must keep seeing a correct single reminder
+  // throughout the R1 bridge window, matching the same "legacy scalar =
+  // minimum" rule the API response (todoDto) and the now-array-aware
+  // schedule_rules materialization/reschedule_todo RPC (R1-3) all use.
   const reminderOffsetsMinutes = reminderOffsetsMinutesFor(input)
   return {
     calendar_id: input.calendarId,
