@@ -219,7 +219,7 @@ Deno.test('CLARIFICATION_REQUIRED expected, but propose_schedule fires instead: 
 
 Deno.test('PROPOSE_SCHEDULE expected, but request_clarification fires instead: fail', () => {
   const result = gradeCase(
-    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { isTask: true } },
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { entryKind: 'task' } },
     { dispatchedTools: [call('request_clarification', { question: '몇 시에 만나고 싶으세요?' })] },
   )
   assertEquals(result.verdict, 'fail')
@@ -229,10 +229,13 @@ Deno.test('PROPOSE_SCHEDULE expected, but request_clarification fires instead: f
 
 Deno.test('PROPOSE_SCHEDULE expected, matching args: pass', () => {
   const result = gradeCase(
-    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { date: 'tomorrow', startTime: '15:00' } },
+    {
+      expectedBehavior: 'PROPOSE_SCHEDULE',
+      expected: { scheduledDate: 'tomorrow', startTime: '15:00' },
+    },
     {
       dispatchedTools: [
-        call('propose_schedule', { date: 'tomorrow', startTime: '15:00', title: '치과' }),
+        call('propose_schedule', { scheduledDate: 'tomorrow', startTime: '15:00', title: '치과' }),
       ],
     },
   )
@@ -241,17 +244,19 @@ Deno.test('PROPOSE_SCHEDULE expected, matching args: pass', () => {
 
 Deno.test('PROPOSE_SCHEDULE expected, mismatched expected field: fail', () => {
   const result = gradeCase(
-    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { date: 'tomorrow' } },
-    { dispatchedTools: [call('propose_schedule', { date: 'today' })] },
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { scheduledDate: 'tomorrow' } },
+    { dispatchedTools: [call('propose_schedule', { scheduledDate: 'today' })] },
   )
   assertEquals(result.verdict, 'fail')
 })
 
 Deno.test('PROPOSE_SCHEDULE expected, extra unpinned args always pass', () => {
   const result = gradeCase(
-    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { isTask: true } },
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: { entryKind: 'task' } },
     {
-      dispatchedTools: [call('propose_schedule', { isTask: true, note: 'unrelated extra field' })],
+      dispatchedTools: [
+        call('propose_schedule', { entryKind: 'task', note: 'unrelated extra field' }),
+      ],
     },
   )
   assertEquals(result.verdict, 'pass')

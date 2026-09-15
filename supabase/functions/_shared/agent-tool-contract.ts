@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { reminderOffsetsSchema } from './todo-contract.ts'
 
 // Single source of truth for every cloud Agent tool name -- referenced by
 // cloudAgentTools' JSON Schema (agent-cloud-contract.ts, what the model
@@ -44,21 +45,43 @@ export const dateExpressionWithYesterdaySchema = z.enum(['today', 'tomorrow', 'y
 )
 export const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 
+// A1-1: widened from the original title/date/startTime/endTime/isTask/note
+// subset to cover the core fields a real Todo supports -- a natural-
+// language request naming a location, due date, duration, reminders, or
+// category must have a slot to land in, not get silently dropped before it
+// ever reaches the proposal card (A1-2). locationQuery/categoryHint stay
+// opaque model-proposed strings here -- resolving them against real
+// coordinates/a real categoryId is A1-3's deterministic resolution
+// boundary, never invented by the model directly.
 export const proposeScheduleArgsSchema = z.object({
   // bd4: was max(200) -- todoInputSchema (the real save-time limit) caps at
   // 120, so a 121-200 char title staged fine and then failed to save on
   // approval. Matched to the real limit so a staged proposal can never
   // fail this specific check that a save would also fail.
   title: z.string().trim().min(1).max(120),
-  date: dateExpressionSchema,
+  entryKind: z.enum(['event', 'task']),
+  scheduledDate: dateExpressionSchema,
   startTime: timeSchema.optional(),
   endTime: timeSchema.optional(),
-  isTask: z.boolean(),
+  // Task-only, mirrors todoInputSchema's "entry_kind = 'task' or due_at is
+  // null" rule. Split date/time (not one ISO instant) matches this
+  // schema's own date-token + optional HH:mm pattern for scheduledDate/
+  // startTime/endTime -- resolved against the user's timezone server-side
+  // the same way, rather than asking the model to produce a correctly
+  // zone-offset ISO datetime itself.
+  dueDate: dateExpressionSchema.optional(),
+  dueTime: timeSchema.optional(),
+  estimatedMinutes: z.number().int().min(1).max(1440).optional(),
+  reminderOffsetsMinutes: reminderOffsetsSchema.optional(),
+  locationQuery: z.string().trim().min(1).max(200).optional(),
+  categoryHint: z.string().trim().min(1).max(50).optional(),
+  repeat: z.enum(['daily', 'weekdays', 'weekly', 'biweekly', 'monthly', 'yearly']).optional(),
   note: z.string().max(2000).optional(),
 }).superRefine((value, ctx) => {
   // Mirrors todoInputSchema's own "event requires startAt" half of its rule
-  // -- an isTask:false proposal with no startTime could never actually save.
-  if (!value.isTask && !value.startTime) {
+  // -- an entryKind:'event' proposal with no startTime could never actually
+  // save.
+  if (value.entryKind === 'event' && !value.startTime) {
     ctx.addIssue({ code: 'custom', path: ['startTime'], message: 'Event requires a startTime' })
   }
   if (value.endTime && !value.startTime) {
@@ -67,6 +90,12 @@ export const proposeScheduleArgsSchema = z.object({
   // Same lexicographic HH:mm comparison scheduleRuleInputSchema already uses.
   if (value.startTime && value.endTime && value.endTime <= value.startTime) {
     ctx.addIssue({ code: 'custom', path: ['endTime'], message: 'endTime must follow startTime' })
+  }
+  if (value.entryKind === 'event' && (value.dueDate || value.dueTime)) {
+    ctx.addIssue({ code: 'custom', path: ['dueDate'], message: 'dueDate/dueTime is task-only' })
+  }
+  if (value.dueTime && !value.dueDate) {
+    ctx.addIssue({ code: 'custom', path: ['dueTime'], message: 'dueTime requires dueDate' })
   }
   // endTime is deliberately NOT required here, even though todoInputSchema
   // requires both startAt+endAt for an event at save time. This validator

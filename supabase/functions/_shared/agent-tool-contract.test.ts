@@ -25,12 +25,16 @@ Deno.test('parseAgentToolCall accepts a valid call for every tool', () => {
   assertValid(AGENT_TOOL_NAMES.findFreeSlots, { scope: 'today', durationMinutes: 30 })
   assertValid(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '점심',
-    date: 'today',
+    entryKind: 'event',
+    scheduledDate: 'today',
     startTime: '12:00',
     endTime: '13:00',
-    isTask: false,
   })
-  assertValid(AGENT_TOOL_NAMES.proposeSchedule, { title: '장보기', date: 'tomorrow', isTask: true })
+  assertValid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '장보기',
+    entryKind: 'task',
+    scheduledDate: 'tomorrow',
+  })
   assertValid(AGENT_TOOL_NAMES.proposeScheduleUpdate, { id: 'a1', action: 'complete' })
   assertValid(AGENT_TOOL_NAMES.proposeScheduleUpdate, { id: 'a1', action: 'delete' })
   assertValid(AGENT_TOOL_NAMES.proposeScheduleUpdate, {
@@ -77,8 +81,8 @@ Deno.test('parseAgentToolCall rejects request_clarification with too many missin
 Deno.test('parseAgentToolCall rejects an impossible calendar date', () => {
   assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '치과',
-    date: '2026-99-40',
-    isTask: false,
+    entryKind: 'event',
+    scheduledDate: '2026-99-40',
     startTime: '15:00',
   })
 })
@@ -86,8 +90,8 @@ Deno.test('parseAgentToolCall rejects an impossible calendar date', () => {
 Deno.test('parseAgentToolCall rejects a non-date date token', () => {
   assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '치과',
-    date: 'banana',
-    isTask: false,
+    entryKind: 'event',
+    scheduledDate: 'banana',
     startTime: '15:00',
   })
 })
@@ -95,8 +99,8 @@ Deno.test('parseAgentToolCall rejects a non-date date token', () => {
 Deno.test('parseAgentToolCall rejects a malformed time', () => {
   assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '치과',
-    date: 'today',
-    isTask: false,
+    entryKind: 'event',
+    scheduledDate: 'today',
     startTime: '25:80',
   })
 })
@@ -129,8 +133,8 @@ Deno.test('parseAgentToolCall rejects complete/delete carrying reschedule-only f
 Deno.test('parseAgentToolCall rejects endTime without startTime', () => {
   assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '회의',
-    date: 'today',
-    isTask: false,
+    entryKind: 'event',
+    scheduledDate: 'today',
     endTime: '13:00',
   })
 })
@@ -138,15 +142,19 @@ Deno.test('parseAgentToolCall rejects endTime without startTime', () => {
 Deno.test('parseAgentToolCall rejects endTime at or before startTime', () => {
   assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '회의',
-    date: 'today',
-    isTask: false,
+    entryKind: 'event',
+    scheduledDate: 'today',
     startTime: '13:00',
     endTime: '13:00',
   })
 })
 
 Deno.test('parseAgentToolCall rejects a non-task event with no startTime', () => {
-  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, { title: '회의', date: 'today', isTask: false })
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '회의',
+    entryKind: 'event',
+    scheduledDate: 'today',
+  })
 })
 
 // bd4: was max(200) here vs. todoInputSchema's real max(120) -- a 121-200
@@ -154,18 +162,113 @@ Deno.test('parseAgentToolCall rejects a non-task event with no startTime', () =>
 Deno.test("parseAgentToolCall rejects a title past todoInputSchema's real 120-char save limit", () => {
   assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '가'.repeat(121),
-    date: 'today',
-    isTask: true,
+    entryKind: 'task',
+    scheduledDate: 'today',
   })
 })
 
 Deno.test('parseAgentToolCall accepts a title at exactly the 120-char save limit', () => {
   const result = parseAgentToolCall(AGENT_TOOL_NAMES.proposeSchedule, {
     title: '가'.repeat(120),
-    date: 'today',
-    isTask: true,
+    entryKind: 'task',
+    scheduledDate: 'today',
   })
   assert(result.ok)
+})
+
+// ── A1-1: the widened core-Todo-field set (dueDate/dueTime,
+// estimatedMinutes, reminderOffsetsMinutes, locationQuery, categoryHint,
+// repeat) -- each has a slot now, not silently dropped before it ever
+// reaches the proposal card. ──
+
+Deno.test('parseAgentToolCall accepts a task proposal carrying every new A1-1 field', () => {
+  assertValid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '보고서 제출',
+    entryKind: 'task',
+    scheduledDate: 'today',
+    dueDate: 'tomorrow',
+    dueTime: '18:00',
+    estimatedMinutes: 90,
+    reminderOffsetsMinutes: [10, 1440],
+    locationQuery: '집',
+    categoryHint: '업무',
+    repeat: 'weekly',
+    note: '초안 검토 포함',
+  })
+})
+
+Deno.test('parseAgentToolCall rejects dueDate/dueTime on an event (task-only)', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '회의',
+    entryKind: 'event',
+    scheduledDate: 'today',
+    startTime: '10:00',
+    dueDate: 'tomorrow',
+  })
+})
+
+Deno.test('parseAgentToolCall rejects dueTime without dueDate', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '보고서 제출',
+    entryKind: 'task',
+    scheduledDate: 'today',
+    dueTime: '18:00',
+  })
+})
+
+Deno.test('parseAgentToolCall rejects an unrecognized entryKind', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '회의',
+    entryKind: 'reminder',
+    scheduledDate: 'today',
+    startTime: '10:00',
+  })
+})
+
+Deno.test('parseAgentToolCall rejects more than 5 reminderOffsetsMinutes (matches the R1-1 domain cap)', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '회의',
+    entryKind: 'event',
+    scheduledDate: 'today',
+    startTime: '10:00',
+    reminderOffsetsMinutes: [5, 10, 30, 60, 120, 1440],
+  })
+})
+
+Deno.test('parseAgentToolCall rejects duplicate reminderOffsetsMinutes', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '회의',
+    entryKind: 'event',
+    scheduledDate: 'today',
+    startTime: '10:00',
+    reminderOffsetsMinutes: [10, 10],
+  })
+})
+
+Deno.test('parseAgentToolCall sorts reminderOffsetsMinutes ascending, same as the domain schema', () => {
+  const result = parseAgentToolCall(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '회의',
+    entryKind: 'event',
+    scheduledDate: 'today',
+    startTime: '10:00',
+    reminderOffsetsMinutes: [60, 10, 1440],
+  })
+  assert(result.ok)
+  if (!result.ok) throw new Error('unreachable')
+  assert(
+    JSON.stringify((result.args as { reminderOffsetsMinutes: number[] }).reminderOffsetsMinutes) ===
+      JSON.stringify([10, 60, 1440]),
+  )
+})
+
+Deno.test('parseAgentToolCall rejects an unrecognized repeat frequency', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeSchedule, {
+    title: '회의',
+    entryKind: 'event',
+    scheduledDate: 'today',
+    startTime: '10:00',
+    repeat: 'hourly',
+  })
 })
 
 Deno.test('parseAgentToolCall rejects a search range where to precedes from', () => {

@@ -220,18 +220,48 @@ export const cloudAgentTools = [
     function: {
       name: AGENT_TOOL_NAMES.proposeSchedule,
       description:
-        'Propose a new schedule or task for the user to confirm. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim something was created without the user approving a proposal. Only one proposal can be staged at a time -- if the user is asking for multiple new items, propose just the first one and mention the rest still need their own turn once this one is confirmed or declined.',
+        'Propose a new schedule or task for the user to confirm. This does NOT save anything -- it only stages a proposal the user must explicitly approve. Never claim something was created without the user approving a proposal. Only one proposal can be staged at a time -- if the user is asking for multiple new items, propose just the first one and mention the rest still need their own turn once this one is confirmed or declined. Only set a field the user actually specified or clearly implied -- never invent a location, category, reminder count, duration, or due date the user never mentioned; leave it out instead.',
       parameters: {
         type: 'object',
         properties: {
           title: { type: 'string' },
-          date: { type: 'string', description: "'today', 'tomorrow', or yyyy-MM-dd" },
+          entryKind: { type: 'string', enum: ['event', 'task'] },
+          scheduledDate: { type: 'string', description: "'today', 'tomorrow', or yyyy-MM-dd" },
           startTime: { type: 'string', description: 'HH:mm, omit for a task' },
           endTime: { type: 'string', description: 'HH:mm, omit for a task' },
-          isTask: { type: 'boolean' },
+          dueDate: {
+            type: 'string',
+            description:
+              "Task only -- 'today', 'tomorrow', or yyyy-MM-dd. Only when the user names a deadline distinct from a scheduled time.",
+          },
+          dueTime: { type: 'string', description: 'HH:mm, only alongside dueDate' },
+          estimatedMinutes: {
+            type: 'integer',
+            description: 'How long the task/event is expected to take, only if the user states it',
+          },
+          reminderOffsetsMinutes: {
+            type: 'array',
+            items: { type: 'integer' },
+            description:
+              'Minutes before the start (or due time, if no start) to remind the user -- e.g. [10, 1440] for 10 minutes and 1 day before. Up to 5. Omit for no reminder.',
+          },
+          locationQuery: {
+            type: 'string',
+            description:
+              'A place name or address the user mentioned, in their own words -- never a resolved address or coordinates.',
+          },
+          categoryHint: {
+            type: 'string',
+            description: "A category the user named or clearly implied (e.g. '운동', '업무').",
+          },
+          repeat: {
+            type: 'string',
+            enum: ['daily', 'weekdays', 'weekly', 'biweekly', 'monthly', 'yearly'],
+            description: 'Only when the user explicitly asks for a recurring item.',
+          },
           note: { type: 'string' },
         },
-        required: ['title', 'date', 'isTask'],
+        required: ['title', 'entryKind', 'scheduledDate'],
       },
     },
   },
@@ -487,10 +517,17 @@ export type ExistingScheduleRow = {
 
 export type ProposedScheduleArgs = {
   title: string
-  date: string
+  entryKind: 'event' | 'task'
+  scheduledDate: string
   startTime?: string | null
   endTime?: string | null
-  isTask: boolean
+  dueDate?: string | null
+  dueTime?: string | null
+  estimatedMinutes?: number
+  reminderOffsetsMinutes?: number[]
+  locationQuery?: string
+  categoryHint?: string
+  repeat?: 'daily' | 'weekdays' | 'weekly' | 'biweekly' | 'monthly' | 'yearly'
 }
 
 export type ProposedScheduleUpdateArgs = {
@@ -509,8 +546,8 @@ export function resolveProposedInterval(
   proposed: ProposedScheduleArgs,
   today: Date = new Date(),
 ): { start: Date; end: Date } | null {
-  if (proposed.isTask || !proposed.startTime) return null
-  const date = resolveDate(proposed.date, today)
+  if (proposed.entryKind === 'task' || !proposed.startTime) return null
+  const date = resolveDate(proposed.scheduledDate, today)
   const start = timeOn(date, proposed.startTime)
   if (!start) return null
   const end = timeOn(date, proposed.endTime) ?? new Date(start.getTime() + 3_600_000)
@@ -1096,12 +1133,19 @@ async function handleProposeSchedule(
   // AgentDateExpression(token:) already parses, so this needs no client
   // change: it stops applying today/tomorrow semantics client-side at all
   // instead of getting them wrong for a second time.
-  // args.date is required by proposeScheduleArgsSchema (parseAgentToolCall
-  // already validated it before this handler ran) -- no fallback needed.
+  // args.scheduledDate is required by proposeScheduleArgsSchema
+  // (parseAgentToolCall already validated it before this handler ran) -- no
+  // fallback needed. args.dueDate (A1-1) is optional and gets the exact
+  // same treatment when present, for the exact same reason -- the key is
+  // only added when there's a real value to resolve, not set to `undefined`
+  // when absent, so it stays genuinely absent from state.proposedSchedule
+  // (and the client payload) exactly like every other optional field here,
+  // instead of showing up as a present-but-undefined key.
   const offsetMinutes = await resolveUserTimezoneOffsetMinutes(supabase, today)
   const resolvedArgs: ProposedScheduleArgs = {
     ...(args as ProposedScheduleArgs),
-    date: resolveDate(args.date, today, offsetMinutes),
+    scheduledDate: resolveDate(args.scheduledDate, today, offsetMinutes),
+    ...(args.dueDate ? { dueDate: resolveDate(args.dueDate, today, offsetMinutes) } : {}),
   }
   state.proposedSchedule = resolvedArgs
   // Reflection: guaranteed, not dependent on the model having called
@@ -1116,7 +1160,7 @@ async function handleProposeSchedule(
   // into conflictTitle (a real conflict has a real event title; "we
   // couldn't check" doesn't, and the client renders conflictTitle inside a
   // "there's a '<title>' at the same time" sentence).
-  const proposedDate = resolvedArgs.date
+  const proposedDate = resolvedArgs.scheduledDate
   let existing: ExistingScheduleRow[]
   try {
     existing = await fetchSchedules(supabase, proposedDate, proposedDate)
@@ -1192,10 +1236,10 @@ async function handleProposeScheduleUpdate(
           existing.filter((row) => row.id !== updateArgs.id),
           {
             title: target.title,
-            date,
+            entryKind: 'event',
+            scheduledDate: date,
             startTime: updateArgs.startTime,
             endTime: updateArgs.endTime,
-            isTask: false,
           },
           today,
         )

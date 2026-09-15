@@ -68,10 +68,10 @@ Deno.test('buildFounderDebugTrace never emits full note or title text (propose_s
       name: 'propose_schedule',
       args: {
         title: '회사 A와의 비밀 협상',
-        date: 'tomorrow',
+        entryKind: 'event',
+        scheduledDate: 'tomorrow',
         startTime: '14:00',
         endTime: '15:00',
-        isTask: false,
         note: '절대 외부에 공개하면 안 되는 내용',
       },
       result: { ok: true },
@@ -83,8 +83,34 @@ Deno.test('buildFounderDebugTrace never emits full note or title text (propose_s
   assert(!serialized.includes('외부에 공개'))
   assert(call.args.titleLength === '회사 A와의 비밀 협상'.length)
   assert(call.args.noteLength === '절대 외부에 공개하면 안 되는 내용'.length)
-  assert(call.args.date === 'tomorrow')
+  assert(call.args.scheduledDate === 'tomorrow')
   assert(call.args.startTime === '14:00')
+})
+
+// A1-1: locationQuery/categoryHint are user-influenced free text -- same
+// redaction rule as title/note, length only.
+Deno.test('buildFounderDebugTrace never emits full locationQuery or categoryHint text (propose_schedule)', () => {
+  const built = buildFounderDebugTrace(
+    trace,
+    dispatched([{
+      name: 'propose_schedule',
+      args: {
+        title: '병원 예약',
+        entryKind: 'event',
+        scheduledDate: 'tomorrow',
+        startTime: '14:00',
+        locationQuery: '서울대학교병원 정신건강의학과',
+        categoryHint: '건강',
+      },
+      result: { ok: true },
+    }]),
+  )
+  const call = built.toolCalls[0]
+  const serialized = JSON.stringify(call.args)
+  assert(!serialized.includes('정신건강의학과'))
+  assert(!serialized.includes('건강'))
+  assert(call.args.locationQueryLength === '서울대학교병원 정신건강의학과'.length)
+  assert(call.args.categoryHintLength === '건강'.length)
 })
 
 Deno.test('buildFounderDebugTrace never leaks a conflicting item title embedded in a warning string', () => {
@@ -94,10 +120,10 @@ Deno.test('buildFounderDebugTrace never leaks a conflicting item title embedded 
       name: 'propose_schedule',
       args: {
         title: '점심 약속',
-        date: 'today',
+        entryKind: 'event',
+        scheduledDate: 'today',
         startTime: '12:00',
         endTime: '13:00',
-        isTask: false,
       },
       result: { ok: true, warning: "Conflicts with existing '팀 전체 회의'" },
     }]),

@@ -128,13 +128,30 @@ function sanitizeArgs(toolName: string, args: unknown): Record<string, unknown> 
 
     case AGENT_TOOL_NAMES.proposeSchedule:
       return {
-        ...pick(args, ['date', 'startTime', 'endTime', 'isTask']),
+        // A1-1: locationQuery/categoryHint are user-influenced free text
+        // (a place name, a category the user named) -- same redaction
+        // rule as title/note below, length only. reminderOffsetsMinutes
+        // is a plain array of integers, not user-authored content, kept
+        // raw like durationMinutes above.
+        ...pick(args, [
+          'entryKind',
+          'scheduledDate',
+          'startTime',
+          'endTime',
+          'dueDate',
+          'dueTime',
+          'estimatedMinutes',
+          'reminderOffsetsMinutes',
+          'repeat',
+        ]),
         // title/note are user-authored free text -- length only, never the
         // text itself. (Undecided whether title specifically is safe
         // enough to show in full; defaulting to the same redaction as note
         // keeps the rule uniform rather than a per-field judgment call.)
         titleLength: textLength(isRecord(args) ? args.title : undefined),
         noteLength: textLength(isRecord(args) ? args.note : undefined),
+        locationQueryLength: textLength(isRecord(args) ? args.locationQuery : undefined),
+        categoryHintLength: textLength(isRecord(args) ? args.categoryHint : undefined),
       }
 
     case AGENT_TOOL_NAMES.proposeScheduleUpdate:

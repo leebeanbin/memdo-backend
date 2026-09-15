@@ -196,7 +196,7 @@ Deno.test('runFixture: grading needs only the normalized args grade.ts checks --
     category: 'x',
     input: '내일 9시에 회의 잡아줘',
     expectedBehavior: 'PROPOSE_SCHEDULE' as const,
-    expected: { date: 'tomorrow', startTime: '09:00', isTask: false },
+    expected: { scheduledDate: 'tomorrow', startTime: '09:00', entryKind: 'event' },
   }
   const actual = await withStreamedResponse(
     [
@@ -210,7 +210,7 @@ Deno.test('runFixture: grading needs only the normalized args grade.ts checks --
           toolCalls: [
             {
               name: 'propose_schedule',
-              args: { date: 'tomorrow', startTime: '09:00', isTask: false },
+              args: { scheduledDate: 'tomorrow', startTime: '09:00', entryKind: 'event' },
             },
           ],
         },

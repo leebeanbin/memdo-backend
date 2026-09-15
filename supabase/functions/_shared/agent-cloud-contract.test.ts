@@ -82,7 +82,7 @@ Deno.test('expandScope passes an explicit date through unchanged', () => {
 
 Deno.test('resolveProposedInterval is null for a task', () => {
   const interval = resolveProposedInterval(
-    { title: '빨래', date: 'today', isTask: true },
+    { title: '빨래', scheduledDate: 'today', entryKind: 'task' },
     today,
   )
   assert(interval === null)
@@ -90,7 +90,7 @@ Deno.test('resolveProposedInterval is null for a task', () => {
 
 Deno.test('resolveProposedInterval defaults a missing end time to +1 hour', () => {
   const interval = resolveProposedInterval(
-    { title: '회의', date: 'today', startTime: '14:00', isTask: false },
+    { title: '회의', scheduledDate: 'today', startTime: '14:00', entryKind: 'event' },
     today,
   )
   assert(interval !== null)
@@ -109,7 +109,13 @@ Deno.test('findConflict detects an overlapping existing event', () => {
         version: 1,
       },
     ],
-    { title: '점심 약속', date: 'today', startTime: '14:30', endTime: '15:30', isTask: false },
+    {
+      title: '점심 약속',
+      scheduledDate: 'today',
+      startTime: '14:30',
+      endTime: '15:30',
+      entryKind: 'event',
+    },
     today,
   )
   assert(conflict === '팀 회의')
@@ -127,7 +133,13 @@ Deno.test('findConflict returns null when nothing overlaps', () => {
         version: 1,
       },
     ],
-    { title: '점심 약속', date: 'today', startTime: '14:00', endTime: '15:00', isTask: false },
+    {
+      title: '점심 약속',
+      scheduledDate: 'today',
+      startTime: '14:00',
+      endTime: '15:00',
+      entryKind: 'event',
+    },
     today,
   )
   assert(conflict === null)
@@ -145,7 +157,7 @@ Deno.test('findConflict is always null for a task -- nothing to overlap', () => 
         version: 1,
       },
     ],
-    { title: '장보기', date: 'today', isTask: true },
+    { title: '장보기', scheduledDate: 'today', entryKind: 'task' },
     today,
   )
   assert(conflict === null)
@@ -163,7 +175,13 @@ Deno.test('findConflict excludes the item being updated from its own conflict ch
         version: 1,
       },
     ].filter((row) => row.id !== 'self'),
-    { title: '팀 회의', date: 'today', startTime: '14:00', endTime: '15:00', isTask: false },
+    {
+      title: '팀 회의',
+      scheduledDate: 'today',
+      startTime: '14:00',
+      endTime: '15:00',
+      entryKind: 'event',
+    },
     today,
   )
   assert(conflict === null)
@@ -272,7 +290,13 @@ Deno.test('dispatchToolCall propose_schedule with no conflict', async () => {
   const result: any = await dispatchToolCall(
     fakeSupabase([]),
     'propose_schedule',
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
@@ -288,7 +312,13 @@ Deno.test('dispatchToolCall propose_schedule ships the resolved date, not the ra
   await dispatchToolCall(
     fakeSupabase([]),
     'propose_schedule',
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
@@ -296,7 +326,7 @@ Deno.test('dispatchToolCall propose_schedule ships the resolved date, not the ra
   // 'today' to 2026-08-16. The point of bd5 is that this is now a concrete
   // date, not the literal string "today" the client would have to resolve
   // a second time itself.
-  assert(state.proposedSchedule?.date === '2026-08-16')
+  assert(state.proposedSchedule?.scheduledDate === '2026-08-16')
 })
 
 Deno.test('dispatchToolCall propose_schedule resolves "today" against the user\'s own timezone, not the fixed KST default (bd5)', async () => {
@@ -307,12 +337,18 @@ Deno.test('dispatchToolCall propose_schedule resolves "today" against the user\'
   const result: any = await dispatchToolCall(
     fakeSupabaseWithTimezone([], 'America/Los_Angeles'),
     'propose_schedule',
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
   assert(result.ok === true)
-  assert(state.proposedSchedule?.date === '2026-08-15')
+  assert(state.proposedSchedule?.scheduledDate === '2026-08-15')
 })
 
 Deno.test('dispatchToolCall propose_schedule surfaces a real conflict', async () => {
@@ -328,7 +364,13 @@ Deno.test('dispatchToolCall propose_schedule surfaces a real conflict', async ()
   const result: any = await dispatchToolCall(
     fakeSupabase(existing),
     'propose_schedule',
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
@@ -356,7 +398,13 @@ Deno.test('conflict/no-time (boundary fixture): rows with no start_at/end_at nev
   const result: any = await dispatchToolCall(
     fakeSupabase(existing),
     'propose_schedule',
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
@@ -396,7 +444,13 @@ Deno.test('dispatchToolCall propose_schedule fails closed when the conflict chec
   const result: any = await dispatchToolCall(
     fakeSupabaseError(),
     'propose_schedule',
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
@@ -778,7 +832,7 @@ Deno.test('dispatchToolCall leaves state untouched when propose_schedule gets an
   const result: any = await dispatchToolCall(
     fakeSupabase([]),
     'propose_schedule',
-    { title: '점심', date: '2026-99-40', startTime: '12:00', isTask: false },
+    { title: '점심', scheduledDate: '2026-99-40', startTime: '12:00', entryKind: 'event' },
     state,
     dispatchToday,
   )
@@ -1085,12 +1139,23 @@ const IOS_STREAM_LINE_KEYS = [
 // AgentTurnTrace; toolCalls is FounderDebugTrace's own addition.
 const IOS_DEBUG_TRACE_KEYS = ['requestedModel', 'resolvedModel', 'latencyMs', 'toolCalls']
 const IOS_DEBUG_TOOL_CALL_KEYS = ['name', 'args', 'result']
+// A1-1: widened alongside the backend's own proposeScheduleArgsSchema.
+// iOS's CloudProposedScheduleDTO doesn't decode all of these yet (that's
+// A1-2's job) -- safe regardless, since Swift's Decodable ignores unknown
+// keys by default (see IOS_STREAM_LINE_KEYS's comment above).
 const IOS_PROPOSED_SCHEDULE_KEYS = [
   'title',
-  'date',
+  'entryKind',
+  'scheduledDate',
   'startTime',
   'endTime',
-  'isTask',
+  'dueDate',
+  'dueTime',
+  'estimatedMinutes',
+  'reminderOffsetsMinutes',
+  'locationQuery',
+  'categoryHint',
+  'repeat',
   'note',
   'conflictTitle',
   'conflictCheckFailed',
@@ -1188,18 +1253,33 @@ Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO fi
   await dispatchToolCall(
     fakeSupabase([]),
     AGENT_TOOL_NAMES.proposeSchedule,
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '보고서 제출',
+      entryKind: 'task',
+      scheduledDate: 'today',
+      dueDate: 'tomorrow',
+      dueTime: '18:00',
+      estimatedMinutes: 90,
+      reminderOffsetsMinutes: [10, 1440],
+      locationQuery: '집',
+      categoryHint: '업무',
+      repeat: 'weekly',
+      note: '초안 검토 포함',
+    },
     state,
     dispatchToday,
   )
   const payload = buildDonePayload(state, fakeTrace)
   assert(payload.proposedSchedule !== null)
   const actualKeys = Object.keys(payload.proposedSchedule!).sort()
-  const expectedKeys = [...IOS_PROPOSED_SCHEDULE_KEYS].filter((k) => k !== 'note').sort()
-  // `note` is optional/omitted when absent (undefined props don't survive
-  // JSON.stringify, matching how the real HTTP response would look) --
-  // compare against the DTO's *required-for-this-case* key set instead of
-  // demanding an exact match that would be a false negative here.
+  // Every optional field is explicitly supplied above (task-mode, so no
+  // startTime/endTime) specifically so this compares against the DTO's
+  // full key set, not a "required-for-this-case" subset that would miss a
+  // key iOS declares but this call happens to omit.
+  const expectedKeys = [...IOS_PROPOSED_SCHEDULE_KEYS].filter((k) =>
+    k !== 'startTime' && k !== 'endTime'
+  )
+    .sort()
   for (const key of expectedKeys) {
     if (!actualKeys.includes(key)) throw new Error(`missing key: ${key}`)
   }
@@ -1327,7 +1407,13 @@ Deno.test('dispatchToolCall records a validated call in dispatchedTools before t
   await dispatchToolCall(
     fakeSupabase([]),
     AGENT_TOOL_NAMES.proposeSchedule,
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
@@ -1361,7 +1447,13 @@ Deno.test('dispatchToolCall accumulates multiple calls across iterations in orde
   await dispatchToolCall(
     fakeSupabase([]),
     AGENT_TOOL_NAMES.proposeSchedule,
-    { title: '점심', date: 'today', startTime: '12:00', endTime: '13:00', isTask: false },
+    {
+      title: '점심',
+      scheduledDate: 'today',
+      startTime: '12:00',
+      endTime: '13:00',
+      entryKind: 'event',
+    },
     state,
     dispatchToday,
   )
