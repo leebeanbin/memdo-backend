@@ -16,6 +16,23 @@ export const DEAD_STATUSES = ['rescheduled', 'cancelled', 'skipped']
 
 const nullableText = (maximum: number) => z.string().max(maximum).nullable().optional()
 
+// R1-2 (Reminder v2): canonical multi-reminder array. Max 5 and the 0-10080
+// per-element range are also enforced at the DB level (todos_reminder_offsets_check,
+// R1-1) as defense-in-depth; no-duplicates and ascending-order are NOT
+// expressible there (Postgres rejects a subquery inside a CHECK constraint),
+// so this schema is the only place those two are enforced -- and since this
+// sorts on the way in, "ascending" holds by construction, not just by
+// validation.
+const reminderOffsetsSchema = z
+  .array(z.number().int().min(0).max(10080))
+  .max(5)
+  .superRefine((values, context) => {
+    if (new Set(values).size !== values.length) {
+      context.addIssue({ code: 'custom', message: 'Reminder offsets must be unique' })
+    }
+  })
+  .transform((values) => [...values].sort((a, b) => a - b))
+
 const locationSchema = z.object({
   name: z.string().min(1).max(200),
   address: z.string().max(500).nullable().optional(),
@@ -48,7 +65,12 @@ export const todoInputSchema = z.object({
   timeBucket: z.enum(['morning', 'afternoon', 'evening', 'anytime']),
   estimatedMinutes: z.number().int().min(1).max(1440).nullable().optional(),
   sortOrder: z.number().int().min(0).default(0),
+  // @deprecated R1-2 bridge field -- reminderOffsetsMinutes below is the
+  // source of truth when present; see the precedence rule in todoValues().
+  // Kept (not removed) so a pre-R1 client's existing request shape still
+  // works unchanged throughout the bridge window.
   reminderOffsetMinutes: z.number().int().min(0).max(10080).nullable().optional(),
+  reminderOffsetsMinutes: reminderOffsetsSchema.optional(),
 }).superRefine((value, context) => {
   if (value.entryKind === 'event' && (!value.startAt || !value.endAt)) {
     context.addIssue({ code: 'custom', message: 'Event requires startAt and endAt' })
@@ -182,7 +204,7 @@ export async function fetchCategoriesByIds(
 }
 
 export const todoSelect =
-  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,category_id,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at,sync_seq,google_event_id,google_synced_at'
+  'id,scheduled_date,calendar_id,title,entry_kind,is_all_day,note,meeting_url,category_id,emoji,color,start_at,end_at,due_at,location_name,location_address,latitude,longitude,location_provider,location_provider_id,time_bucket,estimated_minutes,reminder_offset_minutes,reminder_offsets_minutes,sort_order,status,progress,source,is_recurrence_exception,schedule_rule_id,rescheduled_from_id,version,completed_at,deleted_at,created_at,updated_at,sync_seq,google_event_id,google_synced_at'
 
 /** Non-null when this create is materializing a previously read-only
  * google_calendar_mirror_events row (the user edited/deleted a Google-
@@ -268,7 +290,26 @@ export function todoUpdate(input: TodoUpdateInput, previousStatus: string | null
   return values
 }
 
+// R1-2 (Reminder v2): reminderOffsetsMinutes (array) is the source of
+// truth when the caller sends it; a pre-R1 client sending only the legacy
+// scalar still works, wrapped into a single-element array. Precedence:
+// array present -> array; else legacy scalar present -> [scalar]; else [].
+function reminderOffsetsMinutesFor(input: TodoInput): number[] {
+  if (input.reminderOffsetsMinutes) return input.reminderOffsetsMinutes
+  if (input.reminderOffsetMinutes != null) return [input.reminderOffsetMinutes]
+  return []
+}
+
 function todoValues(input: TodoInput) {
+  // The legacy scalar DB column is kept in sync (set to the array's
+  // minimum -- already sorted ascending by reminderOffsetsSchema's own
+  // transform, so [0] is the nearest-to-event reminder) rather than left
+  // to go stale on every write. Other code paths still read it directly
+  // today and haven't been made array-aware yet (schedule_rules
+  // materialization, reschedule_todo's RPC -- R1-3); syncing it here
+  // avoids a real regression in those paths until R1-3 lands, and matches
+  // the same "legacy scalar = minimum" rule the API response uses.
+  const reminderOffsetsMinutes = reminderOffsetsMinutesFor(input)
   return {
     calendar_id: input.calendarId,
     scheduled_date: input.scheduledDate,
@@ -291,7 +332,8 @@ function todoValues(input: TodoInput) {
     location_provider_id: input.location?.providerId ?? null,
     time_bucket: input.timeBucket,
     estimated_minutes: input.estimatedMinutes ?? null,
-    reminder_offset_minutes: input.reminderOffsetMinutes ?? null,
+    reminder_offset_minutes: reminderOffsetsMinutes.length > 0 ? reminderOffsetsMinutes[0] : null,
+    reminder_offsets_minutes: reminderOffsetsMinutes,
     sort_order: input.sortOrder,
   }
 }
@@ -334,7 +376,12 @@ export function todoDto(row: TodoRow, category: TodoCategory | null = null) {
       : null,
     timeBucket: row.time_bucket,
     estimatedMinutes: row.estimated_minutes,
+    // R1-2: both returned throughout the bridge window. reminderOffsetMinutes
+    // (legacy scalar) is kept in sync with the array's minimum by
+    // todoValues() on every write, so an old client reading only this
+    // field still gets its nearest-to-event reminder, not a stale value.
     reminderOffsetMinutes: row.reminder_offset_minutes,
+    reminderOffsetsMinutes: row.reminder_offsets_minutes ?? [],
     sortOrder: row.sort_order,
     status: row.status,
     progress: row.progress,

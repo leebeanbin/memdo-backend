@@ -4,6 +4,7 @@ import {
   fetchCategoriesByIds,
   todoDto,
   todoInputSchema,
+  todoInsert,
   todoRescheduleSchema,
   todoUpdate,
   todoUpdateSchema,
@@ -42,6 +43,85 @@ Deno.test('todo input rejects an event deadline', () => {
   })
 
   assert(!result.success)
+})
+
+// R1-2 (Reminder v2): reminderOffsetsMinutes schema + precedence over the
+// legacy scalar.
+
+function taskInput(overrides: Record<string, unknown> = {}) {
+  return {
+    scheduledDate: '2026-08-02',
+    calendarId: '8c7187df-8754-42fe-b70c-3a6876bab9b8',
+    title: '할 일',
+    entryKind: 'task',
+    timeBucket: 'anytime',
+    ...overrides,
+  }
+}
+
+Deno.test('todo input accepts an empty, a single, and a 5-item reminderOffsetsMinutes array', () => {
+  assert(todoInputSchema.safeParse(taskInput({ reminderOffsetsMinutes: [] })).success)
+  assert(todoInputSchema.safeParse(taskInput({ reminderOffsetsMinutes: [30] })).success)
+  assert(
+    todoInputSchema.safeParse(taskInput({ reminderOffsetsMinutes: [0, 10, 30, 60, 1440] }))
+      .success,
+  )
+})
+
+Deno.test('todo input rejects more than 5 reminderOffsetsMinutes', () => {
+  const result = todoInputSchema.safeParse(
+    taskInput({ reminderOffsetsMinutes: [1, 2, 3, 4, 5, 6] }),
+  )
+  assert(!result.success)
+})
+
+Deno.test('todo input rejects a duplicate reminderOffsetsMinutes value', () => {
+  const result = todoInputSchema.safeParse(taskInput({ reminderOffsetsMinutes: [30, 30] }))
+  assert(!result.success)
+})
+
+Deno.test('todo input rejects an out-of-range reminderOffsetsMinutes value', () => {
+  assert(!todoInputSchema.safeParse(taskInput({ reminderOffsetsMinutes: [-1] })).success)
+  assert(!todoInputSchema.safeParse(taskInput({ reminderOffsetsMinutes: [10081] })).success)
+})
+
+Deno.test('todo input sorts reminderOffsetsMinutes ascending regardless of input order', () => {
+  const result = todoInputSchema.safeParse(taskInput({ reminderOffsetsMinutes: [1440, 30, 0] }))
+  assert(result.success)
+  if (result.success) assert(JSON.stringify(result.data.reminderOffsetsMinutes) === '[0,30,1440]')
+})
+
+Deno.test('todoInsert: reminderOffsetsMinutes present is the source of truth over the legacy scalar', () => {
+  const parsed = todoInputSchema.parse(
+    taskInput({ reminderOffsetMinutes: 999, reminderOffsetsMinutes: [30, 1440] }),
+  )
+  const row = todoInsert(parsed, 'user-1', 'todo-1', 'hash-1')
+  assert(JSON.stringify(row.reminder_offsets_minutes) === '[30,1440]')
+  // Legacy scalar column kept in sync -- the array's minimum, not the
+  // client's (now-superseded) legacy scalar value.
+  assert(row.reminder_offset_minutes === 30)
+})
+
+Deno.test('todoInsert: legacy scalar alone is wrapped into a single-element array', () => {
+  const parsed = todoInputSchema.parse(taskInput({ reminderOffsetMinutes: 45 }))
+  const row = todoInsert(parsed, 'user-1', 'todo-1', 'hash-1')
+  assert(JSON.stringify(row.reminder_offsets_minutes) === '[45]')
+  assert(row.reminder_offset_minutes === 45)
+})
+
+Deno.test('todoInsert: neither field sent produces an empty array and a null legacy scalar', () => {
+  const parsed = todoInputSchema.parse(taskInput())
+  const row = todoInsert(parsed, 'user-1', 'todo-1', 'hash-1')
+  assert(JSON.stringify(row.reminder_offsets_minutes) === '[]')
+  assert(row.reminder_offset_minutes === null)
+})
+
+Deno.test('todoDto surfaces reminderOffsetsMinutes, defaulting to [] when the row field is absent', () => {
+  const withArray = todoDto({ reminder_offset_minutes: 30, reminder_offsets_minutes: [30, 1440] })
+  assert(JSON.stringify(withArray.reminderOffsetsMinutes) === '[30,1440]')
+
+  const withoutArray = todoDto({ reminder_offset_minutes: null })
+  assert(JSON.stringify(withoutArray.reminderOffsetsMinutes) === '[]')
 })
 
 Deno.test('todo cursor round trips', () => {
