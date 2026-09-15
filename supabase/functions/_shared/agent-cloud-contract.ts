@@ -1050,6 +1050,19 @@ export function buildDonePayload(
       note?: string
       conflictTitle: string | null
       conflictCheckFailed: boolean
+      // Bridge fields for a client shipped before A1-1's entryKind/
+      // scheduledDate rename -- CloudProposedScheduleDTO (ScheduleAPI.swift)
+      // still declares `date`/`isTask` as REQUIRED (non-optional). Without
+      // these, a currently-installed app's JSONDecoder throws on every
+      // propose_schedule response (a missing required key fails the whole
+      // decode, not just that field), which -- since ScheduleAPI.swift's
+      // stream loop does `try? decoder.decode(...) else { continue }` --
+      // silently drops the entire `done` line and its proposal with no
+      // error shown. Remove once A1-2 ships and the minimum supported
+      // version is raised past it, same bridge-window discipline as R1's
+      // reminder fields.
+      date: string
+      isTask: boolean
     })
     | null
   proposedScheduleUpdate: ToolDispatchState['proposedScheduleUpdate']
@@ -1077,6 +1090,10 @@ export function buildDonePayload(
     proposedSchedule: state.proposedSchedule
       ? {
         ...state.proposedSchedule,
+        // See the return type's doc comment above -- required for a
+        // pre-A1-1 client to decode this at all.
+        date: state.proposedSchedule.scheduledDate,
+        isTask: state.proposedSchedule.entryKind === 'task',
         conflictTitle: state.conflictTitle,
         conflictCheckFailed: state.conflictCheckFailed,
       }

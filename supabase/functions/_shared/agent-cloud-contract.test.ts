@@ -1159,6 +1159,11 @@ const IOS_PROPOSED_SCHEDULE_KEYS = [
   'note',
   'conflictTitle',
   'conflictCheckFailed',
+  // Bridge fields for a pre-A1-1 client -- see buildDonePayload's doc
+  // comment. `date`/`isTask` (not `scheduledDate`/`entryKind`) are what
+  // CloudProposedScheduleDTO still declares as required until A1-2 ships.
+  'date',
+  'isTask',
 ]
 const IOS_PROPOSED_SCHEDULE_UPDATE_KEYS = [
   'id',
@@ -1246,6 +1251,38 @@ Deno.test('buildDonePayload includes a sanitized debugTrace only when includeDeb
   assert(
     IOS_DEBUG_TOOL_CALL_KEYS.every((key) => key in debugTrace.toolCalls[0] || key === 'result'),
   )
+})
+
+// A1-1 regression: a pre-A1-2 client's CloudProposedScheduleDTO still
+// requires `date`/`isTask` -- these must always be present and correctly
+// derived, not just "some superset of keys iOS tolerates."
+Deno.test('buildDonePayload.proposedSchedule always includes the pre-A1-1 date/isTask bridge fields', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeSchedule,
+    { title: '점심', entryKind: 'task', scheduledDate: 'today' },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state, fakeTrace)
+  assert(payload.proposedSchedule !== null)
+  assert(payload.proposedSchedule!.date === payload.proposedSchedule!.scheduledDate)
+  assert(payload.proposedSchedule!.isTask === true)
+})
+
+Deno.test('buildDonePayload.proposedSchedule derives isTask:false for an event', async () => {
+  const state = newToolDispatchState()
+  await dispatchToolCall(
+    fakeSupabase([]),
+    AGENT_TOOL_NAMES.proposeSchedule,
+    { title: '회의', entryKind: 'event', scheduledDate: 'today', startTime: '10:00' },
+    state,
+    dispatchToday,
+  )
+  const payload = buildDonePayload(state, fakeTrace)
+  assert(payload.proposedSchedule !== null)
+  assert(payload.proposedSchedule!.isTask === false)
 })
 
 Deno.test('buildDonePayload.proposedSchedule matches CloudProposedScheduleDTO field for field', async () => {
