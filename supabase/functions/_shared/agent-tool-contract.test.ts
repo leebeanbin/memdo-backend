@@ -43,6 +43,7 @@ Deno.test('parseAgentToolCall accepts a valid call for every tool', () => {
     date: 'tomorrow',
     startTime: '09:00',
   })
+  assertValid(AGENT_TOOL_NAMES.proposeScheduleEdit, { id: 'a1', reminderOffsetsMinutes: [10] })
   assertValid(AGENT_TOOL_NAMES.getDayContext, {})
   assertValid(AGENT_TOOL_NAMES.getDayContext, { date: 'yesterday' })
   assertValid(AGENT_TOOL_NAMES.getRoutinePreferences, {})
@@ -268,6 +269,55 @@ Deno.test('parseAgentToolCall rejects an unrecognized repeat frequency', () => {
     scheduledDate: 'today',
     startTime: '10:00',
     repeat: 'hourly',
+  })
+})
+
+// ── A2-1: propose_schedule_edit -- field-level edit on an existing item.
+// Every field optional except id, but at least one editable field must be
+// set (a no-op edit makes no sense); .strict() rejects unrecognized keys
+// (e.g. a model confusing this with propose_schedule and sending title/
+// scheduledDate) the same way proposeScheduleUpdateArgsSchema does. ──
+
+Deno.test('parseAgentToolCall accepts a propose_schedule_edit with a single field set', () => {
+  assertValid(AGENT_TOOL_NAMES.proposeScheduleEdit, { id: 'a1', note: '준비물: 노트북' })
+})
+
+Deno.test('parseAgentToolCall accepts a propose_schedule_edit with every editable field set', () => {
+  assertValid(AGENT_TOOL_NAMES.proposeScheduleEdit, {
+    id: 'a1',
+    reminderOffsetsMinutes: [10, 1440],
+    dueDate: 'tomorrow',
+    dueTime: '18:00',
+    estimatedMinutes: 90,
+    locationQuery: '강남역',
+    categoryHint: '업무',
+    note: '초안 검토 포함',
+  })
+})
+
+Deno.test('parseAgentToolCall accepts an empty reminderOffsetsMinutes array as a real edit (clears all reminders)', () => {
+  assertValid(AGENT_TOOL_NAMES.proposeScheduleEdit, { id: 'a1', reminderOffsetsMinutes: [] })
+})
+
+Deno.test('parseAgentToolCall rejects a propose_schedule_edit with no editable field set', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleEdit, { id: 'a1' })
+})
+
+Deno.test('parseAgentToolCall rejects a propose_schedule_edit with no id', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleEdit, { note: '메모만 있고 id가 없음' })
+})
+
+Deno.test('parseAgentToolCall rejects dueTime without dueDate on propose_schedule_edit', () => {
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleEdit, { id: 'a1', dueTime: '18:00' })
+})
+
+Deno.test('parseAgentToolCall rejects propose_schedule_edit carrying an unrecognized field (strict)', () => {
+  // A model confusing this with propose_schedule and sending title/
+  // scheduledDate should fail closed, not silently strip them.
+  assertInvalid(AGENT_TOOL_NAMES.proposeScheduleEdit, {
+    id: 'a1',
+    title: '새 제목',
+    note: '메모',
   })
 })
 

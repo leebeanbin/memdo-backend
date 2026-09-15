@@ -297,6 +297,49 @@ export const cloudAgentTools = [
   {
     type: 'function',
     function: {
+      name: AGENT_TOOL_NAMES.proposeScheduleEdit,
+      description:
+        'Propose a field-level edit to an EXISTING schedule or task -- its reminder, location, deadline (task-only), duration estimate, category, or note. Use this for a change that is NOT completing, moving (rescheduling to a different date/time), or deleting -- those go through propose_schedule_update instead. This does NOT change anything -- it only stages a proposal the user must explicitly approve. You must have a real `id` from a prior search_schedules call; never invent one or guess. Set only the field(s) the user actually asked to change -- never invent a value for a field they did not mention. At least one field must be set. Only one proposal can be staged at a time.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: "The item's id, from a prior search_schedules result",
+          },
+          reminderOffsetsMinutes: {
+            type: 'array',
+            items: { type: 'integer' },
+            description:
+              "Replaces the item's reminders entirely with this list (minutes before start/due). Pass an empty array to remove all reminders. Up to 5.",
+          },
+          dueDate: {
+            type: 'string',
+            description:
+              "Task only -- 'today', 'tomorrow', or yyyy-MM-dd. Only when the user is changing the deadline itself.",
+          },
+          dueTime: { type: 'string', description: 'HH:mm, only alongside dueDate' },
+          estimatedMinutes: {
+            type: 'integer',
+            description: 'How long the task is expected to take',
+          },
+          locationQuery: {
+            type: 'string',
+            description: 'A place name or address the user mentioned, in their own words.',
+          },
+          categoryHint: {
+            type: 'string',
+            description: "A category the user named or clearly implied (e.g. '운동', '업무').",
+          },
+          note: { type: 'string', description: "Replaces the item's note entirely." },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: AGENT_TOOL_NAMES.getDayContext,
       description:
         "Gets a breakdown of a single day's items (completed vs. incomplete, with titles), plus whether a daily reflection already exists for that day. Use this instead of search_schedules when the user is asking about how a specific day went, not just what's on it.",
@@ -408,6 +451,7 @@ export function systemPrompt(today: string): string {
     'When the user asks to find free time or where to fit something, call find_free_slots. Only pass durationMinutes when the user states an explicit numeric length ("1시간 찾아줘"); omit it entirely for a plain availability question ("언제 비어 있어?"). An activity name alone ("운동할 시간 찾아줘") is NOT a duration -- if the user names an activity but never says how long, call request_clarification and ask how much time they need instead of guessing.',
     'When the user asks about existing plans, or before proposing something new, call search_schedules to check first rather than guessing.',
     'When the user wants to complete, move, or delete an EXISTING schedule or task, first call search_schedules to find its real id, then call propose_schedule_update -- IN THAT SAME RESPONSE, not a later one. Do not guess an id, and do not claim the change happened.',
+    "When the user wants to change an EXISTING item's reminder, location, deadline, duration estimate, category, or note -- anything that is NOT completing, moving, or deleting it -- first call search_schedules to find its real id, then call propose_schedule_edit with only the field(s) they actually asked to change, IN THAT SAME RESPONSE. Do not guess an id, do not invent a value for a field they did not mention, and do not claim the change happened.",
     'When the request covers MULTIPLE existing items at once (e.g. "this week\'s tasks", "all of these"), after search_schedules finds them, call propose_schedule_update for the first one in that SAME turn -- do not first ask in plain text whether to proceed. The proposal card IS the confirmation step; a text question before it only adds a redundant round trip. If your own previous turn already named a specific item and asked whether to act on it, and the user\'s new message is any affirmative reply at all (예, 응, 좋아, ㄱㄱ, 오케이, 넵, go, ...), that reply IS their approval -- call propose_schedule_update for that exact item in this turn. Do not re-run search_schedules or ask again first.',
     'A sentence like "완료 처리하시겠습니까?" or "먼저 이 일정부터 처리할까요?" asking whether to act on a specific existing item is ONLY a real question if you also call propose_schedule_update for that exact item in the SAME response. Writing that sentence with no attached tool call does nothing in this app -- no proposal card appears, the user has nothing to approve, and any "yes"/"ㄱㄱ" they send back is wasted because you asked without actually proposing. If you find yourself about to write a sentence asking permission to act on one specific item you already have the id for, call propose_schedule_update instead of writing that sentence in plain text -- for one item you already searched, do not ask permission at all, propose it directly.',
     'When the user asks how a specific day went (not just what was on it), call get_day_context instead of search_schedules.',
@@ -540,6 +584,37 @@ export type ProposedScheduleUpdateArgs = {
   date?: string | null
   startTime?: string | null
   endTime?: string | null
+}
+
+/** A2-1: field-level edit args, echoed back from the model's call --
+ * title/note-args.ts. Only fields the model actually proposed are present;
+ * `id` is a real row id from a prior search_schedules result. categoryId is
+ * resolved server-side the same way propose_schedule's is (A1-3) -- never
+ * set directly by the model. */
+export type ProposedScheduleEditArgs = {
+  id: string
+  reminderOffsetsMinutes?: number[]
+  dueDate?: string | null
+  dueTime?: string | null
+  estimatedMinutes?: number
+  locationQuery?: string
+  categoryHint?: string
+  categoryId?: string
+  note?: string
+}
+
+/** Current (pre-edit) values for every editable field -- carried alongside
+ * the proposed ones so the client can render a before/after diff (A2-3)
+ * without a second round trip. Always the full current snapshot regardless
+ * of which fields were actually proposed for edit, so the card can show
+ * "unchanged" context alongside what's actually different if it wants to. */
+export type CurrentScheduleEditableFields = {
+  reminderOffsetsMinutes: number[]
+  dueAt: string | null
+  estimatedMinutes: number | null
+  locationName: string | null
+  categoryId: string | null
+  note: string | null
 }
 
 /** Resolves a proposal's (start, end), or null for a task/all-day item with
@@ -678,6 +753,41 @@ async function fetchScheduleById(
     .maybeSingle()
   if (error) throw error
   return (data as ExistingScheduleRow | null) ?? null
+}
+
+type EditableScheduleRow = {
+  id: string
+  title: string
+  entry_kind: string
+  version: number
+  reminder_offsets_minutes: number[] | null
+  due_at: string | null
+  estimated_minutes: number | null
+  location_name: string | null
+  category_id: string | null
+  note: string | null
+}
+
+/** A2-2: same "real row id from a prior search_schedules result, never
+ * guessed" contract as fetchScheduleById, widened to the editable-field
+ * columns propose_schedule_edit's diff card needs. A separate function
+ * (not fetchScheduleById widened in place) since every existing caller of
+ * that one only needs the narrower columns it already selects. */
+async function fetchEditableScheduleById(
+  supabase: SupabasePort,
+  id: string,
+): Promise<EditableScheduleRow | null> {
+  const { data, error } = await supabase
+    .from('todos')
+    .select(
+      'id,title,entry_kind,version,reminder_offsets_minutes,due_at,estimated_minutes,location_name,category_id,note',
+    )
+    .eq('id', id)
+    .is('deleted_at', null)
+    .not('status', 'in', `(${DEAD_STATUSES.join(',')})`)
+    .maybeSingle()
+  if (error) throw error
+  return (data as EditableScheduleRow | null) ?? null
 }
 
 async function searchSchedules(
@@ -973,6 +1083,20 @@ export type ToolDispatchState = {
       conflictCheckFailed: boolean
     })
     | null
+  /** A2-1: single-slot field-level edit proposal, same "one per turn,
+   * second call fails closed" contract as proposedSchedule/
+   * proposedScheduleUpdate above -- see handleProposeScheduleEdit's own
+   * comment for why. No card renders this yet (A2-3) -- carried through
+   * the `done` message regardless, matching proposedRoutineUpdate/
+   * proposedReviewAction's own "plumbing ready before the card exists"
+   * precedent below. */
+  proposedScheduleEdit:
+    | (ProposedScheduleEditArgs & {
+      title: string
+      version: number
+      current: CurrentScheduleEditableFields
+    })
+    | null
   // No card renders these two yet (see AssistantView.swift's
   // AgentScheduleUpdateProposal doc comment for the propose_schedule_update
   // precedent this will eventually follow) -- carried through the `done`
@@ -1022,6 +1146,7 @@ export function newToolDispatchState(): ToolDispatchState {
     conflictTitle: null,
     conflictCheckFailed: false,
     proposedScheduleUpdate: null,
+    proposedScheduleEdit: null,
     proposedRoutineUpdate: null,
     proposedReviewAction: null,
     clarificationRequest: null,
@@ -1070,6 +1195,7 @@ export function buildDonePayload(
     })
     | null
   proposedScheduleUpdate: ToolDispatchState['proposedScheduleUpdate']
+  proposedScheduleEdit: ToolDispatchState['proposedScheduleEdit']
   proposedRoutineUpdate: ToolDispatchState['proposedRoutineUpdate']
   proposedReviewAction: ToolDispatchState['proposedReviewAction']
   clarificationRequest: ToolDispatchState['clarificationRequest']
@@ -1103,6 +1229,7 @@ export function buildDonePayload(
       }
       : null,
     proposedScheduleUpdate: state.proposedScheduleUpdate,
+    proposedScheduleEdit: state.proposedScheduleEdit,
     proposedRoutineUpdate: state.proposedRoutineUpdate,
     proposedReviewAction: state.proposedReviewAction,
     clarificationRequest: state.clarificationRequest,
@@ -1335,6 +1462,86 @@ async function handleProposeScheduleUpdate(
   }
 }
 
+/** A2-1/A2-2: field-level edit on an EXISTING item (reminder/location/
+ * deadline/duration/category/note) -- distinct from
+ * handleProposeScheduleUpdate above, which only covers complete/reschedule/
+ * delete. Same "search first, never guess an id, stage a proposal, never
+ * claim it happened" contract every propose_* tool already follows, and
+ * the same single-slot-overwrite guard (see handleProposeSchedule's
+ * comment for the founder-dogfooding incident this pattern exists for).
+ *
+ * No conflict/Reflection check here -- unlike a create or a reschedule,
+ * none of this tool's editable fields touch a time range, so there is
+ * nothing to overlap-check against the rest of the schedule.
+ *
+ * version is threaded straight through from the fetched row (A2-2) so
+ * approval can go through the same optimistic-lock VERSION_CONFLICT PATCH
+ * path every other write already uses -- an edit approved against a stale
+ * version must surface a real conflict, not silently overwrite a
+ * concurrent change. */
+async function handleProposeScheduleEdit(
+  supabase: SupabasePort,
+  args: any,
+  state: ToolDispatchState,
+  today: Date,
+): Promise<unknown> {
+  if (state.proposedScheduleEdit) {
+    return {
+      ok: false,
+      error:
+        'Only one edit can be proposed per turn -- one is already staged for the user to confirm. Describe just that one and wait for the user to confirm or decline before proposing another.',
+    }
+  }
+  const editArgs = args as ProposedScheduleEditArgs
+  try {
+    const target = await fetchEditableScheduleById(supabase, editArgs.id)
+    if (!target) {
+      state.proposedScheduleEdit = null
+      return {
+        ok: false,
+        error:
+          'That item was not found -- it may have been deleted, or the id is wrong. Call search_schedules again.',
+      }
+    }
+
+    // A1-3's same deterministic resolution -- never a guess, absent when
+    // categoryHint wasn't proposed or didn't match.
+    const categoryId = editArgs.categoryHint
+      ? await resolveCategoryHint(supabase, editArgs.categoryHint, target.entry_kind === 'task')
+      : undefined
+    // Same "only add the key when there's a real value" treatment as
+    // handleProposeSchedule's own dueDate/categoryId resolution above.
+    let resolvedDueDate: string | undefined
+    if (editArgs.dueDate) {
+      const offsetMinutes = await resolveUserTimezoneOffsetMinutes(supabase, today)
+      resolvedDueDate = resolveDate(editArgs.dueDate, today, offsetMinutes)
+    }
+
+    state.proposedScheduleEdit = {
+      ...editArgs,
+      ...(resolvedDueDate ? { dueDate: resolvedDueDate } : {}),
+      ...(categoryId ? { categoryId } : {}),
+      title: target.title,
+      version: target.version,
+      current: {
+        reminderOffsetsMinutes: target.reminder_offsets_minutes ?? [],
+        dueAt: target.due_at,
+        estimatedMinutes: target.estimated_minutes,
+        locationName: target.location_name,
+        categoryId: target.category_id,
+        note: target.note,
+      },
+    }
+    return { ok: true }
+  } catch {
+    state.proposedScheduleEdit = null
+    return {
+      ok: false,
+      error: 'Could not look up that item. Tell the user something went wrong.',
+    }
+  }
+}
+
 // One handler per tool, keyed by the same AGENT_TOOL_NAMES constants the
 // schema above uses -- a lookup table rather than a switch/if-chain, so
 // adding a tool means adding an entry here rather than editing a growing
@@ -1344,6 +1551,7 @@ const toolHandlers: Record<string, ToolHandler> = {
   [AGENT_TOOL_NAMES.findFreeSlots]: (supabase, args) => findFreeSlots(supabase, args),
   [AGENT_TOOL_NAMES.proposeSchedule]: handleProposeSchedule,
   [AGENT_TOOL_NAMES.proposeScheduleUpdate]: handleProposeScheduleUpdate,
+  [AGENT_TOOL_NAMES.proposeScheduleEdit]: handleProposeScheduleEdit,
   [AGENT_TOOL_NAMES.getDayContext]: (supabase, args, _state, today) =>
     getDayContext(supabase, args, today),
   [AGENT_TOOL_NAMES.getRoutinePreferences]: (supabase) => getRoutinePreferences(supabase),

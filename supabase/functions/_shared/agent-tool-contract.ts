@@ -10,6 +10,7 @@ export const AGENT_TOOL_NAMES = {
   findFreeSlots: 'find_free_slots',
   proposeSchedule: 'propose_schedule',
   proposeScheduleUpdate: 'propose_schedule_update',
+  proposeScheduleEdit: 'propose_schedule_edit',
   getDayContext: 'get_day_context',
   getRoutinePreferences: 'get_routine_preferences',
   getReviewHistory: 'get_review_history',
@@ -135,6 +136,47 @@ export const proposeScheduleUpdateArgsSchema = z.discriminatedUnion('action', [
   }),
 ])
 
+// A2-1: field-level edit on an EXISTING item -- reminder/location/deadline/
+// duration/category/note, none of which propose_schedule_update's
+// complete/reschedule/delete actions cover. Every field is optional (an
+// edit typically touches 1-2 fields), but at least one must be present --
+// an edit proposal with nothing to change makes no sense and would stage a
+// no-op diff card. `id` mirrors propose_schedule_update's own contract:
+// a real row id from a prior search_schedules result, never guessed.
+// title/scheduledDate/startTime/endTime stay out of scope here on purpose
+// -- propose_schedule_update's reschedule action already owns moving an
+// item's date/time, and duplicating that here would just be two paths to
+// the same PATCH with two different validation rules to keep in sync.
+export const proposeScheduleEditArgsSchema = z.object({
+  id: z.string().min(1),
+  reminderOffsetsMinutes: reminderOffsetsSchema.optional(),
+  dueDate: dateExpressionSchema.optional(),
+  dueTime: timeSchema.optional(),
+  estimatedMinutes: z.number().int().min(1).max(1440).optional(),
+  locationQuery: z.string().trim().min(1).max(200).optional(),
+  categoryHint: z.string().trim().min(1).max(50).optional(),
+  note: z.string().max(2000).optional(),
+}).strict().superRefine((value, ctx) => {
+  const editableFields = [
+    'reminderOffsetsMinutes',
+    'dueDate',
+    'dueTime',
+    'estimatedMinutes',
+    'locationQuery',
+    'categoryHint',
+    'note',
+  ] as const
+  if (!editableFields.some((field) => value[field] !== undefined)) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'At least one field must be proposed to edit',
+    })
+  }
+  if (value.dueTime && !value.dueDate) {
+    ctx.addIssue({ code: 'custom', path: ['dueTime'], message: 'dueTime requires dueDate' })
+  }
+})
+
 // durationMinutes is optional and never defaulted downstream (see
 // agent-cloud-contract.ts's findFreeSlots) -- its absence means "how free
 // am I" (full free-window answer), not "duration unspecified, assume one."
@@ -189,6 +231,7 @@ const agentArgsSchemaByTool: Record<string, z.ZodType> = {
   [AGENT_TOOL_NAMES.findFreeSlots]: findFreeSlotsArgsSchema,
   [AGENT_TOOL_NAMES.proposeSchedule]: proposeScheduleArgsSchema,
   [AGENT_TOOL_NAMES.proposeScheduleUpdate]: proposeScheduleUpdateArgsSchema,
+  [AGENT_TOOL_NAMES.proposeScheduleEdit]: proposeScheduleEditArgsSchema,
   [AGENT_TOOL_NAMES.getDayContext]: getDayContextArgsSchema,
   [AGENT_TOOL_NAMES.getRoutinePreferences]: getRoutinePreferencesArgsSchema,
   [AGENT_TOOL_NAMES.getReviewHistory]: getReviewHistoryArgsSchema,

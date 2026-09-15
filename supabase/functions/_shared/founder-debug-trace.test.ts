@@ -113,6 +113,36 @@ Deno.test('buildFounderDebugTrace never emits full locationQuery or categoryHint
   assert(call.args.categoryHintLength === '건강'.length)
 })
 
+// A2-1: same redaction split as propose_schedule -- id is opaque,
+// reminderOffsetsMinutes is a plain integer array, note/locationQuery/
+// categoryHint are user-authored/-influenced free text (length only).
+Deno.test('buildFounderDebugTrace never emits full note/locationQuery/categoryHint text (propose_schedule_edit)', () => {
+  const built = buildFounderDebugTrace(
+    trace,
+    dispatched([{
+      name: 'propose_schedule_edit',
+      args: {
+        id: 'a1',
+        reminderOffsetsMinutes: [10, 1440],
+        note: '민감한 내부 회의 안건',
+        locationQuery: '서울대학교병원 정신건강의학과',
+        categoryHint: '건강',
+      },
+      result: { ok: true },
+    }]),
+  )
+  const call = built.toolCalls[0]
+  const serialized = JSON.stringify(call.args)
+  assert(!serialized.includes('민감한 내부'))
+  assert(!serialized.includes('정신건강의학과'))
+  assert(!serialized.includes('건강'))
+  assert(call.args.id === 'a1')
+  assert(JSON.stringify(call.args.reminderOffsetsMinutes) === JSON.stringify([10, 1440]))
+  assert(call.args.noteLength === '민감한 내부 회의 안건'.length)
+  assert(call.args.locationQueryLength === '서울대학교병원 정신건강의학과'.length)
+  assert(call.args.categoryHintLength === '건강'.length)
+})
+
 Deno.test('buildFounderDebugTrace never leaks a conflicting item title embedded in a warning string', () => {
   const built = buildFounderDebugTrace(
     trace,

@@ -645,6 +645,152 @@ Deno.test('dispatchToolCall propose_schedule_update reports a missing item inste
   assert(state.proposedScheduleUpdate === null)
 })
 
+// ── A2-1/A2-2: propose_schedule_edit -- field-level edit on an existing
+// item, version threaded through for the eventual optimistic-lock PATCH. ──
+
+Deno.test('dispatchToolCall propose_schedule_edit stages a diff against a real target', async () => {
+  const state = newToolDispatchState()
+  const existing = [{
+    id: 'a1',
+    title: '미용실',
+    entry_kind: 'event',
+    version: 4,
+    reminder_offsets_minutes: [10],
+    due_at: null,
+    estimated_minutes: null,
+    location_name: null,
+    category_id: null,
+    note: null,
+  }]
+  const result: any = await dispatchToolCall(
+    fakeSupabase(existing as any),
+    'propose_schedule_edit',
+    { id: 'a1', reminderOffsetsMinutes: [30, 1440] },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === true)
+  assert(state.proposedScheduleEdit?.title === '미용실')
+  assert(state.proposedScheduleEdit?.version === 4)
+  assert(
+    JSON.stringify(state.proposedScheduleEdit?.reminderOffsetsMinutes) ===
+      JSON.stringify([30, 1440]),
+  )
+  assert(
+    JSON.stringify(state.proposedScheduleEdit?.current.reminderOffsetsMinutes) ===
+      JSON.stringify([10]),
+  )
+})
+
+Deno.test('dispatchToolCall propose_schedule_edit reports a missing item instead of proposing', async () => {
+  const state = newToolDispatchState()
+  const result: any = await dispatchToolCall(
+    fakeSupabase([]),
+    'propose_schedule_edit',
+    { id: 'does-not-exist', note: '새 메모' },
+    state,
+    dispatchToday,
+  )
+  assert(result.ok === false)
+  assert(state.proposedScheduleEdit === null)
+})
+
+Deno.test('dispatchToolCall propose_schedule_edit fails closed on a second call in the same turn', async () => {
+  const state = newToolDispatchState()
+  const existing = [{
+    id: 'a1',
+    title: '미용실',
+    entry_kind: 'event',
+    version: 1,
+    reminder_offsets_minutes: [],
+    due_at: null,
+    estimated_minutes: null,
+    location_name: null,
+    category_id: null,
+    note: null,
+  }]
+  await dispatchToolCall(
+    fakeSupabase(existing as any),
+    'propose_schedule_edit',
+    { id: 'a1', note: '첫 번째 수정' },
+    state,
+    dispatchToday,
+  )
+  const second: any = await dispatchToolCall(
+    fakeSupabase(existing as any),
+    'propose_schedule_edit',
+    { id: 'a1', note: '두 번째 수정' },
+    state,
+    dispatchToday,
+  )
+  assert(second.ok === false)
+  // The first proposal must still be the one staged -- a second call must
+  // never silently clobber it (the exact founder-dogfooding failure mode
+  // handleProposeSchedule/handleProposeScheduleUpdate's own guards exist
+  // to prevent).
+  assert(state.proposedScheduleEdit?.note === '첫 번째 수정')
+})
+
+Deno.test('dispatchToolCall propose_schedule_edit resolves categoryHint to a real categoryId', async () => {
+  const state = newToolDispatchState()
+  const existing = [{
+    id: 'a1',
+    title: '헬스장',
+    entry_kind: 'task',
+    version: 1,
+    reminder_offsets_minutes: [],
+    due_at: null,
+    estimated_minutes: null,
+    location_name: null,
+    category_id: null,
+    note: null,
+  }]
+  const supabase = {
+    from: (table: string) => {
+      if (table === 'user_categories') {
+        return fakeSupabaseWithCategories([], [{ id: 'cat-1', name: '운동', is_task_kind: true }])
+          .from(table)
+      }
+      return fakeSupabase(existing as any).from(table)
+    },
+  }
+  await dispatchToolCall(
+    supabase,
+    'propose_schedule_edit',
+    { id: 'a1', categoryHint: '운동' },
+    state,
+    dispatchToday,
+  )
+  assert(state.proposedScheduleEdit?.categoryId === 'cat-1')
+})
+
+Deno.test("dispatchToolCall propose_schedule_edit resolves dueDate against the requesting user's own timezone", async () => {
+  const state = newToolDispatchState()
+  const existing = [{
+    id: 'a1',
+    title: '보고서 제출',
+    entry_kind: 'task',
+    version: 1,
+    reminder_offsets_minutes: [],
+    due_at: null,
+    estimated_minutes: null,
+    location_name: null,
+    category_id: null,
+    note: null,
+  }]
+  await dispatchToolCall(
+    fakeSupabaseWithTimezone(existing as any, 'America/Los_Angeles'),
+    'propose_schedule_edit',
+    { id: 'a1', dueDate: 'today' },
+    state,
+    dispatchToday,
+  )
+  // dispatchToday = 2026-08-16T00:00:00Z is still Aug 15 in
+  // America/Los_Angeles (-420, PDT in August) -- same bd5 reasoning as
+  // propose_schedule's own timezone-resolution test.
+  assert(state.proposedScheduleEdit?.dueDate === '2026-08-15')
+})
+
 Deno.test('dispatchToolCall propose_schedule_update reschedule excludes its own row from the conflict check', async () => {
   const state = newToolDispatchState()
   const existing: ExistingScheduleRow[] = [{
@@ -1274,6 +1420,11 @@ const IOS_STREAM_LINE_KEYS = [
   'done',
   'proposedSchedule',
   'proposedScheduleUpdate',
+  // A2-1: carried through the `done` message already (buildDonePayload),
+  // no iOS DTO decodes it yet (A2-3 -- no card exists for this proposal
+  // kind, same "plumbing ready before the card exists" precedent
+  // proposedRoutineUpdate/proposedReviewAction followed for a while).
+  'proposedScheduleEdit',
   'proposedRoutineUpdate',
   'proposedReviewAction',
   'clarificationRequest',
@@ -1364,6 +1515,7 @@ Deno.test('buildDonePayload top-level keys are a subset of what AgentStreamLineD
       'done',
       'proposedSchedule',
       'proposedScheduleUpdate',
+      'proposedScheduleEdit',
       'proposedRoutineUpdate',
       'proposedReviewAction',
       'clarificationRequest',

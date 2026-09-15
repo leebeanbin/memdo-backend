@@ -160,6 +160,18 @@ function sanitizeArgs(toolName: string, args: unknown): Record<string, unknown> 
       // call with others in the trace.
       return pick(args, ['id', 'action', 'date', 'startTime', 'endTime'])
 
+    case AGENT_TOOL_NAMES.proposeScheduleEdit:
+      // A2-1: same redaction split as propose_schedule above -- id is
+      // opaque, reminderOffsetsMinutes is a plain integer array, the rest
+      // structural; note/locationQuery/categoryHint are user-authored/
+      // -influenced free text, length only.
+      return {
+        ...pick(args, ['id', 'dueDate', 'dueTime', 'estimatedMinutes', 'reminderOffsetsMinutes']),
+        noteLength: textLength(isRecord(args) ? args.note : undefined),
+        locationQueryLength: textLength(isRecord(args) ? args.locationQuery : undefined),
+        categoryHintLength: textLength(isRecord(args) ? args.categoryHint : undefined),
+      }
+
     case AGENT_TOOL_NAMES.getDayContext:
       return pick(args, ['date'])
 
@@ -249,6 +261,16 @@ function sanitizeResult(toolName: string, result: unknown): Record<string, unkno
     case AGENT_TOOL_NAMES.proposeSchedule:
     case AGENT_TOOL_NAMES.proposeScheduleUpdate:
       return sanitizeConflictResult(result)
+
+    case AGENT_TOOL_NAMES.proposeScheduleEdit: {
+      // No Reflection/conflict check for this tool (see
+      // handleProposeScheduleEdit's own doc comment -- none of its
+      // editable fields touch a time range) -- real shape is just
+      // { ok } or { ok: false, error }, so sanitizeConflictResult's
+      // warning-string parsing doesn't apply here.
+      const r = isRecord(result) ? result : {}
+      return { ok: r.ok === true }
+    }
 
     case AGENT_TOOL_NAMES.getDayContext: {
       // Real shape includes completed/incomplete arrays of {id, title,...}
