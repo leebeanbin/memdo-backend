@@ -137,6 +137,27 @@ Deno.test("virtualOccurrenceDto computes each occurrence's own DST-correct offse
   assert(august.startAt === '2026-08-16T16:00:00.000Z')
 })
 
+Deno.test('virtualOccurrenceDto propagates reminder_offsets_minutes from the rule row (R1-3)', async () => {
+  const rule = { ...laRule, reminder_offsets_minutes: [10, 30] }
+  const occurrence = await virtualOccurrenceDto(rule, '2026-01-16')
+  assert(JSON.stringify(occurrence.reminderOffsetsMinutes) === JSON.stringify([10, 30]))
+  assert(occurrence.reminderOffsetMinutes === null)
+})
+
+Deno.test(
+  'virtualOccurrenceDto defaults reminderOffsetsMinutes to [] when the rule row has none',
+  async () => {
+    const occurrence = await virtualOccurrenceDto(laRule, '2026-01-16')
+    assert(JSON.stringify(occurrence.reminderOffsetsMinutes) === JSON.stringify([]))
+  },
+)
+
+Deno.test('materializeRow copies reminder_offsets_minutes through from the rule row (R1-3)', async () => {
+  const rule = { ...laRule, reminder_offsets_minutes: [15] }
+  const row = await materializeRow(rule, '2026-01-16', 'user-1')
+  assert(JSON.stringify(row.reminder_offsets_minutes) === JSON.stringify([15]))
+})
+
 Deno.test('rule input rejects an event without times', () => {
   const base = {
     calendarId: '00000000-0000-4000-8000-000000000001',

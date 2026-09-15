@@ -23,7 +23,7 @@ const nullableText = (maximum: number) => z.string().max(maximum).nullable().opt
 // so this schema is the only place those two are enforced -- and since this
 // sorts on the way in, "ascending" holds by construction, not just by
 // validation.
-const reminderOffsetsSchema = z
+export const reminderOffsetsSchema = z
   .array(z.number().int().min(0).max(10080))
   .max(5)
   .superRefine((values, context) => {
@@ -290,11 +290,16 @@ export function todoUpdate(input: TodoUpdateInput, previousStatus: string | null
   return values
 }
 
-// R1-2 (Reminder v2): reminderOffsetsMinutes (array) is the source of
+// R1-2/R1-3 (Reminder v2): reminderOffsetsMinutes (array) is the source of
 // truth when the caller sends it; a pre-R1 client sending only the legacy
 // scalar still works, wrapped into a single-element array. Precedence:
 // array present -> array; else legacy scalar present -> [scalar]; else [].
-function reminderOffsetsMinutesFor(input: TodoInput): number[] {
+// Structurally typed (not TodoInput-specific) so rule-contract.ts's
+// ScheduleRuleInput -- same two-field shape, different parent type -- can
+// share this instead of duplicating the precedence rule.
+export function reminderOffsetsMinutesFor(
+  input: { reminderOffsetMinutes?: number | null; reminderOffsetsMinutes?: number[] },
+): number[] {
   if (input.reminderOffsetsMinutes) return input.reminderOffsetsMinutes
   if (input.reminderOffsetMinutes != null) return [input.reminderOffsetMinutes]
   return []

@@ -1,8 +1,9 @@
 import { z } from 'zod'
 import { stableUuid } from './deterministic-id.ts'
+import { reminderOffsetsSchema } from './todo-contract.ts'
 
 export const ruleSelect =
-  'id,calendar_id,title,entry_kind,is_all_day,note,start_time,end_time,time_bucket,reminder_offset_minutes,frequency,step_interval,anchor_date,until_date,occurrence_count,timezone,created_at,updated_at'
+  'id,calendar_id,title,entry_kind,is_all_day,note,start_time,end_time,time_bucket,reminder_offset_minutes,reminder_offsets_minutes,frequency,step_interval,anchor_date,until_date,occurrence_count,timezone,created_at,updated_at'
 
 const localTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)
 
@@ -15,7 +16,11 @@ export const scheduleRuleInputSchema = z.object({
   startTime: localTime.nullable().optional(),
   endTime: localTime.nullable().optional(),
   timeBucket: z.enum(['morning', 'afternoon', 'evening', 'anytime']),
+  // @deprecated R1-3 bridge field -- reminderOffsetsMinutes below is the
+  // source of truth when present; see the precedence rule where this rule
+  // is turned into todos rows (materializeRow, virtualOccurrenceDto).
   reminderOffsetMinutes: z.number().int().min(0).max(10080).nullable().optional(),
+  reminderOffsetsMinutes: reminderOffsetsSchema.optional(),
   frequency: z.enum(['daily', 'weekdays', 'weekly', 'biweekly', 'monthly', 'yearly']),
   interval: z.number().int().min(1).max(52).default(1),
   anchorDate: z.iso.date(),
@@ -275,7 +280,13 @@ export async function materializeRow(
     start_at: startTime ? localInstant(date, startTime, timezoneOffsetMinutes) : null,
     end_at: endTime ? localInstant(date, endTime, timezoneOffsetMinutes) : null,
     time_bucket: rule.time_bucket,
+    // R1-3: both columns copied straight through from the rule row (which
+    // already carries them consistently -- see reminderOffsetsMinutesFor
+    // in rules/index.ts's POST handler) rather than recomputed here, so
+    // there's no risk of this path deriving a different answer than the
+    // rule's own insert did.
     reminder_offset_minutes: rule.reminder_offset_minutes ?? null,
+    reminder_offsets_minutes: rule.reminder_offsets_minutes ?? [],
     status: 'planned',
     progress: 0,
     completed_at: null,
@@ -317,7 +328,9 @@ export async function virtualOccurrenceDto(
     location: null,
     timeBucket: rule.time_bucket,
     estimatedMinutes: null,
+    // R1-3: both returned throughout the bridge window, same as todoDto/ruleDto.
     reminderOffsetMinutes: rule.reminder_offset_minutes,
+    reminderOffsetsMinutes: rule.reminder_offsets_minutes ?? [],
     sortOrder: 0,
     status: 'planned',
     progress: 0,

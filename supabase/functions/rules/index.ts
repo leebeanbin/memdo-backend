@@ -13,6 +13,7 @@ import {
   ruleSelect,
   scheduleRuleInputSchema,
 } from '../_shared/rule-contract.ts'
+import { reminderOffsetsMinutesFor } from '../_shared/todo-contract.ts'
 
 function ruleDto(row: Record<string, unknown>) {
   return {
@@ -25,7 +26,9 @@ function ruleDto(row: Record<string, unknown>) {
     startTime: row.start_time,
     endTime: row.end_time,
     timeBucket: row.time_bucket,
+    // R1-3: both returned throughout the bridge window, same as todos.
     reminderOffsetMinutes: row.reminder_offset_minutes,
+    reminderOffsetsMinutes: row.reminder_offsets_minutes ?? [],
     frequency: row.frequency,
     interval: row.step_interval,
     anchorDate: row.anchor_date,
@@ -112,6 +115,12 @@ export default {
           })
         }
         const input = parsed.data
+        // R1-3: same precedence/sync-the-legacy-scalar rule todos' own
+        // todoValues() uses -- the array is the source of truth when sent,
+        // the scalar column is kept in sync (set to the array's minimum)
+        // so materializeRow/reschedule_todo's RPC, not yet made
+        // array-aware, keep working correctly off this rule.
+        const reminderOffsetsMinutes = reminderOffsetsMinutesFor(input)
 
         const inserted = await context.supabase
           .from('schedule_rules')
@@ -126,7 +135,10 @@ export default {
             start_time: input.startTime ?? null,
             end_time: input.endTime ?? null,
             time_bucket: input.timeBucket,
-            reminder_offset_minutes: input.reminderOffsetMinutes ?? null,
+            reminder_offset_minutes: reminderOffsetsMinutes.length > 0
+              ? reminderOffsetsMinutes[0]
+              : null,
+            reminder_offsets_minutes: reminderOffsetsMinutes,
             frequency: input.frequency,
             step_interval: input.interval,
             anchor_date: input.anchorDate,
