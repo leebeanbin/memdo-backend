@@ -2,6 +2,7 @@ import {
   decodeTodoCursor,
   encodeTodoCursor,
   fetchCategoriesByIds,
+  todoBatchCreateSchema,
   todoDto,
   todoInputSchema,
   todoInsert,
@@ -401,4 +402,68 @@ Deno.test('fetchCategoriesByIds dedupes ids and skips a query when there are non
   const empty = await fetchCategoriesByIds(fakeSupabase, [null, undefined])
   assert(empty.size === 0)
   assert(calls === 1)
+})
+
+// ── A3-4/A3-5: POST /todos/batch's schema -- N {idempotencyKey, input}
+// pairs, each `input` validated by the exact same todoInputSchema a single
+// create uses, capped at 10 to match propose_schedule_batch's own cap
+// (A3-1). ──
+
+function batchItem(overrides: Record<string, unknown> = {}) {
+  return {
+    idempotencyKey: crypto.randomUUID(),
+    input: taskInput(),
+    ...overrides,
+  }
+}
+
+Deno.test('todoBatchCreateSchema accepts a single valid item', () => {
+  const result = todoBatchCreateSchema.safeParse({ items: [batchItem()] })
+  assert(result.success)
+})
+
+Deno.test('todoBatchCreateSchema accepts exactly the 10-item cap', () => {
+  const result = todoBatchCreateSchema.safeParse({
+    items: Array.from({ length: 10 }, () => batchItem()),
+  })
+  assert(result.success)
+})
+
+Deno.test('todoBatchCreateSchema rejects more than 10 items', () => {
+  const result = todoBatchCreateSchema.safeParse({
+    items: Array.from({ length: 11 }, () => batchItem()),
+  })
+  assert(!result.success)
+})
+
+Deno.test('todoBatchCreateSchema rejects an empty items array', () => {
+  assert(!todoBatchCreateSchema.safeParse({ items: [] }).success)
+})
+
+Deno.test('todoBatchCreateSchema rejects a non-UUID idempotencyKey', () => {
+  const result = todoBatchCreateSchema.safeParse({
+    items: [batchItem({ idempotencyKey: 'not-a-uuid' })],
+  })
+  assert(!result.success)
+})
+
+Deno.test("todoBatchCreateSchema rejects an item whose input fails todoInputSchema's own rules", () => {
+  // Same task-only-dueAt-doesn't-apply-here shape check -- reuses
+  // todoInputSchema's event-requires-startAt-and-endAt rule per item, not
+  // just once for the whole batch.
+  const result = todoBatchCreateSchema.safeParse({
+    items: [
+      batchItem(),
+      batchItem({ input: { ...taskInput(), entryKind: 'event', timeBucket: 'morning' } }),
+    ],
+  })
+  assert(!result.success)
+})
+
+Deno.test('todoBatchCreateSchema rejects an unrecognized top-level field (strict)', () => {
+  const result = todoBatchCreateSchema.safeParse({
+    items: [batchItem()],
+    idempotencyKey: crypto.randomUUID(),
+  })
+  assert(!result.success)
 })

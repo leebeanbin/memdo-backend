@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   apiError,
+  type ErrorCode,
   normalizeZodIssues,
   POSTGRES_FOREIGN_KEY_VIOLATION,
   POSTGRES_UNIQUE_VIOLATION,
@@ -15,6 +16,7 @@ import {
   decodeTodoCursor,
   encodeTodoCursor,
   fetchCategoriesByIds,
+  todoBatchCreateSchema,
   todoDeleteSchema,
   todoDto,
   todoInputSchema,
@@ -62,6 +64,124 @@ function pushableTodo(row: Record<string, unknown>): PushableTodo {
     location_name: row.location_name as string | null,
     reminder_offsets_minutes: (row.reminder_offsets_minutes as number[] | null) ?? [],
     source: row.source as string,
+  }
+}
+
+/** A3-4/A3-5: one item's result from POST /todos/batch -- always carries
+ * `idempotencyKey` back so the client can match a result to the item it
+ * submitted without relying on array order. Distinct from the top-level
+ * error envelope (errorEnvelope/apiError) since this rides *inside* a 200
+ * response alongside N-1 other items' results -- a single failed item must
+ * never turn the whole response into an HTTP error status, or every other
+ * item's real success would be thrown away by a client that reads a
+ * non-2xx as "nothing happened" (the exact partial-success/failure
+ * semantics this issue exists to define). */
+type TodoBatchItemResult =
+  | { idempotencyKey: string; ok: true; todo: ReturnType<typeof todoDto> }
+  | { idempotencyKey: string; ok: false; code: ErrorCode; message: string }
+
+/** Creates exactly one item for POST /todos/batch, reusing the same insert
+ * shape (todoInsert) and FK/unique-violation classification the single-
+ * item POST handler below uses -- deliberately NOT the materialize-on-edit
+ * path that handler also covers (mirror-row consumption): every item here
+ * comes from an Agent-proposed batch (A3-1), which only ever creates
+ * genuinely new items, never materializes an existing Google-mirrored row.
+ * Never throws -- every failure mode classifies into a TodoBatchItemResult
+ * instead, so one item's failure can't take the rest of the loop down with
+ * it (A3-2/A3-4's "one bad item never blocks the others" contract, at
+ * save time instead of stage time). */
+async function createOneBatchTodo(
+  supabase: any,
+  userId: string,
+  currentRequestId: string,
+  idempotencyKey: string,
+  input: ReturnType<typeof todoInputSchema.parse>,
+): Promise<TodoBatchItemResult> {
+  const hash = await sha256(input)
+  const { data, error } = await supabase
+    .from('todos')
+    .insert(todoInsert(input, userId, idempotencyKey, hash))
+    .select(todoSelect)
+    .single()
+
+  if (!error) {
+    // Best-effort Google push, same as a normal (non-materialize) single
+    // create below -- never let this fail an already-committed insert.
+    try {
+      const pushParams = {
+        userId,
+        todoId: data.id as string,
+        operation: 'create' as const,
+        todo: pushableTodo(data),
+      }
+      const connection = await enqueueGooglePush(supabase, pushParams)
+      if (connection) {
+        EdgeRuntime.waitUntil(pushGoogleEventInline(connection, pushParams))
+      }
+    } catch (pushError) {
+      console.error(
+        JSON.stringify({
+          requestId: currentRequestId,
+          operation: 'todos.batch_create.enqueue_google_push',
+          todoId: data.id,
+          error: serializeError(pushError),
+        }),
+      )
+    }
+    const categories = await fetchCategoriesByIds(supabase, [data.category_id as string | null])
+    return {
+      idempotencyKey,
+      ok: true,
+      todo: todoDto(data, categories.get(data.category_id as string) ?? null),
+    }
+  }
+
+  if (error.code === POSTGRES_FOREIGN_KEY_VIOLATION) {
+    const message = error.message?.includes('todos_calendar_user_fkey')
+      ? '연결할 캘린더를 찾을 수 없습니다.'
+      : error.message?.includes('todos_category_user_fkey')
+      ? '연결할 카테고리를 찾을 수 없습니다.'
+      : '연결할 반복 규칙을 찾을 수 없습니다.'
+    return { idempotencyKey, ok: false, code: 'INVALID_REQUEST', message }
+  }
+
+  if (error.code !== POSTGRES_UNIQUE_VIOLATION) {
+    console.error(
+      JSON.stringify({
+        requestId: currentRequestId,
+        operation: 'todos.batch_create.insert',
+        error: serializeError(error),
+      }),
+    )
+    return { idempotencyKey, ok: false, code: 'INTERNAL_ERROR', message: '저장하지 못했어요.' }
+  }
+
+  // Unique violation on `id` -- an idempotency-key replay (this exact item
+  // already succeeded on an earlier attempt of this batch), same as the
+  // single-item create's own replay handling below.
+  const existing = await supabase.from('todos').select(todoSelect).eq('id', idempotencyKey)
+    .maybeSingle()
+  if (existing.error) {
+    return { idempotencyKey, ok: false, code: 'INTERNAL_ERROR', message: '저장하지 못했어요.' }
+  }
+  if (!existing.data || existing.data.creation_request_hash !== hash) {
+    return {
+      idempotencyKey,
+      ok: false,
+      code: 'IDEMPOTENCY_CONFLICT',
+      message: '같은 요청 키가 다른 일정에 사용되었습니다.',
+    }
+  }
+  const existingCategories = await fetchCategoriesByIds(supabase, [
+    existing.data.category_id as string | null,
+  ])
+  return {
+    idempotencyKey,
+    ok: true,
+    todo: todoDto(
+      existing.data,
+      existingCategories.get(existing.data.category_id as string) ?? null,
+    ),
   }
 }
 
@@ -405,6 +525,44 @@ export default {
               currentCategories.get(current.data.category_id as string) ?? null,
             ),
           },
+        )
+      }
+
+      // A3-4/A3-5: batch create, checked BEFORE the single-item branch below
+      // (itemId === 'batch' also satisfies that branch's own !hasItemPath
+      // condition, since 'batch' isn't a UUID -- this must come first).
+      if (request.method === 'POST' && itemId === 'batch') {
+        const parsed = todoBatchCreateSchema.safeParse(
+          await request.json().catch(() => undefined),
+        )
+        if (!parsed.success) {
+          return apiError('INVALID_REQUEST', '일정 목록을 확인해 주세요.', 400, currentRequestId, {
+            issues: normalizeZodIssues(parsed.error.issues),
+          })
+        }
+
+        // Sequential, not Promise.all -- a shared idempotencyKey collision
+        // between two items in the SAME request (a client bug, not a real
+        // retry scenario) must resolve deterministically rather than racing
+        // two concurrent inserts against the same row id.
+        const results: TodoBatchItemResult[] = []
+        for (const item of parsed.data.items) {
+          results.push(
+            await createOneBatchTodo(
+              context.supabase,
+              context.userClaims!.id,
+              currentRequestId,
+              item.idempotencyKey,
+              item.input,
+            ),
+          )
+        }
+        const succeededCount = results.filter((r) => r.ok).length
+        return success(
+          { items: results, succeededCount, failedCount: results.length - succeededCount },
+          200,
+          'todos.batch_create',
+          succeededCount,
         )
       }
 

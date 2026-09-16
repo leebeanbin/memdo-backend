@@ -83,6 +83,23 @@ export const todoInputSchema = z.object({
   }
 })
 
+// A3-4/A3-5: POST /todos/batch -- creates up to 10 items in one request,
+// reusing this repo's existing Idempotency-Key convention (a client-
+// generated UUID that becomes the new row's own id, a unique-violation
+// replay means "already created") rather than inventing a new one. Applied
+// PER ITEM instead of once for the whole call -- a single header can't
+// describe N independent creates, but N of the exact same per-item
+// mechanism composes cleanly, and a retried batch (same array) naturally
+// replays every already-succeeded item the same way a retried single
+// create already does. Capped at 10, matching propose_schedule_batch's own
+// cap (A3-1) -- one ceiling across the whole batch-create feature.
+export const todoBatchCreateSchema = z.object({
+  items: z.array(z.object({
+    idempotencyKey: z.uuid(),
+    input: todoInputSchema,
+  })).min(1).max(10),
+}).strict()
+
 const todoStatusEnum = z.enum([
   'planned',
   'in_progress',
