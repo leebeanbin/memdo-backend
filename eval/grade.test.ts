@@ -351,3 +351,48 @@ Deno.test('PROPOSE_SCHEDULE expected, array field absent from actual args: fail'
   )
   assertEquals(result.verdict, 'fail')
 })
+
+// ── A3-5: PROPOSE_SCHEDULE_BATCH -- no search-first requirement (a batch of
+// NEW items has nothing existing to search for, same as PROPOSE_SCHEDULE). ──
+
+Deno.test('PROPOSE_SCHEDULE_BATCH expected, called with no search first: pass', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE_BATCH', expected: {} },
+    { dispatchedTools: [call('propose_schedule_batch', { items: [{ title: '미용실' }] })] },
+  )
+  assertEquals(result.verdict, 'pass')
+})
+
+Deno.test('PROPOSE_SCHEDULE_BATCH expected, propose_schedule fires instead: fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE_BATCH', expected: {} },
+    { dispatchedTools: [call('propose_schedule', { title: '미용실' })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('PROPOSE_SCHEDULE_BATCH expected, no tool called: fail', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE_BATCH', expected: {} },
+    { dispatchedTools: [] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('PROPOSE_SCHEDULE expected (single item), but propose_schedule_batch fires instead: fail (unexpected mutation)', () => {
+  // The reverse mismatch -- a case that expects the single-item tool must
+  // not silently pass just because SOME create-shaped proposal happened.
+  const result = gradeCase(
+    { expectedBehavior: 'PROPOSE_SCHEDULE', expected: {} },
+    { dispatchedTools: [call('propose_schedule_batch', { items: [{ title: '미용실' }] })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})
+
+Deno.test('SEARCH_SCHEDULES expected, but propose_schedule_batch fires instead: fail (unexpected mutation)', () => {
+  const result = gradeCase(
+    { expectedBehavior: 'SEARCH_SCHEDULES', expected: {} },
+    { dispatchedTools: [call('propose_schedule_batch', { items: [{ title: '미용실' }] })] },
+  )
+  assertEquals(result.verdict, 'fail')
+})

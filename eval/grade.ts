@@ -21,6 +21,11 @@ export type EvalFixture = {
 
 const EXPECTED_TOOL_NAME: Record<string, string | null> = {
   PROPOSE_SCHEDULE: AGENT_TOOL_NAMES.proposeSchedule,
+  // A3-5: batch-create, same no-search-first contract as PROPOSE_SCHEDULE
+  // (not requiresSearchFirst below -- that's only PROPOSE_SCHEDULE_UPDATE/
+  // PROPOSE_SCHEDULE_EDIT, which target an EXISTING item that has to be
+  // found first; a batch of NEW items has nothing to search for).
+  PROPOSE_SCHEDULE_BATCH: AGENT_TOOL_NAMES.proposeScheduleBatch,
   PROPOSE_SCHEDULE_UPDATE: AGENT_TOOL_NAMES.proposeScheduleUpdate,
   // A2-5: field-level edit on an existing item -- same "search first,
   // never guess an id" contract as PROPOSE_SCHEDULE_UPDATE, see
@@ -76,6 +81,7 @@ function argsMismatches(
  * untested speculation. */
 const MUTATION_PROPOSAL_TOOLS = new Set<string>([
   AGENT_TOOL_NAMES.proposeSchedule,
+  AGENT_TOOL_NAMES.proposeScheduleBatch,
   AGENT_TOOL_NAMES.proposeScheduleUpdate,
   AGENT_TOOL_NAMES.proposeScheduleEdit,
 ])
